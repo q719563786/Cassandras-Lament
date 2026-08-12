@@ -40,6 +40,10 @@ class Response:
         return False
 
 
+def public_resolver(host, port, type):
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+
 class ExternalSourceTests(unittest.TestCase):
     def test_rss_and_atom_are_normalized_to_the_same_item_contract(self):
         rss = parse_feed(RSS, "S-rss", "Policy feed", "https://example.com/rss")
@@ -97,7 +101,12 @@ class ExternalSourceTests(unittest.TestCase):
             return Response(b"x" * 9)
 
         with self.assertRaisesRegex(FetchError, "响应超过") as raised:
-            fetch_bytes("https://example.com/feed", opener=opener, max_bytes=8)
+            fetch_bytes(
+                "https://example.com/feed",
+                opener=opener,
+                max_bytes=8,
+                resolver=public_resolver,
+            )
 
         self.assertEqual(raised.exception.error_type, "too_large")
 
@@ -106,7 +115,12 @@ class ExternalSourceTests(unittest.TestCase):
             raise socket.timeout("slow")
 
         with self.assertRaises(FetchError) as raised:
-            fetch_bytes("https://example.com/feed", opener=opener, timeout=1)
+            fetch_bytes(
+                "https://example.com/feed",
+                opener=opener,
+                timeout=1,
+                resolver=public_resolver,
+            )
 
         self.assertEqual(raised.exception.error_type, "timeout")
 
