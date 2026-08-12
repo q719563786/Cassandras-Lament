@@ -6,8 +6,10 @@ const runButton = document.querySelector('#run-cognition');
 const connection = document.querySelector('#connection');
 const unreadBadge = document.querySelector('#header-unread');
 const toast = document.querySelector('#toast');
+const tutorialRoot = document.querySelector('#tutorial-root');
 const UI = window.YuanJianUI;
 const RiskUI = window.YuanJianRiskUI;
+const TUTORIAL_VERSION = '0.9';
 
 const state = {
   view: 'today', metric: 'all',
@@ -121,6 +123,45 @@ function riskCard(item, index) {
     <div class="risk-footer"><span><strong>最迟：</strong>${escapeHtml(item.time_window)}</span><span class="risk-level">风险：${escapeHtml(item.risk_label || item.risk_level)}</span></div>
     <div class="row-actions"><button class="button risk-evidence" type="button" data-id="${escapeHtml(item.cluster_id)}">查看原因</button></div>
   </article>`;
+}
+
+function tutorialStorage() {
+  try { return window.localStorage; }
+  catch (_) { return {getItem: () => null, setItem: () => {}}; }
+}
+
+function closeTutorial() {
+  tutorialRoot.hidden = true;
+  tutorialRoot.innerHTML = '';
+}
+
+function showTutorial(startIndex = 0) {
+  const steps = RiskUI.tutorialSteps();
+  const index = Math.max(0, Math.min(Number(startIndex) || 0, steps.length - 1));
+  const step = steps[index];
+  const last = index === steps.length - 1;
+  tutorialRoot.hidden = false;
+  tutorialRoot.innerHTML = `<div class="tutorial-backdrop"><section class="tutorial-dialog" role="dialog" aria-modal="true" aria-labelledby="tutorial-title">
+    <span class="tutorial-progress">第 ${index + 1} 步，共 ${steps.length} 步</span>
+    <h2 id="tutorial-title">${escapeHtml(step.title)}</h2>
+    <p>${escapeHtml(step.body)}</p>
+    <div class="tutorial-picture tutorial-picture-${index + 1}" aria-hidden="true"><span>${index === 0 ? '行动首页' : index === 1 ? '告诉远见' : '托盘监控'}</span></div>
+    <div class="tutorial-actions"><button class="button tutorial-skip" type="button">暂时跳过</button><button class="button button-primary tutorial-next" type="button">${last ? '开始使用' : '下一步'}</button></div>
+  </section></div>`;
+  document.querySelector('.tutorial-skip').addEventListener('click', () => {
+    RiskUI.rememberTutorial(tutorialStorage(), TUTORIAL_VERSION);
+    closeTutorial();
+  });
+  document.querySelector('.tutorial-next').addEventListener('click', () => {
+    if (!last) return showTutorial(index + 1);
+    RiskUI.rememberTutorial(tutorialStorage(), TUTORIAL_VERSION);
+    closeTutorial();
+  });
+  document.querySelector('.tutorial-next').focus();
+}
+
+function maybeShowTutorial() {
+  if (!RiskUI.tutorialSeen(tutorialStorage(), TUTORIAL_VERSION)) showTutorial(0);
 }
 
 async function renderRiskHome(runNotice = null) {
@@ -266,7 +307,9 @@ async function renderSystem(subview = state.system) {
   state.view = 'system'; state.system = subview;
   setHeader('系统设置', '低频配置集中在这里，日常页面不再被参数淹没');
   showLoading();
-  const items = [['settings','后台监控'],['intelligence','情报后台'],['notifications','通知中心'],['knowledge','知识库']];
+  const items = [['settings','后台监控'],['profile','我的资料'],['guide','使用教程'],['notifications','通知中心'],['intelligence','情报后台'],['knowledge','知识库']];
+  if (subview === 'profile') return renderProfileSettings(items);
+  if (subview === 'guide') return renderGuideSettings(items);
   if (subview === 'intelligence') return renderIntelligence(items);
   if (subview === 'notifications') return renderNotificationCenter(items);
   if (subview === 'knowledge') return renderKnowledge(items);
@@ -276,6 +319,22 @@ async function renderSystem(subview = state.system) {
   bindSubview('.subnav-button', value => renderSystem(value));
   document.querySelector('#startup-toggle')?.addEventListener('click', async event => { await withBusy(event.currentTarget, '正在更新…', () => api('/api/settings/startup', {method:'POST', body:JSON.stringify({enabled:!startup.installed})})); showToast('登录启动设置已更新'); await renderSystem(); });
   document.querySelector('#ai-settings').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.target); const values = {enabled:form.get('enabled') === 'on', endpoint:form.get('endpoint'), model:form.get('model')}; if (form.get('token')) values.token = form.get('token'); await withBusy(event.submitter, '正在保存…', () => api('/api/settings/ai', {method:'POST', body:JSON.stringify(values)})); showToast('AI 设置已保存'); await renderSystem(); });
+}
+
+async function renderProfileSettings(navItems) {
+  setHeader('我的资料', '系统只在本机用这些资料判断什么与你有关');
+  const data = await api('/api/interests');
+  const labels = {asset:'资产',liability:'负债',income:'收入',expense:'支出',cashflow:'现金流',protection:'保障',family:'家庭',health:'健康',work:'工作'};
+  content.innerHTML = `${subnav('系统设置', 'profile', navItems)}<section class="panel"><h2>系统正在保护的事项</h2><p class="panel-note">这些内容只保存在本机。日常有变化时，请从“告诉远见”入口直接写事实。</p><div class="summary-grid">${data.objects.map(item => `<article class="summary-card"><span>${escapeHtml(labels[item.category] || item.category)}</span><h3>${escapeHtml(item.name)}</h3><p>重要程度 ${escapeHtml(item.importance)}/5 · ${escapeHtml(UI.statusLabel(item.status))}</p></article>`).join('') || '<div class="state-panel"><h3>还没有个人资料</h3><p>系统仍可监控公开信息，但个人判断会比较粗略。</p></div>'}</div></section>`;
+  bindSubview('.subnav-button', value => renderSystem(value));
+}
+
+async function renderGuideSettings(navItems) {
+  setHeader('使用教程', '只记住三个入口就够了');
+  const steps = RiskUI.tutorialSteps();
+  content.innerHTML = `${subnav('系统设置', 'guide', navItems)}<section class="panel guide-panel"><h2>远见怎么用</h2><div class="guide-steps">${steps.map((step, index) => `<article><span>${index + 1}</span><div><h3>${escapeHtml(step.title)}</h3><p>${escapeHtml(step.body)}</p></div></article>`).join('')}</div><button id="reopen-tutorial" class="button button-primary" type="button">重新查看使用教程</button></section>`;
+  bindSubview('.subnav-button', value => renderSystem(value));
+  document.querySelector('#reopen-tutorial').addEventListener('click', () => showTutorial(0));
 }
 
 async function renderIntelligence(navItems, mode = 'summary') {
@@ -377,4 +436,4 @@ document.querySelector('#shutdown').addEventListener('click', async () => {
   catch (error) { showToast(error.message, 'error'); }
 });
 
-renderRiskHome().catch(showPageError);
+renderRiskHome().then(maybeShowTutorial).catch(showPageError);

@@ -189,6 +189,22 @@ summary { cursor: pointer; color: var(--green); }
 .evidence-list span { display: block; color: var(--muted); font-size: 12px; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--soft); padding: 13px; border-radius: 9px; }
 
+.guide-steps { display: grid; gap: 10px; margin: 17px 0; }
+.guide-steps article { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 12px; align-items: start; border-radius: 11px; background: var(--soft); padding: 13px; }
+.guide-steps article > span { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: var(--green); color: #fff; font-weight: 700; }
+.guide-steps h3 { margin: 2px 0 4px; }
+.guide-steps p { margin: 0; color: var(--muted); }
+.tutorial-backdrop { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 20px; background: rgba(8, 24, 19, .68); backdrop-filter: blur(3px); }
+.tutorial-dialog { width: min(520px, 100%); border-radius: 20px; background: var(--panel); padding: 26px; box-shadow: 0 24px 70px rgba(0,0,0,.28); }
+.tutorial-progress { color: var(--green); font-size: 13px; font-weight: 700; }
+.tutorial-dialog h2 { margin: 10px 0 8px; font-size: 25px; }
+.tutorial-dialog > p { margin: 0; color: var(--muted); }
+.tutorial-picture { display: grid; place-items: center; min-height: 112px; margin: 19px 0; border: 1px solid var(--line); border-radius: 14px; background: linear-gradient(145deg, var(--green-soft), #f8fbf9); }
+.tutorial-picture span { border-radius: 11px; background: var(--green-dark); color: #fff; padding: 13px 22px; font-size: 18px; font-weight: 700; }
+.tutorial-picture-2 span { background: var(--green); }
+.tutorial-picture-3 span { background: #48665a; }
+.tutorial-actions { display: flex; justify-content: space-between; gap: 10px; }
+
 .toast { position: fixed; right: 22px; bottom: 22px; z-index: 10; max-width: min(390px, calc(100vw - 32px)); padding: 12px 15px; border-radius: 10px; background: var(--green-dark); color: #fff; box-shadow: 0 12px 30px rgba(0,0,0,.18); }
 .toast.error { background: #8f3432; }
 .closed { min-height: 100vh; display: grid; place-items: center; padding: 20px; }
@@ -227,6 +243,7 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--soft); p
   .pagination, .notification-row, .setting-row { align-items: stretch; flex-direction: column; }
   .pagination > div, .notification-row .row-actions { width: 100%; }
   .pagination .button, .notification-row .button { flex: 1; }
+  .tutorial-dialog { padding: 21px; }
 }
 
 @media (max-width: 420px) {

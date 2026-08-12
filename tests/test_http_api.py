@@ -262,6 +262,20 @@ class HttpApiTests(unittest.TestCase):
         self.assertIn("告诉远见并判断", script)
         self.assertIn("RiskUI.inputResult", script)
 
+    def test_first_open_tutorial_and_settings_reopen_are_built_into_the_app(self):
+        with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:
+            body = response.read().decode("utf-8")
+        with urllib.request.urlopen(self.base_url + "/app.js", timeout=2) as response:
+            script = response.read().decode("utf-8")
+
+        self.assertIn('id="tutorial-root"', body)
+        self.assertIn("const TUTORIAL_VERSION = '0.9'", script)
+        self.assertIn("function showTutorial(startIndex = 0)", script)
+        self.assertIn("function maybeShowTutorial()", script)
+        self.assertIn('id="reopen-tutorial"', script)
+        self.assertIn("我的资料", script)
+        self.assertIn("使用教程", script)
+
     def test_home_page_loads_the_cognition_feedback_behavior(self):
         with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:
             body = response.read().decode("utf-8")
