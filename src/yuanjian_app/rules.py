@@ -8,6 +8,25 @@ DOMAIN_KEYWORDS = {
     "policy": ("政策", "税", "平台规则", "监管"),
 }
 
+RISK_MARKERS = (
+    "未到账", "没到账", "不到账", "延迟", "少发", "扣发", "冻结", "欠款",
+    "逾期", "支出", "支付", "费用", "新增贷款", "还款压力", "停工", "失业",
+    "手术", "住院", "受伤", "清创",
+)
+
+BENEFIT_MARKERS = (
+    "到账", "收到", "收款", "退款", "退费", "报销到账", "收入增加", "加薪",
+    "结清", "还清",
+)
+
+
+def _direction(text):
+    if any(marker in text for marker in RISK_MARKERS):
+        return "risk"
+    if any(marker in text for marker in BENEFIT_MARKERS):
+        return "benefit"
+    return "neutral"
+
 
 def create_candidate(text, occurred_at):
     """Create a conservative offline classification without pretending to be AI."""
@@ -25,6 +44,7 @@ def create_candidate(text, occurred_at):
         "occurred_at": occurred_at,
         "domains": domains or ["general"],
         "amounts": amounts,
+        "direction": _direction(normalized),
         "requires_human_confirmation": high_risk,
         "can_register_forecast": any(marker in normalized for marker in future_markers),
         "confidence": "low",

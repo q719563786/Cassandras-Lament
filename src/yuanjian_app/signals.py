@@ -97,6 +97,8 @@ class SignalService:
 
     @staticmethod
     def _alert_level(text, candidate):
+        if candidate.get("direction") == "benefit":
+            return "L1"
         urgent = any(word in text for word in ("立即", "马上", "紧急", "明天", "今天", "截止", "逾期", "停工"))
         high_domain = bool({"health", "cashflow"}.intersection(candidate["domains"]))
         large_amount = max(candidate["amounts"], default=0) >= 10000
@@ -125,6 +127,8 @@ class SignalService:
 
     @staticmethod
     def _action(alert_level, candidate):
+        if candidate.get("direction") == "benefit" and "cashflow" in candidate["domains"]:
+            return "核对金额和到账记录，优先补足现金缓冲，不要立刻增加非必要支出。"
         if alert_level == "L4":
             return "立即核实事实、金额和最晚处理时间，并准备可撤回的应对方案。"
         if alert_level == "L3":
