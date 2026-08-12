@@ -206,14 +206,14 @@ class HttpApiTests(unittest.TestCase):
         with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:
             body = response.read().decode("utf-8")
 
-        self.assertIn("风险首页", body)
+        self.assertIn("行动首页", body)
         self.assertNotIn("https://", body)
 
     def test_home_page_exposes_formal_forecast_and_safe_exit_controls(self):
         with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:
             body = response.read().decode("utf-8")
 
-        self.assertIn("我的情况", body)
+        self.assertIn("告诉远见", body)
         self.assertNotIn('data-view="create"', body)
         self.assertIn("安全退出", body)
 
@@ -223,11 +223,12 @@ class HttpApiTests(unittest.TestCase):
 
         self.assertEqual(body.count('class="nav primary-nav'), 3)
         self.assertIn('data-view="today"', body)
-        self.assertIn('data-view="benefit"', body)
+        self.assertIn('data-view="input"', body)
         self.assertIn('data-view="system"', body)
-        self.assertIn("风险首页", body)
-        self.assertIn("我的情况", body)
+        self.assertIn("行动首页", body)
+        self.assertIn("告诉远见", body)
         self.assertIn("设置", body)
+        self.assertNotIn('data-view="benefit"', body)
         self.assertNotIn("外部世界", body)
         self.assertNotIn("来源健康状态", body)
         self.assertNotIn("关注规则", body)
@@ -236,7 +237,7 @@ class HttpApiTests(unittest.TestCase):
         with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:
             body = response.read().decode("utf-8")
 
-        self.assertIn("现在有没有风险", body)
+        self.assertIn("现在该做什么", body)
         self.assertIn('data-view="today"', body)
         self.assertIn("后台监控", body)
         self.assertNotIn('class="metric-button', body)
@@ -248,6 +249,18 @@ class HttpApiTests(unittest.TestCase):
             script = response.read().decode("utf-8")
         self.assertIn("renderRiskHome().catch(showPageError)", script)
         self.assertIn("/api/risk-dashboard", script)
+
+    def test_personal_behavior_input_is_one_step_from_the_main_navigation(self):
+        with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:
+            body = response.read().decode("utf-8")
+        with urllib.request.urlopen(self.base_url + "/app.js", timeout=2) as response:
+            script = response.read().decode("utf-8")
+
+        self.assertIn('data-view="input"', body)
+        self.assertIn("async function renderInput()", script)
+        self.assertIn("发生了什么，或者你做了什么？", script)
+        self.assertIn("告诉远见并判断", script)
+        self.assertIn("RiskUI.inputResult", script)
 
     def test_home_page_loads_the_cognition_feedback_behavior(self):
         with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:

@@ -113,33 +113,68 @@ function bindPaging(page, render) {
   }));
 }
 
-function riskCard(item) {
-  return `<article class="risk-card risk-${escapeHtml(item.mode)}">
-    <div class="risk-card-head"><span class="risk-level">${escapeHtml(item.risk_level)}</span><span>${escapeHtml(item.interest_name)}</span></div>
-    <h2>${escapeHtml(item.title)}</h2>
-    <div class="risk-facts"><span><strong>时间</strong>${escapeHtml(item.time_window)}</span><span><strong>判断把握</strong>${escapeHtml(item.confidence)}</span><span><strong>变化</strong>${escapeHtml(item.direction)}</span></div>
-    <div class="risk-action"><strong>现在怎么做</strong><p>${escapeHtml(item.action)}</p></div>
-    <div class="row-actions"><button class="button button-primary risk-open" type="button" data-id="${escapeHtml(item.cluster_id)}">查看怎么做</button><button class="button risk-evidence" type="button" data-id="${escapeHtml(item.cluster_id)}">为什么这样判断</button></div>
+function riskCard(item, index) {
+  return `<article class="risk-card risk-${escapeHtml(item.mode)} ${index === 0 ? 'risk-first' : ''}">
+    <div class="risk-card-head"><span>${index === 0 ? '最先做' : '接下来'}</span><span>${escapeHtml(item.interest_name)}</span></div>
+    <div class="risk-advice"><strong>建议</strong><h2>${escapeHtml(item.advice || item.action)}</h2></div>
+    <p class="risk-reason"><strong>为什么：</strong>${escapeHtml(item.reason || item.title)}</p>
+    <div class="risk-footer"><span><strong>最迟：</strong>${escapeHtml(item.time_window)}</span><span class="risk-level">风险：${escapeHtml(item.risk_label || item.risk_level)}</span></div>
+    <div class="row-actions"><button class="button risk-evidence" type="button" data-id="${escapeHtml(item.cluster_id)}">查看原因</button></div>
   </article>`;
 }
 
 async function renderRiskHome(runNotice = null) {
   state.view = 'today';
-  setHeader('现在有没有风险', '系统已经替你过滤新闻，只保留结论和行动', true);
+  setHeader('现在该做什么', '直接看建议；需要时再看原因', true);
   showLoading('正在整理你需要知道的风险…');
   const [status, dashboard] = await Promise.all([
     api('/api/cognition/status'), api('/api/risk-dashboard')
   ]);
   updateChrome(status);
   const risks = RiskUI.visibleRisks(dashboard.items);
-  const counts = RiskUI.counts(dashboard).map(item => `<article class="risk-count"><strong>${escapeHtml(item.value)}</strong><span>${escapeHtml(item.label)}</span></article>`).join('');
   content.innerHTML = `
     ${runNotice ? `<div class="run-notice ${escapeHtml(runNotice.kind)}">${escapeHtml(runNotice.text)}</div>` : ''}
-    <section class="risk-overview state-${escapeHtml(dashboard.state)}"><span>${escapeHtml(RiskUI.overviewLabel(dashboard.state))}</span><h2>${escapeHtml(dashboard.summary)}</h2></section>
-    <section class="risk-counts" aria-label="风险概览">${counts}</section>
-    <section class="risk-list" aria-label="需要关注的风险">${risks.map(riskCard).join('') || '<div class="state-panel calm-state"><h2>你现在不需要处理什么</h2><p>系统会继续在后台监控，出现真正影响你的变化时再提醒。</p></div>'}</section>`;
-  document.querySelectorAll('.risk-open').forEach(button => button.addEventListener('click', () => showClusterDetail(button.dataset.id, false).catch(showPageError)));
+    <section class="risk-overview state-${escapeHtml(dashboard.state)}"><span>${escapeHtml(RiskUI.overviewLabel(dashboard.state))}</span><h2>${escapeHtml(dashboard.summary)}</h2><button id="tell-yuanjian" class="button button-primary" type="button">告诉远见新情况</button></section>
+    <section class="risk-list" aria-label="行动建议">${risks.map(riskCard).join('') || '<div class="state-panel calm-state"><h2>目前没有需要你处理的高风险</h2><p>系统会继续在后台监控；发生新情况时，你也可以主动告诉远见。</p></div>'}</section>`;
+  document.querySelector('#tell-yuanjian')?.addEventListener('click', () => setView('input').catch(showPageError));
   document.querySelectorAll('.risk-evidence').forEach(button => button.addEventListener('click', () => showClusterDetail(button.dataset.id, true).catch(showPageError)));
+}
+
+async function renderInput() {
+  state.view = 'input';
+  setHeader('告诉远见', '写发生的事实或你的行为，不需要先分析');
+  content.innerHTML = `<section class="input-layout">
+    <form id="event-form" class="panel input-card">
+      <label for="event-text"><strong>发生了什么，或者你做了什么？</strong></label>
+      <textarea id="event-text" name="text" required rows="7" placeholder="例如：今天工资到账 5000 元"></textarea>
+      <div class="input-examples" aria-label="输入例子">
+        <button class="example-chip" type="button" data-example="今天工资到账 5000 元">工资到账</button>
+        <button class="example-chip" type="button" data-example="今天看病自付 800 元，票据已经留好">医疗支出</button>
+        <button class="example-chip" type="button" data-example="下周工作安排发生变化，收入可能减少">工作变化</button>
+      </div>
+      <details class="optional-field"><summary>补充发生时间（选填）</summary><label>发生时间<input name="occurred_at" type="datetime-local"></label></details>
+      <button class="button button-primary input-submit" type="submit">告诉远见并判断</button>
+      <div id="event-result" aria-live="polite"></div>
+    </form>
+    <aside class="input-help"><strong>怎么写都可以</strong><p>只写你知道的事实。钱、健康、工作、家庭计划，或者你刚做的决定都能写。</p><p>系统会保存到本机，并给出大致行动建议。</p></aside>
+  </section>`;
+  document.querySelectorAll('.example-chip').forEach(button => button.addEventListener('click', () => {
+    document.querySelector('#event-text').value = button.dataset.example;
+    document.querySelector('#event-text').focus();
+  }));
+  document.querySelector('#event-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const resultNode = document.querySelector('#event-result');
+    const values = Object.fromEntries(new FormData(event.target));
+    if (!values.occurred_at) delete values.occurred_at;
+    try {
+      const data = await withBusy(event.submitter, '正在判断…', () => api('/api/events', {method:'POST', body:JSON.stringify(values)}));
+      const result = RiskUI.inputResult(data.signal);
+      resultNode.innerHTML = `<section class="input-result"><span>远见建议</span><h2>${escapeHtml(result.advice)}</h2><p>风险：<strong>${escapeHtml(result.risk)}</strong></p></section>`;
+    } catch (error) {
+      resultNode.innerHTML = `<div class="run-notice error">没有保存成功：${escapeHtml(error.message)}</div>`;
+    }
+  });
 }
 
 function externalRow(item) {
@@ -322,7 +357,7 @@ async function setView(view) {
   state.view = view;
   document.querySelectorAll('.primary-nav').forEach(button => button.classList.toggle('active', button.dataset.view === view));
   showLoading();
-  if (view === 'benefit') return renderBenefit();
+  if (view === 'input') return renderInput();
   if (view === 'system') return renderSystem();
   return renderRiskHome();
 }
