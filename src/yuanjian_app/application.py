@@ -175,6 +175,16 @@ def is_background_mode(argv, env):
     return "--background" in set(argv or ()) or env.get("YUANJIAN_BACKGROUND") == "1"
 
 
+def data_dir_from_arguments(argv):
+    arguments = list(argv or ())
+    if "--data-dir" not in arguments:
+        return None
+    index = arguments.index("--data-dir")
+    if index + 1 >= len(arguments) or arguments[index + 1].startswith("--"):
+        raise ValueError("--data-dir requires a directory path")
+    return arguments[index + 1]
+
+
 def _show_desktop_error(message):
     if os.name == "nt":
         import ctypes
@@ -186,12 +196,16 @@ def _show_desktop_error(message):
 
 def run_application(argv=None):
     """Resolve private paths and run the local application."""
-    paths = AppPaths.from_environment(os.environ)
-    paths.ensure_directories()
-    legacy = os.environ.get("YUANJIAN_LEGACY_DB")
     arguments = list(sys.argv[1:] if argv is None else argv)
-    background = is_background_mode(arguments, os.environ)
-    headless = is_headless_mode(os.environ)
+    environment = dict(os.environ)
+    data_dir = data_dir_from_arguments(arguments)
+    if data_dir:
+        environment["YUANJIAN_DATA_DIR"] = data_dir
+    paths = AppPaths.from_environment(environment)
+    paths.ensure_directories()
+    legacy = environment.get("YUANJIAN_LEGACY_DB")
+    background = is_background_mode(arguments, environment)
+    headless = is_headless_mode(environment)
     runtime_root = paths.root / "runtime"
     instance = SingleInstance(runtime_root / "yuanjian.lock")
     discovery = RuntimeDiscovery(runtime_root / "runtime.json")

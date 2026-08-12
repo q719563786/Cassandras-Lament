@@ -2,7 +2,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from yuanjian_app.application import Application, is_background_mode, is_headless_mode
+from yuanjian_app.application import (
+    Application,
+    data_dir_from_arguments,
+    is_background_mode,
+    is_headless_mode,
+)
 from yuanjian_app.http_api import resolve_static_root
 
 
@@ -34,6 +39,15 @@ class ApplicationTests(unittest.TestCase):
         self.assertTrue(is_background_mode(["--background"], {}))
         self.assertTrue(is_background_mode([], {"YUANJIAN_BACKGROUND": "1"}))
         self.assertFalse(is_background_mode([], {}))
+
+    def test_data_directory_argument_is_optional_and_requires_a_value(self):
+        self.assertIsNone(data_dir_from_arguments([]))
+        self.assertEqual(
+            data_dir_from_arguments(["--data-dir", "C:/temp/yuanjian-v09"]),
+            "C:/temp/yuanjian-v09",
+        )
+        with self.assertRaisesRegex(ValueError, "--data-dir"):
+            data_dir_from_arguments(["--data-dir"])
 
     def test_static_root_supports_source_and_frozen_layouts(self):
         module_file = Path("C:/project/yuanjian_app/http_api.py")
