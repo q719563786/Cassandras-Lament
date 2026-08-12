@@ -82,7 +82,37 @@ const items = [
   {cluster_id:'d', alert_level:'L3', mode:'watch', impact_score:.5},
   {cluster_id:'e', alert_level:'L3', mode:'watch', impact_score:.4}
 ];
-assert.deepEqual(ui.visibleRisks(items).map(item => item.cluster_id), ['a','b','watch','c','d']);
+assert.deepEqual(ui.visibleRisks(items).map(item => item.cluster_id), ['a','b','watch']);
+"""
+        )
+
+    def test_input_result_and_tutorial_state_use_plain_local_contracts(self):
+        self.run_risk_ui(
+            """
+assert.deepEqual(ui.inputResult({alert_level:'L4', recommended_action:'马上联系医院'}), {
+  advice:'马上联系医院', risk:'高风险'
+});
+assert.deepEqual(ui.inputResult({alert_level:'L3', recommended_action:'先保留现金'}), {
+  advice:'先保留现金', risk:'中风险'
+});
+assert.deepEqual(ui.inputResult({alert_level:'L2', recommended_action:''}), {
+  advice:'先记录事实，暂不做不可逆决定。', risk:'低风险'
+});
+const steps = ui.tutorialSteps();
+assert.deepEqual(steps.map(item => item.title), [
+  '先看行动首页', '把新情况告诉远见', '系统会继续盯着'
+]);
+const values = new Map();
+const storage = {
+  getItem:key => values.has(key) ? values.get(key) : null,
+  setItem:(key, value) => values.set(key, value)
+};
+assert.equal(ui.tutorialSeen(storage, '0.9'), false);
+assert.equal(ui.rememberTutorial(storage, '0.9'), true);
+assert.equal(ui.tutorialSeen(storage, '0.9'), true);
+const broken = {getItem:() => { throw new Error('blocked'); }, setItem:() => { throw new Error('blocked'); }};
+assert.equal(ui.tutorialSeen(broken, '0.9'), false);
+assert.equal(ui.rememberTutorial(broken, '0.9'), false);
 """
         )
 
