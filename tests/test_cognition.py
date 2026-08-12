@@ -232,7 +232,15 @@ class RiskDashboardTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def add_risk(self, number, alert_level, horizons, score=None, pending=False):
+    def add_risk(
+        self,
+        number,
+        alert_level,
+        horizons,
+        score=None,
+        pending=False,
+        recommended_action=None,
+    ):
         cluster_id = f"C-{number}"
         judgment_id = f"J-{number}"
         timestamp = f"2026-08-12T0{number}:00:00Z"
@@ -244,7 +252,8 @@ class RiskDashboardTests(unittest.TestCase):
             "down_triggers": ["政策撤回"],
         }
         candidate = {
-            "recommended_action": f"第{number}项行动：先保留必要现金",
+            "recommended_action": recommended_action
+            or f"第{number}项行动：先保留必要现金",
             "window_end": "2026-09-11",
         }
         with self.database.connect() as connection:
@@ -284,29 +293,48 @@ class RiskDashboardTests(unittest.TestCase):
                 )
         return cluster_id
 
-    def test_dashboard_filters_low_risk_prioritizes_action_and_limits_workload(self):
+    def test_dashboard_returns_three_action_first_plain_language_items(self):
         self.add_risk(1, "L2", ["7天内"])
         self.add_risk(2, "L3", ["30天内"], 0.65)
         self.add_risk(3, "L3", ["7天内"], 0.66)
         self.add_risk(4, "L4", ["30天内"], 0.90)
         self.add_risk(5, "L3", ["更长期"], 0.70)
-        self.add_risk(6, "L4", ["立即"], 0.95)
+        self.add_risk(
+            6,
+            "L4",
+            ["立即"],
+            0.95,
+            recommended_action="收集执行证据；人工确认后进入正式预测账本",
+        )
         self.add_risk(7, "L3", ["30天内"], 0.68)
 
         dashboard = self.controller.risk_dashboard(
-            [{"enabled": True, "last_status": "ok", "stale": False}], limit=5
+            [{"enabled": True, "last_status": "ok", "stale": False}], limit=9
         )
 
         self.assertEqual(dashboard["state"], "action")
         self.assertEqual(dashboard["counts"], {"action": 3, "watch": 3, "verifying": 0})
-        self.assertEqual(len(dashboard["items"]), 5)
-        self.assertEqual([item["cluster_id"] for item in dashboard["items"][:3]], ["C-6", "C-4", "C-3"])
+        self.assertEqual(len(dashboard["items"]), 3)
+        self.assertEqual([item["cluster_id"] for item in dashboard["items"]], ["C-6", "C-4", "C-3"])
         self.assertTrue(all(item["alert_level"] in {"L3", "L4"} for item in dashboard["items"]))
         self.assertTrue(all("原始新闻标题" not in item["title"] for item in dashboard["items"]))
-        self.assertEqual(dashboard["items"][0]["action"], "第6项行动：先保留必要现金")
-        labels = {item["cluster_id"]: item["risk_level"] for item in dashboard["items"]}
-        self.assertEqual(labels["C-3"], "需要行动")
-        self.assertEqual(labels["C-7"], "继续观察")
+        first = dashboard["items"][0]
+        self.assertEqual(first["interest_category"], "cashflow")
+        self.assertEqual(first["risk_label"], "高风险")
+        self.assertIn("保留现金", first["advice"])
+        self.assertNotIn("预测账本", first["advice"])
+        self.assertEqual(first["reason"], "第6项外部变化可能压缩可用资金")
+        self.assertEqual(dashboard["items"][2]["risk_label"], "中风险")
+
+    def test_dashboard_calls_thirty_day_l3_a_low_risk_watch(self):
+        self.add_risk(2, "L3", ["30天内"], 0.65)
+
+        dashboard = self.controller.risk_dashboard(
+            [{"enabled": True, "last_status": "ok", "stale": False}]
+        )
+
+        self.assertEqual(dashboard["items"][0]["mode"], "watch")
+        self.assertEqual(dashboard["items"][0]["risk_label"], "低风险")
 
     def test_dashboard_reports_verifying_and_never_calls_blind_monitoring_stable(self):
         self.add_risk(1, "L3", ["30天内"], pending=True)

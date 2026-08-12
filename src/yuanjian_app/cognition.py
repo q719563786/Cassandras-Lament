@@ -47,6 +47,25 @@ def _categories(title: str, summary: str) -> list[str]:
     return found or ["general"]
 
 
+def _personal_advice(category: str, recommended_action: str) -> str:
+    action = plain_text(recommended_action, 240)
+    internal_terms = ("正式预测账本", "收集执行证据", "人工确认")
+    if action and not any(term in action for term in internal_terms):
+        return action
+    category = str(category or "general").casefold()
+    if category in {"cashflow", "asset", "liability", "income", "expense", "finance"}:
+        return "先核对近期必须支付的金额和日期，暂缓非必要支出，保留现金。"
+    if category in {"health", "protection"}:
+        return "先确认费用、医保结算和保险材料并保留票据；身体异常及时就医。"
+    if category in {"work", "employment"}:
+        return "先确认收入、报销和工作安排是否变化，保留书面记录，暂不做不可逆决定。"
+    if category == "family":
+        return "先和家人确认最近 7 天的分工与必须事项，优先处理不能拖延的部分。"
+    if category == "safety":
+        return "先远离可能的危险并核对官方通知；紧急情况联系当地应急部门或报警。"
+    return "先核实正式来源和适用期限，暂缓不可逆决定，并按时间窗口复查。"
+
+
 class CognitionService:
     def __init__(self, database, now=lambda: datetime.now(timezone.utc)):
         self.database = database
@@ -596,9 +615,9 @@ class CognitionController:
             return "30 天内"
         return "更长期"
 
-    def risk_dashboard(self, source_states=None, limit=5):
+    def risk_dashboard(self, source_states=None, limit=3):
         """Project internal judgments into a small personal decision workload."""
-        limit = max(1, min(int(limit), 5))
+        limit = max(1, min(int(limit), 3))
         now = self.now().astimezone(timezone.utc)
         now_text = _iso(now)
         with self.database.connect() as connection:
@@ -607,7 +626,8 @@ class CognitionController:
             ).fetchone()[0]
             rows = connection.execute(
                 """
-                SELECT p.*,i.name AS interest_name,j.content_json,c.last_seen_at
+                SELECT p.*,i.name AS interest_name,i.category AS interest_category,
+                       j.content_json,c.last_seen_at
                 FROM personal_impacts p
                 JOIN event_clusters c ON c.cluster_id=p.cluster_id
                 JOIN judgments j ON j.judgment_id=p.judgment_id
@@ -651,11 +671,17 @@ class CognitionController:
                 "风险上升" if up and not down else "风险缓解" if down and not up else "没有明显变化"
             )
             interest_name = plain_text(row["interest_name"] or "已登记利益", 80)
+            interest_category = plain_text(row["interest_category"] or "general", 40)
             fact_summary = plain_text(
                 judgment.get("fact_summary") or "外部变化可能产生影响", 220
             )
-            action = plain_text(candidate.get("recommended_action"), 240) or (
-                "暂不做不可逆决定；按时间窗口复查。"
+            action = _personal_advice(
+                interest_category, candidate.get("recommended_action")
+            )
+            risk_label = (
+                "高风险"
+                if row["alert_level"] == "L4"
+                else "中风险" if mode == "action" else "低风险"
             )
             items.append(
                 {
@@ -664,11 +690,15 @@ class CognitionController:
                     "mode": mode,
                     "alert_level": row["alert_level"],
                     "risk_level": "需要行动" if mode == "action" else "继续观察",
+                    "risk_label": risk_label,
                     "interest_name": interest_name,
+                    "interest_category": interest_category,
                     "title": f"{interest_name}：{fact_summary}",
                     "time_window": time_window,
                     "confidence": confidence_label,
                     "action": action,
+                    "advice": action,
+                    "reason": fact_summary,
                     "direction": direction,
                     "decision_by": plain_text(candidate.get("window_end"), 32) or "按时间窗口复查",
                     "updated_at": row["updated_at"],
