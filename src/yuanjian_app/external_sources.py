@@ -99,7 +99,7 @@ def fetch_bytes(
     _validate_dns(urlparse(safe_url).hostname, resolver)
     request = urllib.request.Request(
         safe_url,
-        headers={"User-Agent": "YuanJian-Cognition/0.8 (+local personal research)"},
+        headers={"User-Agent": "YuanJian-Cognition/0.9 (+local personal research)"},
     )
     try:
         with opener(request, timeout=timeout) as response:
