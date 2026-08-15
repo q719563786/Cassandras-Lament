@@ -1,0 +1,60 @@
+/* 远见 v0.9 · 基础层 —— reset / body / CRT 扫描线+暗角 / 排版 / focus / reduced-motion 总闸 */
+
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+[hidden]{display:none !important} /* 防 class 的 display:flex 覆盖 UA hidden 语义 */
+
+html,body{height:100%}
+body{
+  background:var(--color-base);color:var(--color-text-primary);
+  font-family:var(--font-body);font-size:.875rem;line-height:1.7;
+  letter-spacing:.5px;-webkit-font-smoothing:antialiased;
+}
+
+/* CRT 扫描线 + 径向暗角：静态纹理（无 keyframes），reduced-motion 不降级（designer §4） */
+body::before{
+  content:'';position:fixed;inset:0;z-index:90;pointer-events:none;
+  background:repeating-linear-gradient(to bottom,var(--scanline) 0 1px,transparent 1px 3px);
+}
+body::after{
+  content:'';position:fixed;inset:0;z-index:91;pointer-events:none;
+  background:radial-gradient(ellipse at center,transparent 55%,var(--vignette) 100%);
+}
+
+h1,h2,h3,h4{font-family:var(--font-heading);font-weight:700;letter-spacing:.5px}
+h1{font-size:1.25rem}
+h2{font-size:1rem}
+h3{font-size:.875rem}
+a{color:var(--color-accent);text-decoration:none}
+a:hover{text-decoration:underline}
+code{font-family:var(--font-mono)}
+::selection{background:var(--color-accent-dim);color:var(--color-base)}
+
+:focus-visible{outline:1px solid var(--color-accent);outline-offset:2px}
+button{font-family:inherit;font-size:inherit;color:inherit;background:none;border:none;cursor:pointer}
+input,select,textarea{font-family:var(--font-mono);font-size:.875rem;color:var(--color-text-primary)}
+
+/* ===== 动画（全 opacity/transform，无弹跳缓动） ===== */
+@keyframes blink{0%,55%{opacity:1}56%,100%{opacity:0}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+@keyframes loading-dots{0%,100%{opacity:.25}50%{opacity:1}}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.blink{animation:blink 1.1s steps(1) infinite;color:var(--color-accent)}
+.sdot{animation:pulse 2s var(--ease-standard) infinite}
+.spinning{animation:spin 1s linear infinite;display:inline-block}
+.loading-block{
+  color:var(--color-text-secondary);padding:var(--space-xl) var(--space-md);
+  display:flex;align-items:center;gap:var(--space-sm);justify-content:center;
+}
+.loading-block .dot{width:4px;height:4px;background:var(--color-text-secondary);animation:loading-dots 1.2s infinite}
+.loading-block .dot:nth-child(2){animation-delay:.2s}
+.loading-block .dot:nth-child(3){animation-delay:.4s}
+
+/* prefers-reduced-motion 总闸（designer §4：三动画全停，信息不丢） */
+@media (prefers-reduced-motion: reduce){
+  .topbar h1 .blink{animation:none}          /* ▮ 停闪但保持可见 */
+  .sdot{animation:none}                       /* 脉冲点停呼吸，状态靠颜色+文字双通道 */
+  .spinning{animation:none}                   /* 刷新图标停转，靠"正在研判…"文案 */
+  .loading-block .dot{animation:none;opacity:.8}
+  *,*::before,*::after{transition-duration:1ms !important;scroll-behavior:auto !important}
+}

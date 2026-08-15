@@ -4,37 +4,52 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>远见 · 个人利益预知</title>
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/css/tokens.css">
+  <link rel="stylesheet" href="/css/base.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <link rel="stylesheet" href="/css/components.css">
+  <link rel="stylesheet" href="/css/views.css">
 </head>
 <body>
-  <div class="app-shell">
+  <div class="shell">
     <aside class="sidebar">
-      <div class="brand"><span>远见</span><small>个人利益预知</small></div>
+      <div class="brand">
+        <!-- 品牌 glyph：同心圆雷达 + 琥珀回波点（与 ic_radar 同语汇） -->
+        <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="9"></circle>
+          <circle cx="12" cy="12" r="4.5"></circle>
+          <rect class="core" x="10.5" y="10.5" width="3" height="3"></rect>
+        </svg>
+        <div><span class="name">远见</span><small class="sub">个人利益预知终端</small></div>
+      </div>
       <nav aria-label="主要功能">
-        <button class="nav primary-nav active" type="button" data-view="today"><span class="nav-icon">做</span><span>行动首页</span></button>
-        <button class="nav primary-nav" type="button" data-view="input"><span class="nav-icon">说</span><span>告诉远见</span></button>
-        <button class="nav primary-nav" type="button" data-view="system"><span class="nav-icon">设</span><span>设置</span></button>
+        <button class="nav-item" type="button" data-view="today" data-label="今日远见"><span data-icon="ic_radar" data-icon-size="20"></span><span class="nav-text">今日远见</span></button>
+        <button class="nav-item" type="button" data-view="calib" data-label="校准面板"><span data-icon="ic_target" data-icon-size="20"></span><span class="nav-text">校准面板</span></button>
+        <button class="nav-item" type="button" data-view="sources" data-label="源管理"><span data-icon="ic_antenna" data-icon-size="20"></span><span class="nav-text">源管理</span></button>
+        <button class="nav-item" type="button" data-view="diag" data-label="诊断中心"><span data-icon="ic_pulse" data-icon-size="20"></span><span class="nav-text">诊断中心</span></button>
+        <button class="nav-item" type="button" data-view="settings" data-label="设置"><span data-icon="ic_gear" data-icon-size="20"></span><span class="nav-text">设置</span></button>
+        <button class="nav-item" type="button" data-view="tell" data-label="告诉远见"><span data-icon="ic_prompt" data-icon-size="20"></span><span class="nav-text">告诉远见</span></button>
       </nav>
-      <div class="sidebar-foot">
-        <div id="connection" class="monitor-status"><span class="status-dot"></span><span>后台监控 · 正在连接</span></div>
-        <button id="shutdown" class="button button-quiet" type="button">安全退出</button>
+      <div class="side-foot">
+        <div id="connection" class="monitor"><span class="sdot sdot-off"></span><span class="monitor-text">后台监控 · 正在连接</span></div>
+        <button id="shutdown" class="quit" type="button"><span data-icon="ic_power" data-icon-size="20"></span><span class="btn-text">安全退出</span></button>
       </div>
     </aside>
-    <main class="main-area">
+    <main class="main">
       <header class="topbar">
-        <div><h1 id="page-title">现在该做什么</h1><p id="page-caption">直接看建议；需要时再看原因</p></div>
-        <div class="header-actions"><button id="open-notifications" class="button" type="button">提醒 <span id="header-unread">0</span></button><button id="run-cognition" class="button button-primary" type="button">立即更新判断</button></div>
+        <div class="u-flex1">
+          <h1><span id="page-title">正在接入…</span><span class="bar blink" aria-hidden="true">▮</span></h1>
+          <p id="page-caption" class="cap">LOCAL COGNITION RADAR</p>
+        </div>
+        <div class="top-actions">
+          <button id="open-notifications" class="icon-btn" type="button" aria-label="通知中心"><span data-icon="ic_msg" data-icon-size="20"></span><span id="unread" class="unread-corner" hidden>0</span></button>
+          <button id="run-cognition" class="btn btn-primary" type="button" aria-label="立即更新判断"><span data-icon="ic_refresh" data-icon-size="16"></span><span class="btn-text">立即更新判断</span></button>
+        </div>
       </header>
-      <section id="content" aria-live="polite">
-        <div class="loading-block"><span class="spinner"></span>正在整理你需要知道的风险…</div>
-      </section>
+      <section id="view-root" class="content" aria-live="polite"></section>
     </main>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <div id="tutorial-root" hidden></div>
-  <script src="/cognition_ui.js"></script>
-  <script src="/ui_core.js"></script>
-  <script src="/risk_ui.js"></script>
-  <script src="/app.js"></script>
+  <script type="module" src="/js/app.js"></script>
 </body>
 </html>

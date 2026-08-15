@@ -1,0 +1,87 @@
+/* 远见 v0.9 · 视图层 —— 今日英雄区 / 校准 / 诊断瓦片 / 设置分节 / 源行 / 通知抽屉 / 告诉远见 */
+
+/* ===== 今日远见 · 英雄区 ===== */
+.today-hero{
+  background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius);
+  padding:var(--space-lg);box-shadow:inset 0 0 24px var(--hero-inset);
+}
+.oracle{font-size:clamp(1.15rem,2.6vw,1.6rem);font-weight:700;line-height:1.6;letter-spacing:.5px}
+.oracle .prompt{color:var(--color-accent);margin-right:.5em;display:inline}
+.oracle .body{color:var(--color-text-primary);text-shadow:0 0 10px var(--glow-green)}
+.today-meta{display:flex;flex-wrap:wrap;gap:var(--space-md);margin-top:var(--space-md);font-size:.6875rem;color:var(--color-text-muted);letter-spacing:.5px}
+.why{margin-top:var(--space-md);border-top:1px dashed var(--color-border);padding-top:var(--space-md)}
+.why summary{cursor:pointer;color:var(--color-text-secondary);font-size:.8125rem;letter-spacing:.5px}
+.why summary:hover{color:var(--color-accent)}
+.why .body{margin-top:var(--space-sm);color:var(--color-text-secondary);font-size:.8125rem}
+.why li{margin-left:1.2em;margin-top:var(--space-xs)}
+
+/* ===== 校准面板 ===== */
+.kpi-num{font-size:1.8rem;font-weight:700;line-height:1.4;font-variant-numeric:tabular-nums}
+.kpi-label{font-size:.6875rem;color:var(--color-text-muted);letter-spacing:1px}
+.chart{width:100%;height:auto;display:block}
+.chart .series-user{stroke:var(--color-accent);fill:none;stroke-width:1.5}
+.chart .series-base{stroke:var(--color-info);fill:none;stroke-width:1;stroke-dasharray:4 3}
+.chart .axis{stroke:var(--color-border);stroke-width:1}
+.chart .axis-label{fill:var(--color-text-muted);font-size:9px;letter-spacing:.5px}
+.legend{display:flex;gap:var(--space-md);font-size:.6875rem;color:var(--color-text-secondary)}
+.legend .key{display:inline-flex;align-items:center;gap:4px}
+.legend .swatch{width:12px;height:2px;flex:none}
+.cat-row{display:grid;grid-template-columns:7em 1fr 4em;gap:var(--space-sm);align-items:center;font-size:.8125rem}
+.bar-track{height:8px;background:var(--color-surface-raised);border:1px solid var(--color-border)}
+.bar-fill{height:100%;background:var(--color-accent-dim)}
+.candidate{display:flex;align-items:center;justify-content:space-between;gap:var(--space-md);padding:10px 0;border-bottom:1px solid var(--color-border);flex-wrap:wrap}
+.candidate select{background:var(--color-surface-raised);border:1px solid var(--color-border-strong);color:var(--color-text-primary);padding:4px 8px;border-radius:2px}
+
+/* ===== 诊断中心 · 瓦片 ===== */
+.diag-tile{
+  background:var(--color-surface);border:1px solid var(--color-border);border-left:3px solid var(--color-border-strong);
+  border-radius:var(--radius);padding:var(--space-md);
+}
+.diag-tile.t-ok{border-left-color:var(--color-success)}
+.diag-tile.t-warn{border-left-color:var(--color-warning)}
+.diag-tile.t-err{border-left-color:var(--color-danger)}
+.diag-tile .label{font-size:.6875rem;color:var(--color-text-muted);letter-spacing:1px;display:flex;align-items:center;gap:var(--space-sm)}
+.diag-tile .value{font-size:1.25rem;font-weight:700;margin-top:var(--space-xs);font-variant-numeric:tabular-nums}
+
+/* ===== 设置分节 ===== */
+.set-sec{margin-bottom:var(--space-lg)}
+.set-sec h2::before{content:'# '}
+.set-sec h2{color:var(--color-text-secondary);font-size:.8125rem;letter-spacing:1px;margin-bottom:var(--space-md)}
+.set-row{display:flex;align-items:center;justify-content:space-between;gap:var(--space-md);padding:10px 0;border-bottom:1px solid var(--color-border)}
+.set-row .name{font-size:.8125rem}
+.set-row .desc{font-size:.6875rem;color:var(--color-text-muted);margin-top:2px}
+
+/* ===== 源管理 ===== */
+.src-list{display:flex;flex-direction:column}
+.src{display:flex;align-items:center;gap:var(--space-sm);padding:10px 0;border-bottom:1px solid var(--color-border);flex-wrap:wrap}
+.src .name{font-size:.8125rem;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.src .url{font-size:.6875rem;color:var(--color-text-muted);flex-basis:100%}
+.src .acts{display:flex;gap:var(--space-xs)}
+
+/* ===== 通知抽屉 ===== */
+.drawer-backdrop{position:fixed;inset:0;z-index:85;background:var(--vignette)}
+.drawer{
+  position:fixed;top:0;right:0;bottom:0;z-index:86;width:min(420px,100vw);
+  background:var(--color-surface);border-left:1px solid var(--color-border-strong);
+  display:flex;flex-direction:column;
+}
+.drawer header{display:flex;align-items:center;justify-content:space-between;padding:var(--space-md);border-bottom:1px solid var(--color-border)}
+.drawer .list{flex:1;overflow-y:auto;padding:var(--space-sm) var(--space-md)}
+.notif-row{padding:10px 0;border-bottom:1px solid var(--color-border)}
+.notif-row .t{font-size:.8125rem}
+.notif-row.unread .t{color:var(--color-accent)}
+.notif-row .m{font-size:.6875rem;color:var(--color-text-muted);margin-top:2px}
+
+/* ===== 告诉远见 ===== */
+.tell textarea{width:100%;font-size:.875rem}
+@media (max-width:640px){
+  .tell textarea{font-size:1rem} /* 防 iOS 聚焦缩放 */
+  .grid-kpi{grid-template-columns:repeat(2,1fr)}
+  .grid-2,.grid-3{grid-template-columns:1fr}
+  .form-grid{grid-template-columns:1fr}
+  .cat-row{grid-template-columns:5.5em 1fr 3.5em}
+}
+
+/* ===== 状态面板 / 结果框 ===== */
+.state-panel{display:flex;flex-direction:column;align-items:center;gap:var(--space-md);padding:var(--space-2xl) var(--space-md);color:var(--color-text-secondary)}
+.result-box{border:1px solid var(--color-border-strong);border-left:3px solid var(--color-accent);padding:var(--space-md);border-radius:3px}

@@ -20,6 +20,60 @@ def resolve_static_root(module_file, bundle_root=None):
 STATIC_ROOT = resolve_static_root(Path(__file__), getattr(sys, "_MEIPASS", None))
 
 
+# 静态资源白名单注册表：URL 路径 -> (磁盘相对路径, MIME 类型)。
+# 新增前端文件必须逐个登记，未登记路径一律 404；字体文件由后端投放，先预登记。
+STATIC_FILES = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/css/tokens.css": ("css/tokens.css", "text/css; charset=utf-8"),
+    "/css/base.css": ("css/base.css", "text/css; charset=utf-8"),
+    "/css/layout.css": ("css/layout.css", "text/css; charset=utf-8"),
+    "/css/components.css": ("css/components.css", "text/css; charset=utf-8"),
+    "/css/views.css": ("css/views.css", "text/css; charset=utf-8"),
+    "/js/icons.js": ("js/icons.js", "text/javascript; charset=utf-8"),
+    "/js/ui_core.js": ("js/ui_core.js", "text/javascript; charset=utf-8"),
+    "/js/api.js": ("js/api.js", "text/javascript; charset=utf-8"),
+    "/js/router.js": ("js/router.js", "text/javascript; charset=utf-8"),
+    "/js/app.js": ("js/app.js", "text/javascript; charset=utf-8"),
+    "/js/views/today.js": (
+        "js/views/today.js",
+        "text/javascript; charset=utf-8",
+    ),
+    "/js/views/tell.js": (
+        "js/views/tell.js",
+        "text/javascript; charset=utf-8",
+    ),
+    "/js/views/calib.js": (
+        "js/views/calib.js",
+        "text/javascript; charset=utf-8",
+    ),
+    "/js/views/sources.js": (
+        "js/views/sources.js",
+        "text/javascript; charset=utf-8",
+    ),
+    "/js/views/sources-form.js": (
+        "js/views/sources-form.js",
+        "text/javascript; charset=utf-8",
+    ),
+    "/js/views/diag.js": ("js/views/diag.js", "text/javascript; charset=utf-8"),
+    "/js/views/settings.js": (
+        "js/views/settings.js",
+        "text/javascript; charset=utf-8",
+    ),
+    "/js/views/notifications.js": (
+        "js/views/notifications.js",
+        "text/javascript; charset=utf-8",
+    ),
+    "/fonts/JetBrainsMono-Regular.woff2": (
+        "fonts/JetBrainsMono-Regular.woff2",
+        "font/woff2",
+    ),
+    "/fonts/JetBrainsMono-Bold.woff2": (
+        "fonts/JetBrainsMono-Bold.woff2",
+        "font/woff2",
+    ),
+}
+
+
 @dataclass(frozen=True)
 class Services:
     """Services exposed to the local HTTP boundary."""
@@ -101,7 +155,11 @@ def create_server(host, port, token, services):
             return query, limit, offset
 
         def _static(self, name, content_type):
-            path = STATIC_ROOT / name
+            path = (STATIC_ROOT / name).resolve()
+            # 纵深防御：解析后必须仍位于静态根目录内，阻断相对路径逃逸。
+            if STATIC_ROOT.resolve() not in path.parents:
+                self._error(403, "forbidden", "非法的资源路径")
+                return
             if not path.is_file():
                 self._error(404, "not_found", "页面资源不存在")
                 return
@@ -114,29 +172,23 @@ def create_server(host, port, token, services):
             self.end_headers()
             self.wfile.write(body)
 
+        def _serve_static(self, raw_path, path):
+            """按白名单注册表分发静态资源，含编码路径穿越校验。"""
+            lowered = raw_path.lower()
+            if ".." in lowered or "%2e" in lowered or "%2f" in lowered or "%5c" in lowered:
+                self._error(403, "forbidden", "非法的资源路径")
+                return
+            entry = STATIC_FILES.get(path)
+            if entry is None:
+                self._error(404, "not_found", "页面不存在")
+                return
+            self._static(entry[0], entry[1])
+
         def do_GET(self):
             parsed = urlparse(self.path)
             path = parsed.path
-            if path == "/":
-                self._static("index.html", "text/html; charset=utf-8")
-                return
-            if path == "/app.js":
-                self._static("app.js", "text/javascript; charset=utf-8")
-                return
-            if path == "/cognition_ui.js":
-                self._static("cognition_ui.js", "text/javascript; charset=utf-8")
-                return
-            if path == "/ui_core.js":
-                self._static("ui_core.js", "text/javascript; charset=utf-8")
-                return
-            if path == "/risk_ui.js":
-                self._static("risk_ui.js", "text/javascript; charset=utf-8")
-                return
-            if path == "/styles.css":
-                self._static("styles.css", "text/css; charset=utf-8")
-                return
             if not path.startswith("/api/"):
-                self._error(404, "not_found", "页面不存在")
+                self._serve_static(self.path, path)
                 return
             if not self._require_api_access():
                 return
