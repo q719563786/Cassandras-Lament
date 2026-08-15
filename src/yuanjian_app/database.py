@@ -51,7 +51,8 @@ class Database:
                 CREATE TABLE IF NOT EXISTS forecasts(
                     forecast_id TEXT PRIMARY KEY,
                     status TEXT NOT NULL,
-                    window_end TEXT NOT NULL
+                    window_end TEXT NOT NULL,
+                    category TEXT NOT NULL DEFAULT 'general'
                 );
                 CREATE TABLE IF NOT EXISTS forecast_versions(
                     forecast_id TEXT NOT NULL,
@@ -138,7 +139,10 @@ class Database:
                     last_status TEXT NOT NULL DEFAULT 'never',
                     last_error TEXT NOT NULL DEFAULT '',
                     consecutive_failures INTEGER NOT NULL DEFAULT 0,
-                    next_fetch_at TEXT
+                    next_fetch_at TEXT,
+                    region TEXT NOT NULL DEFAULT 'global',
+                    category TEXT NOT NULL DEFAULT 'general',
+                    user_managed INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS watch_rules(
                     rule_id TEXT PRIMARY KEY,
@@ -297,6 +301,19 @@ class Database:
                     value_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS feedback_events(
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    occurred_at TEXT NOT NULL,
+                    cluster_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    interest_category TEXT NOT NULL DEFAULT '',
+                    source_domains_json TEXT NOT NULL DEFAULT '[]',
+                    applied_json TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE INDEX IF NOT EXISTS idx_feedback_events_pending
+                    ON feedback_events(applied_json, occurred_at);
+                CREATE INDEX IF NOT EXISTS idx_external_sources_region
+                    ON external_sources(region);
                 CREATE TRIGGER IF NOT EXISTS forecast_versions_no_update
                 BEFORE UPDATE ON forecast_versions BEGIN
                     SELECT RAISE(ABORT, 'forecast versions are immutable');
@@ -321,8 +338,33 @@ class Database:
                 VALUES (3, CURRENT_TIMESTAMP);
                 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
                 VALUES (4, CURRENT_TIMESTAMP);
+                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                VALUES (5, CURRENT_TIMESTAMP);
                 """
             )
+            self._apply_column_migrations(connection)
+
+    @staticmethod
+    def _apply_column_migrations(connection):
+        """Idempotent column additions for databases created before v5.
+
+        SQLite raises on ALTER TABLE ADD COLUMN when the column already
+        exists, and initialize() runs on every startup, so each addition is
+        guarded by a PRAGMA table_info check.
+        """
+        additions = (
+            ("forecasts", "category", "TEXT NOT NULL DEFAULT 'general'"),
+            ("external_sources", "region", "TEXT NOT NULL DEFAULT 'global'"),
+            ("external_sources", "category", "TEXT NOT NULL DEFAULT 'general'"),
+            ("external_sources", "user_managed", "INTEGER NOT NULL DEFAULT 0"),
+        )
+        for table, column, definition in additions:
+            rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+            names = {row[1] for row in rows}
+            if column not in names:
+                connection.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                )
 
     @contextmanager
     def connect(self):

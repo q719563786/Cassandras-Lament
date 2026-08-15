@@ -763,4 +763,133 @@ class CognitionController:
             )
             if result.rowcount == 0:
                 raise KeyError(cluster_id)
+            category_row = connection.execute(
+                """
+                SELECT io.category
+                FROM personal_impacts pi
+                JOIN interest_objects io ON io.object_id = pi.interest_id
+                WHERE pi.cluster_id=?
+                LIMIT 1
+                """,
+                (cluster_id,),
+            ).fetchone()
+            interest_category = category_row["category"] if category_row else ""
+            domain_rows = connection.execute(
+                "SELECT DISTINCT source_domain FROM event_cluster_items WHERE cluster_id=?",
+                (cluster_id,),
+            ).fetchall()
+            source_domains = sorted(
+                {
+                    row["source_domain"]
+                    for row in domain_rows
+                    if row["source_domain"]
+                }
+            )
+            connection.execute(
+                """
+                INSERT INTO feedback_events(
+                    occurred_at, cluster_id, action,
+                    interest_category, source_domains_json, applied_json
+                ) VALUES (?, ?, ?, ?, ?, '{}')
+                """,
+                (
+                    _iso(now),
+                    cluster_id,
+                    action,
+                    interest_category or "",
+                    json.dumps(source_domains, ensure_ascii=False),
+                ),
+            )
         return {"cluster_id": cluster_id, "action": action, "updated": result.rowcount}
+
+    def apply_feedback_learning(self, *, limit=50):
+        """消费未处理的反馈事件：降低误报源权重、加重类别惩罚。
+
+        由调度线程周期调用（约 6 小时一次），请求线程只写流水。
+        """
+        now_text = _iso(self.now().astimezone(timezone.utc))
+        applied_events = []
+        with self.database.connect() as connection:
+            pending = connection.execute(
+                """
+                SELECT event_id, occurred_at, cluster_id, action,
+                       interest_category, source_domains_json
+                FROM feedback_events
+                WHERE applied_json='{}'
+                ORDER BY occurred_at
+                LIMIT ?
+                """,
+                (max(1, min(int(limit), 200)),),
+            ).fetchall()
+            penalties_row = connection.execute(
+                "SELECT value_json FROM runtime_state WHERE state_key='learning.category_penalties'"
+            ).fetchone()
+            penalties = {}
+            if penalties_row:
+                try:
+                    stored = json.loads(penalties_row["value_json"])
+                    if isinstance(stored, dict):
+                        penalties = {
+                            str(key): float(value)
+                            for key, value in stored.items()
+                        }
+                except (ValueError, TypeError):
+                    penalties = {}
+            for event in pending:
+                changes = {"source_weight": [], "category_penalty": []}
+                domains = []
+                try:
+                    loaded = json.loads(event["source_domains_json"])
+                    if isinstance(loaded, list):
+                        domains = [str(item) for item in loaded if item]
+                except (ValueError, TypeError):
+                    domains = []
+                if event["action"] == "false_positive":
+                    for domain in domains:
+                        updated = connection.execute(
+                            """
+                            UPDATE external_sources
+                            SET reliability_weight=MAX(0.2, reliability_weight-0.05)
+                            WHERE endpoint LIKE ?
+                                AND user_managed=0
+                            """,
+                            (f"%{domain}%",),
+                        )
+                        if updated.rowcount:
+                            changes["source_weight"].append(domain)
+                    category = event["interest_category"]
+                    if category:
+                        current = penalties.get(category, 1.0)
+                        penalties[category] = round(max(0.5, current - 0.05), 4)
+                        changes["category_penalty"].append(category)
+                connection.execute(
+                    "UPDATE feedback_events SET applied_json=? WHERE event_id=?",
+                    (json.dumps(changes, ensure_ascii=False), event["event_id"]),
+                )
+                applied_events.append(event["event_id"])
+            if penalties:
+                connection.execute(
+                    """
+                    INSERT INTO runtime_state(state_key, value_json, updated_at)
+                    VALUES ('learning.category_penalties', ?, ?)
+                    ON CONFLICT(state_key) DO UPDATE SET
+                        value_json=excluded.value_json,
+                        updated_at=excluded.updated_at
+                    """,
+                    (json.dumps(penalties, ensure_ascii=False), now_text),
+                )
+            if applied_events:
+                connection.execute(
+                    "INSERT INTO audit_log(occurred_at, action, object_type, object_id, details_json) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        now_text,
+                        "feedback_learning",
+                        "feedback_events",
+                        ",".join(str(event_id) for event_id in applied_events),
+                        json.dumps(
+                            {"applied": len(applied_events), "penalties": penalties},
+                            ensure_ascii=False,
+                        ),
+                    ),
+                )
+        return {"applied": len(applied_events)}

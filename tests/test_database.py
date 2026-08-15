@@ -58,7 +58,7 @@ class DatabaseTests(unittest.TestCase):
                 migrations = connection.execute(
                     "SELECT COUNT(*) FROM schema_migrations"
                 ).fetchone()[0]
-            self.assertEqual(migrations, 4)
+            self.assertEqual(migrations, 5)
 
     def test_migration_two_creates_sensory_tables_and_is_repeatable(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -88,7 +88,7 @@ class DatabaseTests(unittest.TestCase):
             self.assertTrue(
                 {"interest_objects", "interest_links", "signals", "knowledge_documents"}.issubset(tables)
             )
-            self.assertEqual([row[0] for row in migrations], [1, 2, 3, 4])
+            self.assertEqual([row[0] for row in migrations], [1, 2, 3, 4, 5])
             self.assertEqual(preserved, "测试利益")
 
     def test_migration_three_creates_external_radar_tables_and_preserves_data(self):
@@ -129,7 +129,7 @@ class DatabaseTests(unittest.TestCase):
                     "external_runs",
                 }.issubset(tables)
             )
-            self.assertEqual(versions, [1, 2, 3, 4])
+            self.assertEqual(versions, [1, 2, 3, 4, 5])
             self.assertEqual(preserved, "open")
 
     def test_migration_four_creates_cognition_tables_and_immutable_judgments(self):
@@ -199,7 +199,7 @@ class DatabaseTests(unittest.TestCase):
                 )
 
             self.assertTrue(expected.issubset(tables))
-            self.assertEqual(migrations, [1, 2, 3, 4])
+            self.assertEqual(migrations, [1, 2, 3, 4, 5])
             self.assertEqual(preserved, (1, 1))
             with database.connect() as connection:
                 with self.assertRaisesRegex(

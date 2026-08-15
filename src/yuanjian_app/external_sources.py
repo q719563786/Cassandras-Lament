@@ -35,7 +35,7 @@ class ExternalItem:
 
 
 def normalize_published_at(value):
-    """Normalize ISO, RFC 2822 and GDELT timestamps to UTC ISO text."""
+    """Normalize ISO, RFC 2822, GDELT and compact 14-digit timestamps."""
     text = str(value or "").strip()
     if not text:
         return ""
@@ -43,6 +43,11 @@ def normalize_published_at(value):
     try:
         if len(text) == 16 and text.endswith("Z") and text[8] == "T":
             parsed = datetime.strptime(text, "%Y%m%dT%H%M%SZ").replace(
+                tzinfo=timezone.utc
+            )
+        elif len(text) == 14 and text.isdigit():
+            # 广东公共资源交易平台 publishDate 形如 20260815093000
+            parsed = datetime.strptime(text, "%Y%m%d%H%M%S").replace(
                 tzinfo=timezone.utc
             )
         else:
@@ -114,6 +119,96 @@ def fetch_bytes(
     if len(body) > max_bytes:
         raise FetchError("too_large", f"响应超过{max_bytes}字节上限")
     return body
+
+
+def fetch_json(
+    url,
+    payload,
+    *,
+    opener=urllib.request.urlopen,
+    timeout=DEFAULT_TIMEOUT,
+    max_bytes=DEFAULT_MAX_BYTES,
+    resolver=socket.getaddrinfo,
+):
+    """POST a JSON query to a public API endpoint with the same safety net."""
+    safe_url = validate_public_url(url)
+    _validate_dns(urlparse(safe_url).hostname, resolver)
+    body = json.dumps(payload or {}).encode("utf-8")
+    request = urllib.request.Request(
+        safe_url,
+        data=body,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) YuanJian/0.9",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with opener(request, timeout=timeout) as response:
+            data = response.read(max_bytes + 1)
+    except (TimeoutError, socket.timeout) as error:
+        raise FetchError("timeout", "外部源请求超时") from error
+    except urllib.error.HTTPError as error:
+        kind = "rate_limited" if error.code == 429 else "http_error"
+        raise FetchError(kind, f"外部源返回HTTP {error.code}") from error
+    except (urllib.error.URLError, OSError) as error:
+        raise FetchError("unreachable", f"外部源不可达：{error}") from error
+    if len(data) > max_bytes:
+        raise FetchError("too_large", f"响应超过{max_bytes}字节上限")
+    return data
+
+
+def parse_json_api(body, source_id, source_name, config):
+    """Parse items from a public JSON API driven by source config_json.
+
+    Config keys: items_path ("data.pageData"), fields {title, url,
+    published_at, summary, language}, url_template with {field} placeholders.
+    """
+    config = config or {}
+    try:
+        payload = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise FetchError("parse_error", f"JSON接口解析失败：{error}") from error
+    items = payload
+    for key in str(config.get("items_path", "")).split("."):
+        if not key:
+            continue
+        if not isinstance(items, dict) or key not in items:
+            raise FetchError("parse_error", f"JSON路径无效：{config.get('items_path')}")
+        items = items[key]
+    if not isinstance(items, list):
+        raise FetchError("parse_error", "JSON路径未指向列表")
+    fields = config.get("fields") or {}
+    template = str(config.get("url_template") or "")
+    output = []
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        title = str(raw.get(fields.get("title", "title"), "") or "").strip()
+        if template:
+            try:
+                url = template.format(**raw)
+            except (KeyError, IndexError):
+                url = ""
+        else:
+            url = str(raw.get(fields.get("url", "url"), "") or "").strip()
+        if not title or not url:
+            continue
+        output.append(
+            ExternalItem(
+                source_id=source_id,
+                source_name=source_name,
+                url=url,
+                title=title,
+                summary=str(raw.get(fields.get("summary", "summary"), "") or ""),
+                published_at=normalize_published_at(
+                    raw.get(fields.get("published_at", "publishDate"), "")
+                ),
+                language="",
+                raw=raw,
+            )
+        )
+    return output
 
 
 def _text(element, child_name):

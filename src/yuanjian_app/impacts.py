@@ -108,12 +108,30 @@ class ImpactService:
             "recommended_action": "继续收集执行证据；人工确认后才进入正式预测账本。",
         }
 
+    def _category_penalties(self):
+        """Feedback-learning multipliers persisted by the learning consumer."""
+        try:
+            with self.database.connect() as connection:
+                row = connection.execute(
+                    "SELECT value_json FROM runtime_state WHERE state_key=?",
+                    ("learning.category_penalties",),
+                ).fetchone()
+            penalties = json.loads(row["value_json"]) if row else {}
+        except Exception:
+            penalties = {}
+        return {
+            str(key): max(0.5, min(float(value), 1.0))
+            for key, value in penalties.items()
+            if isinstance(value, (int, float))
+        }
+
     def map_judgment(self, cluster_id: str, judgment_id: str) -> list[dict]:
         cluster, judgment = self._load(cluster_id, judgment_id)
         categories = tuple(judgment.get("impact_categories", ()))
         evidence = EVIDENCE_WEIGHTS.get(cluster["evidence_level"], 0.25)
         confidence = max(0.0, min(float(judgment.get("confidence", 0.0)), 1.0))
         urgency = _urgency(judgment.get("horizons", ()))
+        penalties = self._category_penalties()
         now = _iso(self.now())
         results = []
         for interest in self.interest_service.list_objects():
@@ -122,6 +140,7 @@ class ImpactService:
             exposure = self._exposure(categories, interest["category"])
             if exposure <= 0:
                 continue
+            exposure = round(exposure * penalties.get(interest["category"], 1.0), 6)
             importance = max(1, min(int(interest["importance"]), 5)) / 5
             components = {
                 "evidence": evidence,
@@ -213,6 +232,47 @@ class ImpactService:
             raise KeyError(impact_id)
         return json.loads(row["candidate_json"])
 
+    def _impact_category(self, impact_id: str) -> str:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT i.category FROM personal_impacts p
+                JOIN interest_objects i ON i.object_id = p.interest_id
+                WHERE p.impact_id = ?
+                """,
+                (impact_id,),
+            ).fetchone()
+        return (row["category"] if row else "") or "general"
+
+    def pending_candidates(self, limit: int = 20) -> list[dict]:
+        """Unconfirmed impact candidates for the calibration panel."""
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT p.impact_id, p.candidate_json, p.updated_at, i.category
+                FROM personal_impacts p
+                JOIN interest_objects i ON i.object_id = p.interest_id
+                WHERE p.candidate_json NOT LIKE '%confirmed_forecast_id%'
+                    AND (p.muted_until IS NULL OR p.muted_until < ?)
+                ORDER BY p.impact_score DESC, p.updated_at DESC
+                LIMIT ?
+                """,
+                (_iso(self.now()), max(1, min(int(limit), 100))),
+            ).fetchall()
+        output = []
+        for row in rows:
+            candidate = json.loads(row["candidate_json"] or "{}")
+            output.append(
+                {
+                    "id": row["impact_id"],
+                    "statement": candidate.get("title", ""),
+                    "summary": candidate.get("title", ""),
+                    "category": row["category"] or "general",
+                    "window_end": candidate.get("window_end", ""),
+                }
+            )
+        return output
+
     def confirm_candidate(self, impact_id: str, probability: float) -> dict:
         try:
             probability = round(float(probability), 2)
@@ -228,6 +288,7 @@ class ImpactService:
             {
                 "forecast_id": forecast_id,
                 "title": candidate["title"],
+                "category": self._impact_category(impact_id),
                 "resolution_criteria": candidate["resolution_criteria"],
                 "window_start": candidate["window_start"],
                 "window_end": candidate["window_end"],

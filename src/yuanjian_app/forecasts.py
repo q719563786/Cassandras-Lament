@@ -12,6 +12,22 @@ class ForecastConflictError(ValueError):
     """Raised when a new forecast would reuse an existing identity."""
 
 
+def _iso_week_label(value):
+    """Defensively resolve a stored resolved_at string to an ISO week label."""
+    text = str(value or "").strip()
+    if not text:
+        return "", False
+    try:
+        day = datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+    except ValueError:
+        try:
+            day = datetime.strptime(text[:10], "%Y-%m-%d").date()
+        except ValueError:
+            return "", False
+    iso = day.isocalendar()
+    return f"{iso[0]}-W{iso[1]:02d}", True
+
+
 def parse_frontmatter(text):
     """Parse the flat YAML subset used by forecast cards."""
     fields = {}
@@ -92,6 +108,8 @@ def _normalized_card(data, forecast_id=None, created_at=None):
         ),
         "status": "open",
         "title": title,
+        "statement": title,
+        "category": _single_line(data.get("category", "general")) or "general",
         "resolution_criteria": criteria,
         "window_start": window_start,
         "window_end": window_end,
@@ -148,12 +166,12 @@ class ForecastService:
     def __init__(self, database):
         self.database = database
 
-    def list_forecasts(self):
+    def list_forecasts(self, limit=None, offset=0):
         """Return one summary per forecast using its latest version."""
         with self.database.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT f.forecast_id, f.status, f.window_end,
+                SELECT f.forecast_id, f.status, f.window_end, f.category,
                        v.version, v.probability, v.content
                 FROM forecasts f
                 JOIN forecast_versions v ON v.forecast_id = f.forecast_id
@@ -168,24 +186,33 @@ class ForecastService:
         result = []
         for row in rows:
             fields = parse_frontmatter(row["content"])
-            result.append(
-                {
-                    "forecast_id": row["forecast_id"],
-                    "status": row["status"],
-                    "window_end": row["window_end"],
-                    "version": row["version"],
-                    "probability": row["probability"],
-                    "title": fields.get("title", row["forecast_id"]),
-                    "confidence": fields.get("confidence", "unknown"),
-                    "alert_level": fields.get("alert_level", "L1"),
-                    "resolution_criteria": fields.get("resolution_criteria", ""),
-                }
-            )
-        return result
+            summary = {
+                "forecast_id": row["forecast_id"],
+                "status": row["status"],
+                "window_end": row["window_end"],
+                "category": row["category"] or "general",
+                "version": row["version"],
+                "probability": row["probability"],
+                "title": fields.get("title", row["forecast_id"]),
+                "statement": fields.get("title", row["forecast_id"]),
+                "created_at": fields.get("created_at", ""),
+                "confidence": fields.get("confidence", "unknown"),
+                "alert_level": fields.get("alert_level", "L1"),
+                "resolution_criteria": fields.get("resolution_criteria", ""),
+            }
+            result.append(summary)
+        total = len(result)
+        start = max(0, int(offset or 0))
+        if limit is not None:
+            result = result[start : start + max(1, int(limit))]
+        elif start:
+            result = result[start:]
+        return result, total
 
     def get_forecast(self, forecast_id):
         """Return a forecast summary plus all immutable versions."""
-        items = [item for item in self.list_forecasts() if item["forecast_id"] == forecast_id]
+        forecasts, _total = self.list_forecasts()
+        items = [item for item in forecasts if item["forecast_id"] == forecast_id]
         if not items:
             raise KeyError(forecast_id)
         with self.database.connect() as connection:
@@ -225,8 +252,8 @@ class ForecastService:
             if exists:
                 raise ForecastConflictError("预测编号已经存在")
             connection.execute(
-                "INSERT INTO forecasts(forecast_id, status, window_end) VALUES (?, 'open', ?)",
-                (card["forecast_id"], card["window_end"]),
+                "INSERT INTO forecasts(forecast_id, status, window_end, category) VALUES (?, 'open', ?, ?)",
+                (card["forecast_id"], card["window_end"], card["category"]),
             )
             connection.execute(
                 "INSERT INTO forecast_versions(forecast_id, version, probability, content_sha256, content) VALUES (?, 1, ?, ?, ?)",
@@ -295,6 +322,11 @@ class ForecastService:
         allowed = {*outcomes, "partial", "indeterminate"}
         if outcome not in allowed:
             raise ValueError("不支持的结算结果")
+        resolved_at = str(resolved_at or "").strip()
+        if resolved_at and not re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?)?", resolved_at
+        ):
+            raise ValueError("结算日期格式无效，应为年月日")
         with self.database.connect() as connection:
             row = connection.execute(
                 "SELECT probability FROM forecast_versions WHERE forecast_id = ? ORDER BY version DESC LIMIT 1",
@@ -334,3 +366,81 @@ class ForecastService:
             "resolved_binary": row[0],
             "brier_score": None if row[1] is None else round(row[1], 10),
         }
+
+    def calibration_summary(self):
+        """Flat calibration payload consumed by the calibration panel.
+
+        Philosophy: never fabricate conclusions — denominators of zero
+        produce null instead of 0.
+        """
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT f.forecast_id, f.category, r.outcome, r.resolved_at,
+                       r.probability, r.brier_score
+                FROM forecasts f
+                JOIN resolutions r ON r.forecast_id = f.forecast_id
+                """
+            ).fetchall()
+        binary = [
+            dict(row)
+            for row in rows
+            if row["outcome"] in {"occurred", "not_occurred"}
+        ]
+        confident = [row for row in binary if float(row["probability"]) >= 0.5]
+        hits = [row for row in confident if row["outcome"] == "occurred"]
+        miss = [row for row in confident if row["outcome"] == "not_occurred"]
+        scored = [row for row in rows if row["brier_score"] is not None]
+        overall_brier = (
+            round(sum(float(row["brier_score"]) for row in scored) / len(scored), 10)
+            if scored
+            else None
+        )
+        weekly = {}
+        unknown_weeks = 0
+        for row in scored:
+            label, ok = _iso_week_label(row["resolved_at"])
+            if not ok:
+                unknown_weeks += 1
+                continue
+            weekly.setdefault(label, []).append(float(row["brier_score"]))
+        brier_series = [
+            {
+                "week": label,
+                "count": len(values),
+                "brier": round(sum(values) / len(values), 10),
+                "low_sample": len(values) < 2,
+            }
+            for label, values in sorted(weekly.items())
+        ]
+        by_category = {}
+        categories = {row["category"] or "general" for row in confident}
+        for category in categories:
+            subset = [
+                row for row in confident if (row["category"] or "general") == category
+            ]
+            if subset:
+                by_category[category] = round(
+                    sum(1 for row in subset if row["outcome"] == "occurred")
+                    / len(subset),
+                    10,
+                )
+        return {
+            "resolved_total": len(rows),
+            "resolved_binary": len(binary),
+            "open_total": self._open_total(),
+            "hit_rate": round(len(hits) / len(confident), 10) if confident else None,
+            "false_positive_rate": (
+                round(len(miss) / len(confident), 10) if confident else None
+            ),
+            "brier": overall_brier,
+            "brier_series": brier_series,
+            "unknown_week_count": unknown_weeks,
+            "by_category": by_category,
+        }
+
+    def _open_total(self):
+        with self.database.connect() as connection:
+            return connection.execute(
+                "SELECT COUNT(*) FROM forecasts WHERE status = 'open'"
+            ).fetchone()[0]

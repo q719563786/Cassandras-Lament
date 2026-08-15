@@ -55,6 +55,7 @@ class HttpApiTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         database = Database(Path(self.temp_dir.name) / "yuanjian.db")
         database.initialize()
+        self._database = database
         interests = InterestService(database)
         interests.ensure_defaults()
         signals = SignalService(database, interests)
@@ -109,6 +110,18 @@ class HttpApiTests(unittest.TestCase):
         self.cognition_operation = SwitchableCognitionOperation(
             CognitionOperation(controller)
         )
+        from yuanjian_app.backup import BackupService
+        from yuanjian_app.diagnostics import DiagnosticsService
+        from yuanjian_app.mobile_export import MobileExportService
+        from yuanjian_app.retention import RetentionService
+        from yuanjian_app.system_settings import SystemSettingsService
+
+        self.backup_service = BackupService(
+            database, Path(self.temp_dir.name) / "backups"
+        )
+        self.mobile_export = MobileExportService(
+            Path(self.temp_dir.name) / "mobile"
+        )
         self.services = Services(
             forecasts,
             interests,
@@ -124,6 +137,17 @@ class HttpApiTests(unittest.TestCase):
             ai_settings,
             cognition_operation=self.cognition_operation,
             desktop=self.desktop,
+            system_settings=SystemSettingsService(database),
+            diagnostics=DiagnosticsService(
+                database,
+                external=external,
+                ai_settings=ai_settings,
+                judgment_queue=queue,
+                backup_service=self.backup_service,
+            ),
+            backup_service=self.backup_service,
+            retention_service=RetentionService(database),
+            mobile_export=self.mobile_export,
         )
         self.server = create_server("127.0.0.1", 0, "test-token", self.services)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -206,112 +230,107 @@ class HttpApiTests(unittest.TestCase):
         with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:
             body = response.read().decode("utf-8")
 
-        self.assertIn("行动首页", body)
-        self.assertNotIn("https://", body)
+        self.assertIn('<html lang="zh-CN">', body)
+        self.assertIn("个人利益预知", body)
+        self.assertNotIn('src="https://', body)
+        self.assertNotIn('href="https://', body)
 
     def test_home_page_exposes_formal_forecast_and_safe_exit_controls(self):
         with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:
             body = response.read().decode("utf-8")
 
         self.assertIn("告诉远见", body)
-        self.assertNotIn('data-view="create"', body)
         self.assertIn("安全退出", body)
+        self.assertIn('id="shutdown"', body)
 
-    def test_home_page_is_a_three_entry_risk_cockpit(self):
+    def test_home_page_is_a_six_entry_terminal_shell(self):
         with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:
             body = response.read().decode("utf-8")
 
-        self.assertEqual(body.count('class="nav primary-nav'), 3)
-        self.assertIn('data-view="today"', body)
-        self.assertIn('data-view="input"', body)
-        self.assertIn('data-view="system"', body)
-        self.assertIn("行动首页", body)
-        self.assertIn("告诉远见", body)
+        self.assertEqual(body.count('class="nav-item"'), 6)
+        for view in ("today", "calib", "sources", "diag", "settings", "tell"):
+            self.assertIn(f'data-view="{view}"', body)
+        self.assertIn("今日远见", body)
+        self.assertIn("校准面板", body)
+        self.assertIn("源管理", body)
+        self.assertIn("诊断中心", body)
         self.assertIn("设置", body)
-        self.assertNotIn('data-view="benefit"', body)
-        self.assertNotIn("外部世界", body)
-        self.assertNotIn("来源健康状态", body)
-        self.assertNotIn("关注规则", body)
 
-    def test_home_page_makes_personal_risk_the_default_view(self):
+    def test_home_page_makes_today_the_default_view(self):
         with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:
             body = response.read().decode("utf-8")
 
-        self.assertIn("现在该做什么", body)
-        self.assertIn('data-view="today"', body)
         self.assertIn("后台监控", body)
-        self.assertNotIn('class="metric-button', body)
-        self.assertNotIn('data-filter="judge"', body)
-        self.assertNotIn('id="event-search"', body)
+        self.assertIn('id="view-root"', body)
         self.assertIn('id="toast"', body)
         self.assertIn('aria-live="polite"', body)
-        with urllib.request.urlopen(self.base_url + "/app.js", timeout=2) as response:
+        with urllib.request.urlopen(self.base_url + "/js/app.js", timeout=2) as response:
             script = response.read().decode("utf-8")
-        self.assertIn("renderRiskHome().catch(showPageError)", script)
-        self.assertIn("/api/risk-dashboard", script)
+        self.assertIn("/api/cognition/run", script)
+        self.assertIn("/api/shutdown", script)
+        self.assertIn("#/", script)
+        with urllib.request.urlopen(
+            self.base_url + "/js/views/today.js", timeout=2
+        ) as response:
+            today = response.read().decode("utf-8")
+        self.assertIn("/api/risk-dashboard", today)
 
     def test_personal_behavior_input_is_one_step_from_the_main_navigation(self):
         with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:
             body = response.read().decode("utf-8")
-        with urllib.request.urlopen(self.base_url + "/app.js", timeout=2) as response:
-            script = response.read().decode("utf-8")
-
-        self.assertIn('data-view="input"', body)
-        self.assertIn("async function renderInput()", script)
-        self.assertIn("发生了什么，或者你做了什么？", script)
-        self.assertIn("告诉远见并判断", script)
-        self.assertIn("RiskUI.inputResult", script)
-
-    def test_first_open_tutorial_and_settings_reopen_are_built_into_the_app(self):
-        with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:
-            body = response.read().decode("utf-8")
-        with urllib.request.urlopen(self.base_url + "/app.js", timeout=2) as response:
-            script = response.read().decode("utf-8")
-
-        self.assertIn('id="tutorial-root"', body)
-        self.assertIn("const TUTORIAL_VERSION = '0.9'", script)
-        self.assertIn("function showTutorial(startIndex = 0)", script)
-        self.assertIn("function maybeShowTutorial()", script)
-        self.assertIn('id="reopen-tutorial"', script)
-        self.assertIn("我的资料", script)
-        self.assertIn("使用教程", script)
-
-    def test_home_page_loads_the_cognition_feedback_behavior(self):
-        with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:
-            body = response.read().decode("utf-8")
         with urllib.request.urlopen(
-            self.base_url + "/cognition_ui.js", timeout=2
+            self.base_url + "/js/views/tell.js", timeout=2
         ) as response:
-            self.assertEqual(response.status, 200)
-            self.assertEqual(
-                response.headers.get_content_type(), "text/javascript"
-            )
+            script = response.read().decode("utf-8")
 
-        self.assertIn('src="/cognition_ui.js"', body)
+        self.assertIn('data-view="tell"', body)
+        self.assertIn("/api/events", script)
 
-    def test_home_page_loads_user_facing_ui_helpers(self):
+    def test_static_assets_are_served_from_the_whitelist_only(self):
+        for asset, content_type in (
+            ("/js/ui_core.js", "text/javascript"),
+            ("/css/tokens.css", "text/css"),
+            ("/fonts/JetBrainsMono-Regular.woff2", "font/woff2"),
+        ):
+            with self.subTest(asset=asset):
+                with urllib.request.urlopen(
+                    self.base_url + asset, timeout=2
+                ) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(
+                        response.headers.get_content_type(), content_type
+                    )
+        with urllib.request.urlopen(self.base_url + "/js/ui_core.js", timeout=2) as response:
+            helper = response.read().decode("utf-8")
+
+        self.assertIn("export function evidenceLabel", helper)
+        self.assertNotIn("https://", helper)
+        with self.assertRaises(urllib.error.HTTPError) as missing:
+            urllib.request.urlopen(self.base_url + "/secret.js", timeout=2)
+        self.assertEqual(missing.exception.code, 404)
+
+    def test_home_page_loads_module_views_for_today_and_diagnosis(self):
         with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:
             home = response.read().decode("utf-8")
 
-        self.assertIn('<script src="/ui_core.js"></script>', home)
-        with urllib.request.urlopen(self.base_url + "/ui_core.js", timeout=2) as response:
-            helper = response.read().decode("utf-8")
-
-        self.assertIn("evidenceLabel", helper)
-        self.assertNotIn("https://", helper)
-
-    def test_home_page_loads_packaged_risk_cockpit_helper(self):
-        with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:
-            home = response.read().decode("utf-8")
-
-        self.assertIn('<script src="/risk_ui.js"></script>', home)
-        self.assertLess(home.index('/risk_ui.js'), home.index('/app.js'))
-        with urllib.request.urlopen(self.base_url + "/risk_ui.js", timeout=2) as response:
-            helper = response.read().decode("utf-8")
-
-        self.assertEqual(response.status, 200)
-        self.assertIn("visibleRisks", helper)
-        self.assertNotIn("https://", helper)
+        self.assertIn('<script type="module" src="/js/app.js"></script>', home)
+        for asset, marker in (
+            ("/js/views/today.js", "risk-dashboard"),
+            ("/js/views/diag.js", "/api/diagnostics"),
+            ("/js/views/calib.js", "/api/calibration"),
+            ("/js/views/settings.js", "/api/settings/backup"),
+        ):
+            with self.subTest(asset=asset):
+                with urllib.request.urlopen(
+                    self.base_url + asset, timeout=2
+                ) as response:
+                    script = response.read().decode("utf-8")
+                self.assertEqual(response.status, 200)
+                self.assertIn(marker, script)
+                # 只禁止真实外链引用；输入框 placeholder 提示文本不算。
+                self.assertNotIn('src="https://', script)
+                self.assertNotIn("fetch('https://", script)
+                self.assertNotIn('fetch("https://', script)
 
     def test_forecast_api_returns_json(self):
         request = urllib.request.Request(
@@ -321,7 +340,7 @@ class HttpApiTests(unittest.TestCase):
         with urllib.request.urlopen(request, timeout=2) as response:
             payload = json.loads(response.read().decode("utf-8"))
 
-        self.assertEqual(payload, {"forecasts": []})
+        self.assertEqual(payload, {"forecasts": [], "total": 0})
 
     def test_external_source_rule_refresh_and_radar_apis_form_a_complete_flow(self):
         status, source = self.post_json(
@@ -431,6 +450,137 @@ class HttpApiTests(unittest.TestCase):
         )
         with urllib.request.urlopen(request, timeout=2) as response:
             return json.loads(response.read().decode("utf-8"))
+
+    def request_json(self, path, payload, method, token="test-token"):
+        request = urllib.request.Request(
+            self.base_url + path,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-YuanJian-Token": token,
+            },
+            method=method,
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+
+    def test_settings_get_put_and_calibration_diagnostics_contract(self):
+        # GET 默认值
+        self.assertEqual(self.get_json("/api/settings/backup")["hour"], 3)
+        self.assertTrue(self.get_json("/api/settings/learning")["enabled"])
+        # PUT 持久化
+        status, saved = self.request_json(
+            "/api/settings/backup", {"enabled": True, "hour": 5}, "PUT"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(saved, {"enabled": True, "hour": 5, "keep": 7})
+        self.assertEqual(self.get_json("/api/settings/backup")["hour"], 5)
+        status, saved = self.request_json(
+            "/api/settings/learning", {"enabled": False}, "PUT"
+        )
+        self.assertEqual(saved, {"enabled": False})
+        # PUT 非法值 → 400
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self.request_json(
+                "/api/settings/retention", {"enabled": True, "days": 2}, "PUT"
+            )
+        self.assertEqual(raised.exception.code, 400)
+        raised.exception.close()
+        # 校准端点：扁平字段 + candidates 数组
+        calibration = self.get_json("/api/calibration")
+        for key in ("hit_rate", "false_positive_rate", "brier", "resolved_total"):
+            self.assertIn(key, calibration)
+        self.assertEqual(calibration["candidates"], [])
+        # 诊断端点：六瓦片扁平字段
+        diagnostics = self.get_json("/api/diagnostics")
+        for key in ("sources_enabled", "sources_total", "db_bytes", "runtime"):
+            self.assertIn(key, diagnostics)
+
+    def test_mobile_summary_export_writes_local_html(self):
+        status, payload = self.post_json("/api/export/mobile-summary", {})
+
+        self.assertEqual(status, 201)
+        self.assertTrue(str(payload["path"]).endswith(".html"))
+        page = Path(payload["path"]).read_text(encoding="utf-8")
+        self.assertIn("远见 · 今日摘要", page)
+        self.assertNotIn("https://", page)
+
+    def test_source_put_delete_and_opml_roundtrip(self):
+        _, created = self.post_json(
+            "/api/external/sources",
+            {
+                "name": "临时源",
+                "kind": "rss",
+                "url": "https://example.org/feed.xml",
+                "region": "heyuan",
+                "category": "news",
+            },
+        )
+        source_id = created["source_id"]
+        # PUT 更新
+        status, updated = self.request_json(
+            f"/api/external/sources/{source_id}",
+            {"name": "改名源", "url": "https://example.org/other.xml"},
+            "PUT",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(updated, {"source_id": source_id, "updated": ["endpoint", "name"]})
+        sources = {
+            item["source_id"]: item
+            for item in self.get_json("/api/external/sources")["sources"]
+        }
+        self.assertEqual(sources[source_id]["url"], "https://example.org/other.xml")
+        self.assertTrue(sources[source_id]["user_managed"])
+        # DELETE 删除
+        request = urllib.request.Request(
+            self.base_url + f"/api/external/sources/{source_id}",
+            headers={"X-YuanJian-Token": "test-token"},
+            method="DELETE",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            self.assertEqual(response.status, 200)
+        self.assertNotIn(
+            source_id,
+            [item["source_id"] for item in self.get_json("/api/external/sources")["sources"]],
+        )
+        # OPML 导入（xml 键契约）
+        opml = (
+            '<opml version="2.0"><body><outline text="甲" xmlUrl="https://a.example/rss"/>'
+            '<outline text="乙" xmlUrl="https://b.example/rss"/>'
+            '<outline text="私网" xmlUrl="http://192.168.1.1/rss"/></body></opml>'
+        )
+        status, imported = self.post_json(
+            "/api/external/sources/import-opml", {"xml": opml}
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(imported["imported"], 2)
+        self.assertEqual(imported["failed"], 1)
+
+    def test_feedback_api_feeds_the_learning_loop(self):
+        # 建一条最小事件链路，POST 反馈，校验流水与学习消费。
+        from yuanjian_app.cognition import CognitionController  # noqa: F401
+
+        with self.database().connect() as connection:
+            connection.execute(
+                "INSERT INTO event_clusters(cluster_id, title, first_seen_at, last_seen_at, evidence_hash, created_at, updated_at)"
+                " VALUES ('C-FB', '反馈事件', '2026-08-11T00:00:00Z', '2026-08-11T00:00:00Z', 'h', '2026-08-11T00:00:00Z', '2026-08-11T00:00:00Z')"
+            )
+            connection.execute(
+                "INSERT INTO personal_impacts(impact_id, cluster_id, judgment_id, interest_id, impact_score, alert_level, components_json, reason, created_at, updated_at)"
+                " VALUES ('P-FB', 'C-FB', 'J-FB', 'I-1', 0.5, 'L2', '{}', '测试', '2026-08-11T00:00:00Z', '2026-08-11T00:00:00Z')"
+            )
+        status, payload = self.post_json(
+            "/api/cognition/clusters/C-FB/feedback", {"action": "false_positive"}
+        )
+        self.assertEqual(status, 200)
+        with self.database().connect() as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) FROM feedback_events"
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def database(self):
+        return self._database
 
     def test_create_forecast_api_records_formal_prediction(self):
         status, created = self.post_json("/api/forecasts", self.valid_forecast())

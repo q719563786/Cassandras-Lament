@@ -68,7 +68,7 @@ function ledgerRows(forecasts) {
   return list.map(f => `<tr>
     <td>${escapeHtml(String(f.statement || f.summary || '').slice(0, 80))}</td>
     <td>${escapeHtml(categoryLabel(f.category))}</td>
-    <td class="num">${escapeHtml(f.probability != null ? `${Number(f.probability).toFixed(0)}%` : '—')}</td>
+    <td class="num">${escapeHtml(f.probability != null ? `${(Number(f.probability) * 100).toFixed(0)}%` : '—')}</td>
     <td>${escapeHtml(statusLabel(f.status))}</td>
     <td>${escapeHtml(formatLocalTime(f.created_at))}</td>
   </tr>`).join('');

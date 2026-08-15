@@ -21,7 +21,8 @@ const categories = Object.freeze({
   policy: '政策', technology: '科技', general: '综合'
 });
 const sourceKinds = Object.freeze({
-  rss: 'RSS / Atom', html_list: '公开网页列表', gdelt: 'GDELT 全球新闻索引'
+  rss: 'RSS / Atom', html_list: '公开网页列表', gdelt: 'GDELT 全球新闻索引',
+  json_api: '公开数据接口'
 });
 const regions = Object.freeze({
   heyuan: '河源', guangdong: '广东', national: '全国', global: '全球'

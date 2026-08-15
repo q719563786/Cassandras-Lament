@@ -1,18 +1,30 @@
 import hashlib
 import json
 import uuid
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .external_sources import (
     FetchError,
     fetch_bytes,
+    fetch_json,
     parse_feed,
     parse_gdelt,
     parse_html_list,
+    parse_json_api,
     validate_public_url,
 )
 from .text_cleaning import plain_text
+
+
+REGIONS = {"heyuan", "guangdong", "national", "global"}
+SOURCE_CATEGORIES = {
+    "gov", "water", "housing", "procurement", "industry", "news",
+    "finance", "general", "legacy",
+}
+SOURCE_KINDS = {"rss", "gdelt", "html_list", "json_api"}
 
 
 def utc_now():
@@ -46,8 +58,12 @@ def canonicalize_url(url):
 
 
 def fetch_source(source):
-    body = fetch_bytes(source["endpoint"])
     kind = source["kind"]
+    if kind == "json_api":
+        config = json.loads(source.get("config_json") or "{}")
+        body = fetch_json(source["endpoint"], config.get("request_payload", {}))
+        return parse_json_api(body, source["source_id"], source["name"], config)
+    body = fetch_bytes(source["endpoint"])
     if kind == "rss":
         return parse_feed(body, source["source_id"], source["name"], source["endpoint"])
     if kind == "gdelt":
@@ -67,56 +83,155 @@ class ExternalRadarService:
         self.on_item_stored = on_item_stored
 
     def ensure_public_defaults(self):
+        """Seed the verified preset sources and retire legacy ones in place."""
         defaults = (
-            {
-                "source_id": "S-BBC-ZH",
-                "name": "BBC中文RSS",
-                "kind": "rss",
-                "endpoint": "https://feeds.bbci.co.uk/zhongwen/simp/rss.xml",
-                "reliability_weight": 0.75,
-            },
-            {
-                "source_id": "S-MOHRSS-POLICY",
-                "name": "人力资源社会保障部政策解读",
-                "kind": "rss",
-                "endpoint": "http://www.mohrss.gov.cn/gkml/zcjd/rss.xml",
-                "reliability_weight": 0.95,
-                "config": {"primary_source": True},
-            },
-            {
-                "source_id": "S-MFA-SAFETY",
-                "name": "外交部领事安全提醒",
-                "kind": "html_list",
-                "endpoint": "https://cs.mfa.gov.cn/rss/",
-                "reliability_weight": 0.95,
-                "config": {"primary_source": True},
-            },
-            {
-                "source_id": "S-GDELT-CHINA",
-                "name": "GDELT全球新闻索引",
-                "kind": "gdelt",
-                "endpoint": "https://api.gdeltproject.org/api/v2/doc/doc?query=China&mode=artlist&format=json&maxrecords=25&timespan=1d",
-                "reliability_weight": 0.65,
-            },
+            {"source_id": "S-HY-GOV-NEWS", "name": "河源市政府门户·要闻动态",
+             "kind": "html_list", "endpoint": "http://www.heyuan.gov.cn/ywdt/index.html",
+             "region": "heyuan", "category": "gov", "refresh_minutes": 60,
+             "reliability_weight": 0.9},
+            {"source_id": "S-HY-GOV-PUB", "name": "河源市政府门户·政务公开",
+             "kind": "html_list", "endpoint": "http://www.heyuan.gov.cn/zwgk/index.html",
+             "region": "heyuan", "category": "gov", "refresh_minutes": 60,
+             "reliability_weight": 0.9},
+            {"source_id": "S-HY-GGZYPZ", "name": "河源市公共资源配置信息",
+             "kind": "html_list",
+             "endpoint": "https://www.heyuan.gov.cn/zwgk/zdlyxx/ggzypz/",
+             "region": "heyuan", "category": "procurement", "refresh_minutes": 30,
+             "reliability_weight": 0.9},
+            {"source_id": "S-HY-RB", "name": "河源网（河源日报）",
+             "kind": "html_list", "endpoint": "http://www.hyrbnews.cn/",
+             "region": "heyuan", "category": "news", "refresh_minutes": 60,
+             "reliability_weight": 0.85},
+            {"source_id": "S-HY-RTV", "name": "河源网络广播电视台",
+             "kind": "html_list", "endpoint": "http://www.hyrtv.cn/",
+             "region": "heyuan", "category": "news", "refresh_minutes": 60,
+             "reliability_weight": 0.8},
+            {"source_id": "S-HY-XW", "name": "河源新闻网",
+             "kind": "html_list", "endpoint": "http://www.heyuanxw.com/",
+             "region": "heyuan", "category": "news", "refresh_minutes": 60,
+             "reliability_weight": 0.8},
+            {"source_id": "S-GD-GOV", "name": "广东省人民政府门户",
+             "kind": "html_list", "endpoint": "https://www.gd.gov.cn/",
+             "region": "guangdong", "category": "gov", "refresh_minutes": 60,
+             "reliability_weight": 0.9},
+            {"source_id": "S-GD-DRC", "name": "广东省发展和改革委员会",
+             "kind": "html_list", "endpoint": "http://drc.gd.gov.cn/",
+             "region": "guangdong", "category": "gov", "refresh_minutes": 60,
+             "reliability_weight": 0.9},
+            {"source_id": "S-GD-SL", "name": "广东省水利厅",
+             "kind": "html_list", "endpoint": "http://slt.gd.gov.cn/",
+             "region": "guangdong", "category": "water", "refresh_minutes": 60,
+             "reliability_weight": 0.9},
+            {"source_id": "S-GD-ZFCXJST", "name": "广东省住房和城乡建设厅",
+             "kind": "html_list", "endpoint": "https://zfcxjst.gd.gov.cn/",
+             "region": "guangdong", "category": "housing", "refresh_minutes": 60,
+             "reliability_weight": 0.9},
+            {"source_id": "S-GD-SOUTH", "name": "南方网",
+             "kind": "html_list", "endpoint": "https://www.southcn.com/",
+             "region": "guangdong", "category": "news", "refresh_minutes": 60,
+             "reliability_weight": 0.85},
+            {"source_id": "S-CN-PEOPLE-POL", "name": "人民网RSS·时政",
+             "kind": "rss", "endpoint": "http://www.people.com.cn/rss/politics.xml",
+             "region": "national", "category": "gov", "refresh_minutes": 60,
+             "reliability_weight": 0.9},
+            {"source_id": "S-CN-PEOPLE-FIN", "name": "人民网RSS·财经",
+             "kind": "rss", "endpoint": "http://www.people.com.cn/rss/finance.xml",
+             "region": "national", "category": "finance", "refresh_minutes": 60,
+             "reliability_weight": 0.9},
+            {"source_id": "S-CN-CCGP", "name": "中国政府采购网",
+             "kind": "html_list", "endpoint": "http://www.ccgp.gov.cn/",
+             "region": "national", "category": "procurement", "refresh_minutes": 30,
+             "reliability_weight": 0.9},
+            {"source_id": "S-CN-XINHUA", "name": "新华网",
+             "kind": "html_list", "endpoint": "http://www.xinhuanet.com/",
+             "region": "national", "category": "finance", "refresh_minutes": 60,
+             "reliability_weight": 0.85},
+            {"source_id": "S-GDELT-CHINA", "name": "GDELT全球新闻索引",
+             "kind": "gdelt",
+             "endpoint": "https://api.gdeltproject.org/api/v2/doc/doc?query=China&mode=artlist&format=json&maxrecords=25&timespan=1d",
+             "region": "global", "category": "general",
+             "reliability_weight": 0.65},
+            {"source_id": "S-YGP-HY", "name": "广东公共资源交易·河源全量公告",
+             "kind": "json_api",
+             "endpoint": "https://ygp.gdzwfw.gov.cn/ggzy-portal/search/v2/items",
+             "region": "heyuan", "category": "procurement", "refresh_minutes": 120,
+             "reliability_weight": 0.95, "config": {
+                 "request_payload": {
+                     "pageNo": 1, "pageSize": 50, "keyword": "",
+                     "siteCode": "441600", "secondType": "", "tradingProcess": "",
+                     "thirdType": "[]", "projectType": "",
+                     "publishStartTime": "", "publishEndTime": "",
+                     "type": "trading-type", "openConvert": False,
+                 },
+                 "items_path": "data.pageData",
+                 "fields": {
+                     "title": "noticeTitle", "published_at": "publishDate",
+                     "summary": "noticeThirdTypeDesc",
+                 },
+                 "url_template": (
+                     "https://ygp.gdzwfw.gov.cn/ggzy-portal/#/441600/jygg/"
+                     "detail?noticeId={noticeId}"
+                 ),
+             }},
+            {"source_id": "S-YGP-HY-D", "name": "广东公共资源交易·河源政府采购",
+             "kind": "json_api",
+             "endpoint": "https://ygp.gdzwfw.gov.cn/ggzy-portal/search/v2/items",
+             "region": "heyuan", "category": "procurement", "refresh_minutes": 120,
+             "reliability_weight": 0.95, "config": {
+                 "request_payload": {
+                     "pageNo": 1, "pageSize": 50, "keyword": "",
+                     "siteCode": "441600", "secondType": "D", "tradingProcess": "",
+                     "thirdType": "[]", "projectType": "",
+                     "publishStartTime": "", "publishEndTime": "",
+                     "type": "trading-type", "openConvert": False,
+                 },
+                 "items_path": "data.pageData",
+                 "fields": {
+                     "title": "noticeTitle", "published_at": "publishDate",
+                     "summary": "noticeThirdTypeDesc",
+                 },
+                 "url_template": (
+                     "https://ygp.gdzwfw.gov.cn/ggzy-portal/#/441600/jygg/"
+                     "detail?noticeId={noticeId}"
+                 ),
+             }},
         )
+        legacy_ids = ("S-BBC-ZH", "S-MOHRSS-POLICY", "S-MFA-SAFETY")
         with self.database.connect() as connection:
             existing = {
                 row[0]
                 for row in connection.execute("SELECT source_id FROM external_sources")
             }
+            # One-time retirement of legacy English defaults: disable in place,
+            # keep history. Guarded by category so it is idempotent.
+            connection.execute(
+                """
+                UPDATE external_sources SET enabled=0, category='legacy'
+                WHERE source_id IN (?, ?, ?) AND user_managed=0
+                  AND category != 'legacy'
+                """,
+                legacy_ids,
+            )
         for source in defaults:
             if source["source_id"] not in existing:
-                self.add_source(source)
+                self.add_source({**source, "user_managed": 0})
 
     def add_source(self, data):
         source_id = str(data.get("source_id") or f"S-{uuid.uuid4().hex[:12]}")
         name = str(data.get("name", "")).strip()
         kind = str(data.get("kind", "rss")).strip()
-        endpoint = validate_public_url(data.get("endpoint", ""))
+        endpoint = validate_public_url(
+            data.get("endpoint") or data.get("url") or ""
+        )
         refresh = int(data.get("refresh_minutes", 15))
         reliability = float(data.get("reliability_weight", 0.6))
-        if not name or kind not in {"rss", "gdelt", "html_list"}:
+        region = str(data.get("region", "global")).strip() or "global"
+        category = str(data.get("category", "general")).strip() or "general"
+        user_managed = 1 if int(data.get("user_managed", 1)) else 0
+        if not name or kind not in SOURCE_KINDS:
             raise ValueError("数据源名称或类型无效")
+        if region not in REGIONS or category not in SOURCE_CATEGORIES:
+            raise ValueError("区域或类别无效")
         if refresh < 5 or refresh > 1440 or not 0 <= reliability <= 1:
             raise ValueError("刷新周期或可靠度无效")
         with self.database.connect() as connection:
@@ -124,8 +239,9 @@ class ExternalRadarService:
                 """
                 INSERT INTO external_sources(
                     source_id, name, kind, endpoint, enabled, refresh_minutes,
-                    reliability_weight, config_json, next_fetch_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    reliability_weight, config_json, next_fetch_at,
+                    region, category, user_managed
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     source_id,
@@ -137,9 +253,174 @@ class ExternalRadarService:
                     reliability,
                     json.dumps(data.get("config", {}), ensure_ascii=False),
                     iso(self.now()),
+                    region,
+                    category,
+                    user_managed,
                 ),
             )
         return source_id
+
+    def update_source(self, source_id, data):
+        """Partially update a source; only whitelisted fields are applied."""
+        updates = {}
+        if "name" in data or "source_name" in data:
+            name = str(data.get("name") or data.get("source_name") or "").strip()
+            if not name:
+                raise ValueError("数据源名称无效")
+            updates["name"] = name
+        if "kind" in data:
+            kind = str(data.get("kind", "")).strip()
+            if kind not in SOURCE_KINDS:
+                raise ValueError("数据源类型无效")
+            updates["kind"] = kind
+        if "endpoint" in data or "url" in data:
+            updates["endpoint"] = validate_public_url(
+                data.get("endpoint") or data.get("url") or ""
+            )
+        if "region" in data:
+            region = str(data.get("region", "")).strip()
+            if region not in REGIONS:
+                raise ValueError("区域无效")
+            updates["region"] = region
+        if "category" in data:
+            category = str(data.get("category", "")).strip()
+            if category not in SOURCE_CATEGORIES:
+                raise ValueError("类别无效")
+            updates["category"] = category
+        if "refresh_minutes" in data:
+            refresh = int(data.get("refresh_minutes", 15))
+            if not 5 <= refresh <= 1440:
+                raise ValueError("刷新周期无效")
+            updates["refresh_minutes"] = refresh
+        if "reliability_weight" in data:
+            reliability = float(data.get("reliability_weight", 0.6))
+            if not 0 <= reliability <= 1:
+                raise ValueError("可靠度无效")
+            updates["reliability_weight"] = reliability
+        if not updates:
+            raise ValueError("没有可更新的字段")
+        assignments = ", ".join(f"{key}=?" for key in updates)
+        values = (*updates.values(), source_id)
+        with self.database.connect() as connection:
+            result = connection.execute(
+                f"UPDATE external_sources SET {assignments} WHERE source_id = ?",
+                values,
+            )
+            if result.rowcount != 1:
+                raise KeyError(source_id)
+        return {"source_id": source_id, "updated": sorted(updates)}
+
+    def delete_source(self, source_id, purge_items=False):
+        """Delete a user-managed source; preset sources can only be disabled."""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT user_managed FROM external_sources WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(source_id)
+            if not row["user_managed"]:
+                raise ValueError("预置源不可删除，可改为停用")
+            purged = 0
+            if purge_items:
+                items = [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT item_id FROM external_items WHERE source_id = ?",
+                        (source_id,),
+                    )
+                ]
+                if items:
+                    marks = ",".join("?" for _ in items)
+                    connection.execute(
+                        f"DELETE FROM external_matches WHERE item_id IN ({marks})",
+                        items,
+                    )
+                    connection.execute(
+                        "DELETE FROM event_cluster_items WHERE item_id IN "
+                        f"({marks}) AND item_id NOT IN "
+                        "(SELECT item_id FROM external_item_sources "
+                        " WHERE source_id != ?)",
+                        (*items, source_id),
+                    )
+                    connection.execute(
+                        f"DELETE FROM external_item_sources WHERE item_id IN ({marks})",
+                        items,
+                    )
+                    connection.execute(
+                        f"DELETE FROM external_items WHERE item_id IN ({marks})",
+                        items,
+                    )
+                    purged = len(items)
+            connection.execute(
+                "DELETE FROM external_sources WHERE source_id = ?", (source_id,)
+            )
+        return {
+            "source_id": source_id,
+            "deleted": True,
+            "purged_items": purged,
+        }
+
+    def import_opml(self, data):
+        """Import RSS sources from OPML text; unsafe URLs are skipped."""
+        xml_text = str(data.get("xml") or data.get("opml_text") or "")
+        path = str(data.get("opml_path") or "").strip()
+        if not xml_text and path:
+            if not path.lower().endswith(".opml"):
+                raise ValueError("仅支持 .opml 文件")
+            xml_text = Path(path).read_text(encoding="utf-8", errors="replace")
+        if not xml_text.strip():
+            raise ValueError("OPML内容为空")
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError as error:
+            raise ValueError(f"OPML解析失败：{error}") from error
+        region = str(data.get("region", "global")).strip() or "global"
+        category = str(data.get("category", "general")).strip() or "general"
+        if region not in REGIONS or category not in SOURCE_CATEGORIES:
+            raise ValueError("区域或类别无效")
+        outlines = [
+            element
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "outline"
+            and element.attrib.get("xmlUrl")
+        ][:200]
+        imported = duplicated = failed = 0
+        with self.database.connect() as connection:
+            existing = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT endpoint FROM external_sources"
+                )
+            }
+        for outline in outlines:
+            url = str(outline.attrib.get("xmlUrl", "")).strip()
+            title = str(outline.attrib.get("title", "") or url).strip()[:120]
+            try:
+                endpoint = validate_public_url(url)
+            except ValueError:
+                failed += 1
+                continue
+            if endpoint in existing:
+                duplicated += 1
+                continue
+            try:
+                self.add_source(
+                    {
+                        "name": title,
+                        "kind": "rss",
+                        "endpoint": endpoint,
+                        "region": region,
+                        "category": category,
+                        "refresh_minutes": 60,
+                    }
+                )
+            except ValueError:
+                failed += 1
+                continue
+            existing.add(endpoint)
+            imported += 1
+        return {"imported": imported, "duplicated": duplicated, "failed": failed}
 
     def add_watch_rule(self, data):
         query = " ".join(str(data.get("query", "")).split())
@@ -199,21 +480,49 @@ class ExternalRadarService:
             for row in rows
         ]
 
-    def list_sources(self):
+    def list_sources(self, region=None, category=None, enabled=None):
         now = self.now()
         with self.database.connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM external_sources ORDER BY name"
-            ).fetchall()
+            query = "SELECT * FROM external_sources"
+            clauses = []
+            values = []
+            if region:
+                clauses.append("region = ?")
+                values.append(region)
+            if category:
+                clauses.append("category = ?")
+                values.append(category)
+            if enabled is not None:
+                clauses.append("enabled = ?")
+                values.append(1 if enabled else 0)
+            if clauses:
+                query += " WHERE " + " AND ".join(clauses)
+            query += " ORDER BY name"
+            rows = connection.execute(query, values).fetchall()
         output = []
         for row in rows:
             item = dict(row)
             last_success = parse_iso(row["last_success_at"])
             item["enabled"] = bool(row["enabled"])
+            item["user_managed"] = bool(item.get("user_managed", 1))
             item["stale"] = bool(
                 last_success
                 and now - last_success > timedelta(minutes=row["refresh_minutes"] * 2)
             )
+            failures = int(row["consecutive_failures"] or 0)
+            status = row["last_status"] or "never"
+            if status in {"never", ""}:
+                health = "never"
+            elif failures >= 5:
+                health = "err"
+            elif failures >= 2 or item["stale"]:
+                health = "warn"
+            else:
+                health = "ok"
+            item["health"] = health
+            # Frontend contract: id/url aliases for source_id/endpoint.
+            item["id"] = item["source_id"]
+            item["url"] = item["endpoint"]
             output.append(item)
         return output
 

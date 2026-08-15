@@ -337,6 +337,12 @@ class JudgmentQueue:
             (_iso(start), _iso(end)),
         ).fetchone()[0]
 
+    def remote_used_today(self) -> int:
+        """公共接口：今日已成功的远程 AI 判读次数（诊断面板用）。"""
+        now = self.now().astimezone(timezone.utc)
+        with self.database.connect() as connection:
+            return int(self._remote_used_today(connection, now))
+
     def _persist_judgment(self, connection, job, provider, result, now):
         judgment_id = "J-" + uuid.uuid4().hex
         connection.execute(

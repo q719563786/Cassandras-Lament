@@ -138,18 +138,18 @@ class ImpactServiceTests(unittest.TestCase):
 
         candidate = self.service.candidate_forecast(impact["impact_id"])
 
-        self.assertEqual(self.forecasts.list_forecasts(), [])
+        self.assertEqual(self.forecasts.list_forecasts()[0], [])
         self.assertEqual(candidate["probability_low"], 0.55)
         self.assertEqual(candidate["probability_high"], 0.78)
         self.assertTrue(candidate["resolution_criteria"])
         with self.assertRaisesRegex(ValueError, "固定档位"):
             self.service.confirm_candidate(impact["impact_id"], 0.73)
-        self.assertEqual(self.forecasts.list_forecasts(), [])
+        self.assertEqual(self.forecasts.list_forecasts()[0], [])
 
         confirmed = self.service.confirm_candidate(impact["impact_id"], 0.65)
 
         self.assertEqual(confirmed["version"], 1)
-        self.assertEqual(self.forecasts.list_forecasts()[0]["probability"], 0.65)
+        self.assertEqual(self.forecasts.list_forecasts()[0][0]["probability"], 0.65)
 
 
 if __name__ == "__main__":

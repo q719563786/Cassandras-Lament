@@ -51,7 +51,7 @@ class ForecastServiceTests(unittest.TestCase):
         content = card(probability)
         with self.database.connect() as connection:
             connection.execute(
-                "INSERT OR IGNORE INTO forecasts VALUES ('F-1', 'open', '2026-08-16')"
+                "INSERT OR IGNORE INTO forecasts(forecast_id, status, window_end, category) VALUES ('F-1', 'open', '2026-08-16', 'finance')"
             )
             connection.execute(
                 "INSERT INTO forecast_versions VALUES (?, ?, ?, ?, ?)",
@@ -68,11 +68,13 @@ class ForecastServiceTests(unittest.TestCase):
         self.add_version(0.65, 1)
         self.add_version(0.80, 2)
 
-        items = ForecastService(self.database).list_forecasts()
+        items, total = ForecastService(self.database).list_forecasts()
 
+        self.assertEqual(total, 1)
         self.assertEqual(items[0]["probability"], 0.80)
         self.assertEqual(items[0]["version"], 2)
         self.assertEqual(items[0]["title"], "测试预测")
+        self.assertEqual(items[0]["category"], "finance")
 
     def test_resolve_binary_records_brier_and_audit(self):
         self.add_version(0.65, 1)

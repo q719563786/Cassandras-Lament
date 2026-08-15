@@ -7,14 +7,14 @@ $ErrorActionPreference = "Stop"
 $headlessEnvironment = "YUANJIAN_HEADLESS"
 $headlessValue = "1"
 $defaultView = "today"
-$riskCockpit = $true
+$moduleEntry = "/js/app.js"
 
 if ($Describe) {
     [pscustomobject]@{
         HeadlessEnvironment = $headlessEnvironment
         HeadlessValue = $headlessValue
         DefaultView = $defaultView
-        RiskCockpit = $riskCockpit
+        ModuleEntry = $moduleEntry
     } | ConvertTo-Json -Compress
     exit 0
 }
@@ -64,10 +64,14 @@ try {
     $headers = @{ "X-YuanJian-Token" = $runtime.token }
     $homeResponse = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri "http://127.0.0.1:$($runtime.port)/"
     $hasDefaultView = $homeResponse.Content.Contains('data-view="today"')
-    $hasRiskCockpitScript = $homeResponse.Content.Contains('risk_ui.js')
+    $hasModuleEntry = $homeResponse.Content.Contains($moduleEntry)
     $hasLegacyWorldView = $homeResponse.Content.Contains('data-view="world"')
-    if ($homeResponse.StatusCode -ne 200 -or -not $hasDefaultView -or -not $hasRiskCockpitScript -or $hasLegacyWorldView) {
+    if ($homeResponse.StatusCode -ne 200 -or -not $hasDefaultView -or -not $hasModuleEntry -or $hasLegacyWorldView) {
         throw "Packaged local UI did not pass the home-page check"
+    }
+    $moduleResponse = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri "http://127.0.0.1:$($runtime.port)/js/views/today.js"
+    if ($moduleResponse.StatusCode -ne 200) {
+        throw "Packaged module view was not served"
     }
     if ($homeResponse.Content.Contains("https://")) {
         throw "Packaged home page contains a remote resource"
@@ -95,7 +99,7 @@ try {
         HomeStatus = $homeResponse.StatusCode
         RemoteScripts = $false
         DefaultView = $defaultView
-        RiskCockpit = $riskCockpit
+        ModuleEntry = $moduleEntry
         LocalFallback = $cognition.provider
         SecondInstanceExitCode = $second.ExitCode
         Shutdown = $shutdown.status

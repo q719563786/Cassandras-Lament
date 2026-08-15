@@ -7,9 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import AppPaths
+from .backup import BackupService
 from .cognition import CognitionController, CognitionService
 from .database import Database
 from .desktop import DesktopBridge, DesktopUnavailable, PyWebViewDesktop
+from .diagnostics import DiagnosticsService
 from .forecasts import ForecastService
 from .external_radar import ExternalRadarService
 from .http_api import Services, create_server
@@ -17,14 +19,17 @@ from .interests import InterestService
 from .knowledge import KnowledgeService
 from .impacts import ImpactService
 from .judgments import LocalHeuristicProvider, build_public_bundle
+from .mobile_export import MobileExportService
 from .notifications import NotificationService
 from .operations import CognitionOperation
 from .remote_ai import AiSettingsService, JudgmentQueue
+from .retention import RetentionService
 from .secret_store import DpapiSecretStore
 from .signals import SignalService
 from .radar_scheduler import RadarScheduler
 from .runtime import RuntimeClient, RuntimeDiscovery, SingleInstance
 from .startup import StartupTask
+from .system_settings import SystemSettingsService
 from .trends import TrendService
 
 
@@ -82,11 +87,25 @@ class Application:
             ai_settings,
         )
         cognition_operation = CognitionOperation(controller)
+        backup_service = BackupService(database, root / "backups")
+        retention_service = RetentionService(database)
+        system_settings = SystemSettingsService(database)
+        diagnostics = DiagnosticsService(
+            database,
+            external=external,
+            ai_settings=ai_settings,
+            judgment_queue=queue,
+            backup_service=backup_service,
+        )
+        mobile_export = MobileExportService(root / "mobile")
         scheduler = RadarScheduler(
             external,
             database=database,
             cognition=controller,
             cognition_operation=cognition_operation,
+            backup_service=backup_service,
+            retention_service=retention_service,
+            learning_callback=controller.apply_feedback_learning,
         )
         startup = (
             StartupTask(executable=Path(sys.executable))
@@ -113,6 +132,12 @@ class Application:
                 ai_settings,
                 cognition_operation,
                 desktop_bridge,
+                system_settings=system_settings,
+                diagnostics=diagnostics,
+                backup_service=backup_service,
+                retention_service=retention_service,
+                mobile_export=mobile_export,
+                scheduler=scheduler,
             ),
         )
         if desktop is None:

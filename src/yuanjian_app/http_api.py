@@ -92,6 +92,12 @@ class Services:
     ai_settings: object = None
     cognition_operation: object = None
     desktop: object = None
+    system_settings: object = None
+    diagnostics: object = None
+    backup_service: object = None
+    retention_service: object = None
+    mobile_export: object = None
+    scheduler: object = None
 
 
 def create_server(host, port, token, services):
@@ -193,7 +199,15 @@ def create_server(host, port, token, services):
             if not self._require_api_access():
                 return
             if path == "/api/forecasts":
-                self._json({"forecasts": services.forecasts.list_forecasts()})
+                try:
+                    _query, limit, offset = self._pagination(parsed, 20)
+                    forecasts, total = services.forecasts.list_forecasts(
+                        limit=limit, offset=offset
+                    )
+                except ValueError as error:
+                    self._error(400, "invalid_request", str(error))
+                    return
+                self._json({"forecasts": forecasts, "total": total})
             elif path == "/api/interests":
                 self._json(
                     {
@@ -290,8 +304,36 @@ def create_server(host, port, token, services):
                 )
             elif path == "/api/settings/ai":
                 self._json(services.ai_settings.get())
+            elif path == "/api/calibration":
+                payload = services.forecasts.calibration_summary()
+                payload["candidates"] = (
+                    services.impacts.pending_candidates()
+                    if services.impacts is not None
+                    else []
+                )
+                self._json(payload)
+            elif path == "/api/diagnostics":
+                if services.diagnostics is None:
+                    self._error(503, "unavailable", "诊断能力未装配")
+                else:
+                    self._json(services.diagnostics.snapshot())
+            elif path == "/api/settings/backup":
+                if services.backup_service is None:
+                    self._error(503, "unavailable", "备份能力未装配")
+                else:
+                    self._json(services.backup_service.get_setting())
+            elif path == "/api/settings/retention":
+                if services.retention_service is None:
+                    self._error(503, "unavailable", "数据保留能力未装配")
+                else:
+                    self._json(services.retention_service.get_setting())
+            elif path == "/api/settings/learning":
+                if services.system_settings is None:
+                    self._error(503, "unavailable", "反馈学习未装配")
+                else:
+                    self._json(services.system_settings.get_learning())
             elif path == "/api/dashboard":
-                forecasts = services.forecasts.list_forecasts()
+                forecasts, _total = services.forecasts.list_forecasts()
                 self._json(
                     {
                         "open": [item for item in forecasts if item["status"] == "open"],
@@ -359,6 +401,9 @@ def create_server(host, port, token, services):
                 if path == "/api/external/sources":
                     source_id = services.external.add_source(payload)
                     self._json({"source_id": source_id}, 201)
+                    return
+                if path == "/api/external/sources/import-opml":
+                    self._json(services.external.import_opml(payload), 201)
                     return
                 if path.startswith("/api/external/sources/") and path.endswith("/enabled"):
                     source_id = unquote(
@@ -437,6 +482,19 @@ def create_server(host, port, token, services):
                 if path == "/api/settings/ai":
                     self._json(services.ai_settings.save(payload))
                     return
+                if path == "/api/export/mobile-summary":
+                    if services.mobile_export is None:
+                        raise ValueError("移动摘要导出未装配")
+                    source_states = (
+                        services.external.list_sources()
+                        if services.external is not None
+                        else []
+                    )
+                    dashboard = services.cognition_controller.risk_dashboard(
+                        source_states, limit=5
+                    )
+                    self._json(services.mobile_export.export(dashboard), 201)
+                    return
                 if path == "/api/forecasts":
                     self._json(services.forecasts.create_forecast(payload), 201)
                     return
@@ -467,5 +525,58 @@ def create_server(host, port, token, services):
                 self._error(400, "invalid_request", str(error))
             except KeyError:
                 self._error(404, "forecast_not_found", "预测不存在")
+
+        def do_PUT(self):
+            path = urlparse(self.path).path
+            if not self._require_api_access():
+                return
+            try:
+                payload = self._read_json()
+                if path == "/api/settings/backup":
+                    if services.backup_service is None:
+                        raise ValueError("备份能力未装配")
+                    self._json(services.backup_service.put_setting(payload))
+                    return
+                if path == "/api/settings/retention":
+                    if services.retention_service is None:
+                        raise ValueError("数据保留能力未装配")
+                    self._json(services.retention_service.put_setting(payload))
+                    return
+                if path == "/api/settings/learning":
+                    if services.system_settings is None:
+                        raise ValueError("反馈学习未装配")
+                    self._json(services.system_settings.put_learning(payload))
+                    return
+                if path.startswith("/api/external/sources/"):
+                    source_id = unquote(path.removeprefix("/api/external/sources/")).rstrip("/")
+                    if not source_id or "/" in source_id:
+                        raise ValueError("数据源编号无效")
+                    self._json(services.external.update_source(source_id, payload))
+                    return
+                self._error(404, "not_found", "接口不存在")
+            except (ValueError, json.JSONDecodeError) as error:
+                self._error(400, "invalid_request", str(error))
+            except KeyError:
+                self._error(404, "not_found", "对象不存在")
+
+        def do_DELETE(self):
+            path = urlparse(self.path).path
+            if not self._require_api_access():
+                return
+            # 无请求体的删除也走丢弃逻辑，规避 Windows 回环 RST（R4）。
+            self._discard_small_request_body()
+            if path.startswith("/api/external/sources/"):
+                source_id = unquote(path.removeprefix("/api/external/sources/")).rstrip("/")
+                if not source_id or "/" in source_id:
+                    self._error(400, "invalid_request", "数据源编号无效")
+                    return
+                try:
+                    self._json(services.external.delete_source(source_id))
+                except ValueError as error:
+                    self._error(400, "invalid_request", str(error))
+                except KeyError:
+                    self._error(404, "not_found", "数据源不存在")
+                return
+            self._error(404, "not_found", "接口不存在")
 
     return ThreadingHTTPServer((host, port), Handler)

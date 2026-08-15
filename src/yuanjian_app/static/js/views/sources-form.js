@@ -14,9 +14,13 @@ const REGIONS = [
 ];
 const CATEGORIES = [
   {value: 'gov', label: '政务'},
-  {value: 'general', label: '综合'},
+  {value: 'water', label: '水务'},
+  {value: 'housing', label: '住建'},
+  {value: 'procurement', label: '招标采购'},
+  {value: 'news', label: '新闻'},
   {value: 'industry', label: '产业'},
-  {value: 'finance', label: '金融'}
+  {value: 'finance', label: '金融'},
+  {value: 'general', label: '综合'}
 ];
 
 const opt = (list, current) => list.map(o =>
