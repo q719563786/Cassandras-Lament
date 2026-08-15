@@ -50,6 +50,12 @@ class Database:
             # matters once 18 preset sources refresh on first launch.
             connection.execute("PRAGMA journal_mode=WAL")
         with self.connect() as connection:
+            # Column migrations MUST run before the executescript: old
+            # databases that pre-date v5 already have the external_sources
+            # and forecasts tables, so CREATE TABLE IF NOT EXISTS is a no-op
+            # while CREATE INDEX ON external_sources(region) would fail with
+            # "no such column: region" without these additions first.
+            self._apply_column_migrations(connection)
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS forecasts(
@@ -354,7 +360,11 @@ class Database:
 
         SQLite raises on ALTER TABLE ADD COLUMN when the column already
         exists, and initialize() runs on every startup, so each addition is
-        guarded by a PRAGMA table_info check.
+        guarded by a PRAGMA table_info check. PRAGMA table_info returns an
+        empty result set for a missing table (instead of erroring), so we
+        first verify the table exists in sqlite_master before attempting
+        the migration — fresh databases get the columns via CREATE TABLE
+        below and must not hit ALTER on a non-existent table.
         """
         additions = (
             ("forecasts", "category", "TEXT NOT NULL DEFAULT 'general'"),
@@ -362,7 +372,15 @@ class Database:
             ("external_sources", "category", "TEXT NOT NULL DEFAULT 'general'"),
             ("external_sources", "user_managed", "INTEGER NOT NULL DEFAULT 0"),
         )
+        existing_tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
         for table, column, definition in additions:
+            if table not in existing_tables:
+                continue
             rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
             names = {row[1] for row in rows}
             if column not in names:

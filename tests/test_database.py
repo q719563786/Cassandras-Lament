@@ -213,6 +213,83 @@ class DatabaseTests(unittest.TestCase):
                 ):
                     connection.execute("DELETE FROM judgments WHERE judgment_id='J-1'")
 
+    def test_v4_database_with_legacy_external_sources_migrates_to_v5(self):
+        """Regression: an old database with an external_sources table that
+        pre-dates the v5 region/category/user_managed columns must migrate
+        successfully. Previously the migration ran AFTER the executescript,
+        so the CREATE INDEX ON external_sources(region) would crash with
+        'no such column: region' on startup and brick the user's install.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "yuanjian.db"
+            connection = sqlite3.connect(db_path)
+            try:
+                # Bare-minimum v4 schema: external_sources exists but is
+                # missing the three v5 columns. All other v5 tables are
+                # absent, simulating a real upgrade from a v4 install.
+                connection.executescript(
+                    """
+                    CREATE TABLE forecasts(
+                        forecast_id TEXT PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        window_end TEXT NOT NULL
+                    );
+                    CREATE TABLE external_sources(
+                        source_id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        endpoint TEXT NOT NULL,
+                        enabled INTEGER NOT NULL DEFAULT 1,
+                        refresh_minutes INTEGER NOT NULL DEFAULT 15,
+                        reliability_weight REAL NOT NULL DEFAULT 0.6,
+                        config_json TEXT NOT NULL DEFAULT '{}',
+                        last_attempt_at TEXT,
+                        last_success_at TEXT,
+                        last_status TEXT NOT NULL DEFAULT 'never',
+                        last_error TEXT NOT NULL DEFAULT '',
+                        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                        next_fetch_at TEXT
+                    );
+                    INSERT INTO external_sources(
+                        source_id, name, kind, endpoint
+                    ) VALUES ('S-legacy', '旧版源', 'rss', 'https://example.com/legacy.xml');
+                    INSERT INTO forecasts(
+                        forecast_id, status, window_end
+                    ) VALUES ('F-legacy', 'open', '2026-12-31');
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            database = Database(db_path)
+            database.initialize()  # Must not raise
+
+            with database.connect() as connection:
+                columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(external_sources)")
+                }
+                indexes = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='external_sources'"
+                    )
+                }
+                preserved_source = connection.execute(
+                    "SELECT name FROM external_sources WHERE source_id='S-legacy'"
+                ).fetchone()[0]
+                preserved_forecast = connection.execute(
+                    "SELECT status FROM forecasts WHERE forecast_id='F-legacy'"
+                ).fetchone()[0]
+
+            self.assertIn("region", columns)
+            self.assertIn("category", columns)
+            self.assertIn("user_managed", columns)
+            self.assertIn("idx_external_sources_region", indexes)
+            self.assertEqual(preserved_source, "旧版源")
+            self.assertEqual(preserved_forecast, "open")
+
 
 if __name__ == "__main__":
     unittest.main()
