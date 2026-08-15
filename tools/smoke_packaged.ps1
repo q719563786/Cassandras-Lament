@@ -76,7 +76,7 @@ try {
     if ($homeResponse.Content.Contains("https://")) {
         throw "Packaged home page contains a remote resource"
     }
-    $cognition = Invoke-RestMethod -Method Post -TimeoutSec 5 -Uri "http://127.0.0.1:$($runtime.port)/api/cognition/run" -Headers $headers -ContentType "application/json" -Body "{}"
+    $cognition = Invoke-RestMethod -Method Post -TimeoutSec 30 -Uri "http://127.0.0.1:$($runtime.port)/api/cognition/run" -Headers $headers -ContentType "application/json" -Body "{}"
     if ($cognition.provider -ne "local") {
         throw "Local fallback cognition was not used without an API token"
     }

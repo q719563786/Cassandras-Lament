@@ -13,3 +13,5 @@ smoke-runtime-*/
 *.env
 backups/
 cache/
+*.db-wal
+*.db-shm

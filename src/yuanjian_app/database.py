@@ -46,6 +46,10 @@ class Database:
         """Create the current schema and immutable-version safeguards."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
+            # WAL keeps reads unblocked while the radar thread writes, which
+            # matters once 18 preset sources refresh on first launch.
+            connection.execute("PRAGMA journal_mode=WAL")
+        with self.connect() as connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS forecasts(
@@ -369,8 +373,9 @@ class Database:
     @contextmanager
     def connect(self):
         """Yield a transaction and always close the Windows file handle."""
-        connection = sqlite3.connect(self.path)
+        connection = sqlite3.connect(self.path, timeout=10.0)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=10000")
         try:
             yield connection
             connection.commit()
