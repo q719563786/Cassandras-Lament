@@ -419,6 +419,20 @@ def create_server(host, port, token, services):
                 if path == "/api/external/sources/import-opml":
                     self._json(services.external.import_opml(payload), 201)
                     return
+                if path == "/api/external/sources/bulk-enabled":
+                    enabled = payload.get("enabled")
+                    if not isinstance(enabled, bool):
+                        raise ValueError("数据源状态无效")
+                    region = str(payload.get("region", "")).strip()
+                    category = str(payload.get("category", "")).strip()
+                    self._json(
+                        services.external.bulk_set_enabled(
+                            enabled,
+                            region=region or None,
+                            category=category or None,
+                        )
+                    )
+                    return
                 if path.startswith("/api/external/sources/") and path.endswith("/enabled"):
                     source_id = unquote(
                         path.removeprefix("/api/external/sources/").removesuffix("/enabled")

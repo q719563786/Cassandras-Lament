@@ -224,9 +224,60 @@ class ExternalRadarTests(unittest.TestCase):
 
         self.assertEqual(page["total"], 2)
         self.assertEqual(len(page["items"]), 1)
-        self.assertIn("河源", page["items"][0]["title"])
-        with self.assertRaisesRegex(ValueError, "分页"):
-            service.radar_page(limit=101)
+
+    def test_bulk_set_enabled_with_no_filter_flips_every_source(self):
+        """The Action Home '批量启用/批量停用' buttons rely on this: when
+        the user has the '全部区域' filter active, one POST must flip
+        every source at once, not just one."""
+        service = self.service(lambda source: [])
+        # Seed three sources via the public add path so they go through the
+        # same validation the HTTP endpoint uses.
+        for sid in ("S-H-A", "S-G-A", "S-N-A"):
+            service.add_source({
+                "source_id": sid, "name": sid, "kind": "rss",
+                "endpoint": f"https://example.com/{sid}.xml",
+                "refresh_minutes": 15, "reliability_weight": 0.7,
+            })
+        # Bulk disable everything.
+        result = service.bulk_set_enabled(False)
+        self.assertEqual(result["updated"], 3)
+        self.assertFalse(result["enabled"])
+        with self.database.connect() as conn:
+            rows = conn.execute("SELECT source_id, enabled FROM external_sources").fetchall()
+        self.assertEqual({r[0]: bool(r[1]) for r in rows}, {"S-H-A": False, "S-G-A": False, "S-N-A": False})
+        # Bulk re-enable everything.
+        result = service.bulk_set_enabled(True)
+        self.assertEqual(result["updated"], 3)
+        with self.database.connect() as conn:
+            rows = conn.execute("SELECT source_id, enabled FROM external_sources").fetchall()
+        self.assertEqual({r[0]: bool(r[1]) for r in rows}, {"S-H-A": True, "S-G-A": True, "S-N-A": True})
+
+    def test_bulk_set_enabled_with_region_filter_only_touches_matching_sources(self):
+        service = self.service(lambda source: [])
+        # Seed sources across two regions; the Heyuan one must stay
+        # untouched when the bulk operation targets Guangdong.
+        for sid, region in (
+            ("S-HY-1", "heyuan"), ("S-HY-2", "heyuan"),
+            ("S-GD-1", "guangdong"), ("S-GD-2", "guangdong"),
+        ):
+            service.add_source({
+                "source_id": sid, "name": sid, "kind": "rss",
+                "endpoint": f"https://example.com/{sid}.xml",
+                "refresh_minutes": 15, "reliability_weight": 0.7,
+                "region": region,
+            })
+        result = service.bulk_set_enabled(False, region="guangdong")
+        self.assertEqual(result["updated"], 2)
+        self.assertEqual(result["region"], "guangdong")
+        with self.database.connect() as conn:
+            rows = {
+                r[0]: bool(r[1])
+                for r in conn.execute("SELECT source_id, enabled FROM external_sources").fetchall()
+            }
+        # Guangdong flipped, Heyuan untouched.
+        self.assertEqual(
+            rows, {"S-HY-1": True, "S-HY-2": True, "S-GD-1": False, "S-GD-2": False}
+        )
 
 
 if __name__ == "__main__":

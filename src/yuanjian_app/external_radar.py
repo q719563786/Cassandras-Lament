@@ -540,6 +540,35 @@ class ExternalRadarService:
                 raise KeyError(source_id)
         return {"source_id": source_id, "enabled": bool(enabled)}
 
+    def bulk_set_enabled(self, enabled, region=None, category=None):
+        """Enable or disable every source matching the optional region/category
+        filter. Returns the number of rows changed so the UI can confirm
+        the action. The user can act on the entire catalogue or narrow by
+        region (heyuan / guangdong / national / global) and/or category
+        (gov / procurement / finance / news / water / housing / general).
+        """
+        clauses = []
+        values: list = []
+        if region:
+            clauses.append("region = ?")
+            values.append(region)
+        if category:
+            clauses.append("category = ?")
+            values.append(category)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self.database.connect() as connection:
+            result = connection.execute(
+                f"UPDATE external_sources SET enabled = ?{where}",
+                (1 if enabled else 0, *values),
+            )
+            updated = int(result.rowcount or 0)
+        return {
+            "enabled": bool(enabled),
+            "region": region or "",
+            "category": category or "",
+            "updated": updated,
+        }
+
     def _source(self, source_id):
         with self.database.connect() as connection:
             row = connection.execute(

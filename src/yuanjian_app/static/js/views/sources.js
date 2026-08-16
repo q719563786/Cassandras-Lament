@@ -48,8 +48,14 @@ export async function render(root) {
   const regions = ['all', 'heyuan', 'guangdong', 'national', 'global'];
   root.innerHTML = `<div class="u-max">
     <div class="u-between u-mb-md">
-      <div class="chips" id="region-chips">
-        ${regions.map(r => `<button type="button" class="chip" data-region="${r}" aria-pressed="${r === 'all'}">${r === 'all' ? '全部区域' : regionLabel(r)}</button>`).join('')}
+      <div class="u-row">
+        <div class="chips" id="region-chips">
+          ${regions.map(r => `<button type="button" class="chip" data-region="${r}" aria-pressed="${r === 'all'}">${r === 'all' ? '全部区域' : regionLabel(r)}</button>`).join('')}
+        </div>
+        <div class="u-row u-ml-sm">
+          <button type="button" class="btn btn-sm" data-bulk="true">批量启用</button>
+          <button type="button" class="btn btn-sm" data-bulk="false">批量停用</button>
+        </div>
       </div>
       <div class="u-row">
         <label class="btn btn-sm" for="opml-file">导入 OPML</label>
@@ -82,6 +88,26 @@ export async function render(root) {
       root.querySelectorAll('#region-chips .chip').forEach(c => c.setAttribute('aria-pressed', String(c === chip)));
       paint();
     });
+  });
+
+  // 批量启停：对当前过滤器范围生效（filter='all' 表示全部）。
+  root.querySelectorAll('[data-bulk]').forEach(btn => {
+    btn.addEventListener('click', () => withBusy(btn, '处理中…', async () => {
+      const enabled = btn.dataset.bulk === 'true';
+      const scope = filter && filter !== 'all' ? regionLabel(filter) : '全部';
+      if (!window.confirm(`${enabled ? '批量启用' : '批量停用'}【${scope}】区域下的所有信息源？`)) return;
+      try {
+        const response = await api('/api/external/sources/bulk-enabled', {
+          method: 'POST',
+          body: JSON.stringify({
+            enabled,
+            region: filter && filter !== 'all' ? filter : '',
+          })
+        });
+        showToast(`${enabled ? '已启用' : '已停用'} ${response?.updated ?? 0} 个信息源`);
+        await reload();
+      } catch (e) { showToast(`批量操作失败：${e.message}`, 'err'); }
+    }));
   });
 
   // 重新拉取列表
