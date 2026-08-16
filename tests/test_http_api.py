@@ -685,6 +685,55 @@ class HttpApiTests(unittest.TestCase):
         self.assertTrue(detail["impacts"])
         self.assertTrue(detail["impacts"][0]["candidate"])
 
+    def test_post_without_body_is_accepted_for_endpoints_that_need_no_payload(self):
+        """Regression: a fetch() call with {method:'POST'} and no body
+        omits Content-Length entirely, which used to fail with '请求内容
+        为空或过大' on every endpoint — including /api/cognition/run
+        that the Action Home '立即更新判断' button triggers. Endpoints
+        that do not need payload must accept an empty request.
+        """
+        # Simulate browser fetch() with method: 'POST' and no body/data
+        # argument: urllib with data=None does NOT set Content-Length.
+        request = urllib.request.Request(
+            self.base_url + "/api/cognition/run",
+            data=None,
+            headers={
+                "Content-Type": "application/json",
+                "X-YuanJian-Token": "test-token",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=2) as response:
+            self.assertEqual(response.status, 200)
+            payload = json.loads(response.read().decode("utf-8"))
+        # cognition/run returns a dict with judgments/candidates count —
+        # the exact shape is not what we're testing; we only need to prove
+        # the empty-body request was accepted rather than rejected as
+        # "请求内容为空或过大".
+        self.assertIn("judgments", payload)
+
+    def test_post_with_oversized_body_returns_bad_request(self):
+        """The size guard must still fire — only empty bodies should be
+        accepted, not unbounded ones."""
+        oversized = "x" * 70000  # > 65536 byte limit
+        request = urllib.request.Request(
+            self.base_url + "/api/events",
+            data=json.dumps({"text": oversized}).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-YuanJian-Token": "test-token",
+            },
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(request, timeout=2)
+        except urllib.error.HTTPError as error:
+            self.assertEqual(error.code, 400)
+            body = json.loads(error.read().decode("utf-8"))
+            self.assertIn("请求内容为空或过大", body["error"]["message"])
+        else:
+            self.fail("oversized body should have been rejected")
+
     def test_ai_settings_never_return_secret_and_posts_require_token(self):
         status, saved = self.post_json(
             "/api/settings/ai",

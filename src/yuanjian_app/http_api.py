@@ -145,8 +145,15 @@ def create_server(host, port, token, services):
 
         def _read_json(self):
             length = int(self.headers.get("Content-Length", "0"))
-            if length <= 0 or length > 65536:
+            if length > 65536:
                 raise ValueError("请求内容为空或过大")
+            if length <= 0:
+                # An empty POST body is a legal request — endpoints that do
+                # not need payload (e.g. /api/cognition/run, notification
+                # mark-as-read) would otherwise fail with a misleading
+                # "empty body" error when callers (such as fetch with no
+                # body argument) omit Content-Length entirely.
+                return {}
             return json.loads(self.rfile.read(length).decode("utf-8"))
 
         def _pagination(self, parsed, default_limit):

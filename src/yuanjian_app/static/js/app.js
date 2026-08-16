@@ -25,7 +25,7 @@ runButton?.addEventListener('click', () => {
   withBusy(runButton, '正在研判…', async () => {
     if (spinner) spinner.classList.add('spinning');
     try {
-      const result = await api('/api/cognition/run', {method: 'POST'});
+      const result = await api('/api/cognition/run', {method: 'POST', body: ''});
       showToast(summarizeRun(result));
       updateChrome({connected: true});
       await renderView();          // 当前视图重拉数据
