@@ -215,6 +215,11 @@ def create_server(host, port, token, services):
                     self._error(400, "invalid_request", str(error))
                     return
                 self._json({"forecasts": forecasts, "total": total})
+            elif path == "/api/forecasts/progress":
+                if services.forecasts is None:
+                    self._error(503, "unavailable", "预测能力未装配")
+                    return
+                self._json(services.forecasts.progress_summary())
             elif path == "/api/interests":
                 self._json(
                     {

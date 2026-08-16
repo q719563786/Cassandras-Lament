@@ -1,7 +1,7 @@
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 
@@ -26,6 +26,10 @@ def _iso_week_label(value):
             return "", False
     iso = day.isocalendar()
     return f"{iso[0]}-W{iso[1]:02d}", True
+
+
+def _iso(value):
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def parse_frontmatter(text):
@@ -444,3 +448,41 @@ class ForecastService:
             return connection.execute(
                 "SELECT COUNT(*) FROM forecasts WHERE status = 'open'"
             ).fetchone()[0]
+
+    def progress_summary(self, now=None):
+        """Lightweight counts for the Action Home 'prediction progress' card.
+
+        Returns only the four integers the home page needs:
+          - resolved_total: predictions whose outcome is recorded
+          - hit_total: predictions the user gave >=50% that came true
+          - miss_total: predictions the user gave >=50% that didn't come true
+          - due_this_week: open predictions whose window ends within 7 days
+        """
+        now = now or datetime.now(timezone.utc)
+        now_text = _iso(now)
+        horizon_text = _iso(now + timedelta(days=7))
+        with self.database.connect() as connection:
+            binary_rows = connection.execute(
+                """
+                SELECT f.forecast_id, r.outcome, r.probability
+                FROM forecasts f
+                JOIN resolutions r ON r.forecast_id = f.forecast_id
+                WHERE r.outcome IN ('occurred', 'not_occurred')
+                """
+            ).fetchall()
+            due_rows = connection.execute(
+                """
+                SELECT forecast_id, window_end FROM forecasts
+                WHERE status='open' AND window_end >= ? AND window_end <= ?
+                """,
+                (now_text, horizon_text),
+            ).fetchall()
+        confident = [r for r in binary_rows if float(r["probability"]) >= 0.5]
+        hits = [r for r in confident if r["outcome"] == "occurred"]
+        miss = [r for r in confident if r["outcome"] == "not_occurred"]
+        return {
+            "resolved_total": len(binary_rows),
+            "hit_total": len(hits),
+            "miss_total": len(miss),
+            "due_this_week": len(due_rows),
+        }

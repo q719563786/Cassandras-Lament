@@ -164,6 +164,49 @@ class ForecastServiceTests(unittest.TestCase):
         self.assertIn("收入确认后改善现金流。", latest)
         self.assertIn("发薪流程可能延迟。", latest)
 
+    def test_progress_summary_counts_hits_misses_and_due_within_a_week(self):
+        """The Action Home 'prediction progress' card depends on this:
+        four integer counts that distinguish hits, misses, and predictions
+        whose window ends in the next 7 days."""
+        from datetime import datetime, timedelta, timezone
+        import json
+        service = ForecastService(self.database)
+        now = datetime(2026, 8, 15, 12, tzinfo=timezone.utc)
+        # 命中：>=50% 且 occurred
+        service.create_forecast(self.valid_data(forecast_id="F-1", probability=0.80, title="已命中"))
+        # 失误：>=50% 且 not_occurred
+        service.create_forecast(self.valid_data(forecast_id="F-2", probability=0.65, title="已失误"))
+        # 不计入命中率：<50% 且 occurred（用户本来就不确定）
+        service.create_forecast(self.valid_data(forecast_id="F-3", probability=0.35, title="低概率命中"))
+        # 本周到期的开放预测
+        service.create_forecast(
+            self.valid_data(forecast_id="F-4", probability=0.65, title="本周到期", window_end="2026-08-21")
+        )
+        # 7 天后才到期的开放预测——不算本周到期
+        service.create_forecast(
+            self.valid_data(forecast_id="F-5", probability=0.65, title="下周到后", window_end="2026-08-25")
+        )
+        # Resolve the three binary-outcome predictions.
+        with service.database.connect() as conn:
+            rows = conn.execute("SELECT forecast_id, category, window_end FROM forecasts").fetchall()
+        # Title prefix '已命中' → first row etc. Use positional mapping.
+        resolved = [
+            ("F-1", "occurred", 0.80),
+            ("F-2", "not_occurred", 0.65),
+            ("F-3", "occurred", 0.35),
+        ]
+        for fid, outcome, prob in resolved:
+            with service.database.connect() as conn:
+                conn.execute(
+                    "INSERT INTO resolutions(forecast_id, outcome, resolved_at, probability, brier_score) VALUES (?,?,?,?,?)",
+                    (fid, outcome, "2026-08-10T00:00:00Z", prob, 0.2),
+                )
+        progress = service.progress_summary()
+        self.assertEqual(progress["resolved_total"], 3)
+        self.assertEqual(progress["hit_total"], 1)
+        self.assertEqual(progress["miss_total"], 1)
+        self.assertEqual(progress["due_this_week"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
