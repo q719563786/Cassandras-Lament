@@ -109,7 +109,7 @@ export function summarizeRun(result) {
   const notifications = count(result?.notifications_created);
   const seconds = (count(result?.elapsed_ms) / 1000).toFixed(1);
   if (processed + queued + judgments + impacts + notifications === 0) {
-    return `运行完成，本次没有新增待处理信息（${seconds}秒）`;
+    return `运行完成（${seconds}秒）。尚无新增待处理信息——去源管理启用几个与你相关的信息源，或把新情况直接告诉远见。`;
   }
   return `运行完成：处理${processed}条信息，排队${queued}个事件，完成${judgments}次研判，形成${impacts}条利益影响，新增${notifications}条提醒（${seconds}秒）`;
 }

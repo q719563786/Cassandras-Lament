@@ -456,6 +456,13 @@ class CognitionController:
         self.notifications = notifications
         self.ai_settings = ai_settings
         self.now = now
+        # Wall-clock cutoff: only notify for judgments created at or after
+        # this timestamp. Prevents the first process_once() run from firing
+        # one notification per historical judgment the database inherited
+        # from a previous install (the regression that dumped 200+ noise
+        # notifications on a v4->v5 upgrade). Mapped impacts still update
+        # unconditionally so private-impact scoring stays current.
+        self._notify_since = self.now()
 
     def _bundle(self, cluster_id):
         from .judgments import build_public_bundle
@@ -469,6 +476,17 @@ class CognitionController:
             self.judgment_queue.providers[remote.name] = remote
             return remote.name
         return "local"
+
+    def _should_notify(self, row) -> bool:
+        """False for judgments older than the bootstrap cutoff.
+
+        The first process_once() run after install/upgrade sets
+        _notify_since to "now", so historical judgments inherited from a
+        previous install are silently mapped (to keep personal_impacts
+        scoring current) but never notify. After the first pass, the
+        cutoff advances and fresh judgments notify normally.
+        """
+        return str(row["j_created_at"]) >= _iso(self._notify_since)
 
     def process_once(self):
         backfill = self.cognition.backfill_unclustered(limit=1000)
@@ -486,7 +504,8 @@ class CognitionController:
         with self.database.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT j.judgment_id,j.cluster_id,c.evidence_hash
+                SELECT j.judgment_id,j.cluster_id,j.created_at AS j_created_at,
+                       c.evidence_hash
                 FROM judgments j
                 JOIN event_clusters c ON c.latest_judgment_id=j.judgment_id
                 ORDER BY j.created_at
@@ -495,6 +514,11 @@ class CognitionController:
         for row in rows:
             results = self.impacts.map_judgment(row["cluster_id"], row["judgment_id"])
             mapped += len(results)
+            # Silently upgrade pre-cutoff judgments on the bootstrap run
+            # (mapping is unconditional) so the first cycle never dumps a
+            # cascade of historical notifications into the inbox.
+            if not self._should_notify(row):
+                continue
             for impact in results:
                 candidate = impact.get("candidate", {})
                 try:
@@ -516,6 +540,9 @@ class CognitionController:
                     impact["reason"],
                 )
                 notified += int(notification["status"] == "created")
+        # After the first pass, drop the cutoff so future cycles notify
+        # normally — only the bootstrap run is muted.
+        self._notify_since = self.now()
         return {
             "backfill": backfill,
             "queued": len(clusters),

@@ -113,7 +113,7 @@ assert.equal(
 );
 assert.equal(
   ui.summarizeRun({backfill: {processed: 0}, queued: 0, judgments: {succeeded: 0}, mapped_impacts: 0, notifications_created: 0, elapsed_ms: 9}),
-  '运行完成，本次没有新增待处理信息（0.0秒）'
+  '运行完成（0.0秒）。尚无新增待处理信息——去源管理启用几个与你相关的信息源，或把新情况直接告诉远见。'
 );
 assert.deepEqual(ui.inputResult({alert_level: 'L4', recommended_action: '马上联系医院'}), {advice: '马上联系医院', risk: '高风险'});
 assert.deepEqual(ui.inputResult({alert_level: 'L3', recommended_action: '先保留现金'}), {advice: '先保留现金', risk: '中风险'});

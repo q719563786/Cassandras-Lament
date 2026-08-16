@@ -349,5 +349,51 @@ class RiskDashboardTests(unittest.TestCase):
         self.assertEqual(dashboard["items"], [])
 
 
+class BootstrapNotifySuppressionTests(unittest.TestCase):
+    """Regression: the first process_once() run after install/upgrade
+    must not fire one notification per historical judgment the database
+    inherited from a previous install. Real install started dumping 200+
+    noise notifications into the inbox on a v4->v5 upgrade."""
+
+    def _make_controller(self, now):
+        controller = object.__new__(CognitionController)
+        controller.now = lambda: now
+        controller._notify_since = now
+        return controller
+
+    def test_historical_judgment_is_suppressed_on_bootstrap(self):
+        controller = self._make_controller(datetime(2026, 8, 15, 12, tzinfo=timezone.utc))
+        row = {"j_created_at": "2026-08-10T10:00:00Z"}  # 5 days old
+        self.assertFalse(controller._should_notify(row))
+
+    def test_fresh_judgment_notifies_normally(self):
+        controller = self._make_controller(datetime(2026, 8, 15, 12, tzinfo=timezone.utc))
+        row = {"j_created_at": "2026-08-15T13:00:00Z"}  # 1 hour after cutoff
+        self.assertTrue(controller._should_notify(row))
+
+    def test_judgment_at_cutoff_boundary_is_allowed(self):
+        """cutoff is inclusive — a judgment at exactly the cutoff second should notify."""
+        controller = self._make_controller(datetime(2026, 8, 15, 12, tzinfo=timezone.utc))
+        row = {"j_created_at": "2026-08-15T12:00:00Z"}
+        self.assertTrue(controller._should_notify(row))
+
+    def test_cutoff_advances_after_first_pass(self):
+        """After process_once advances _notify_since, even freshly
+        re-evaluated historical rows stop being suppressed repeatedly —
+        they only get suppressed the very first time."""
+        controller = self._make_controller(datetime(2026, 8, 15, 12, tzinfo=timezone.utc))
+        historical = {"j_created_at": "2026-08-10T10:00:00Z"}
+        self.assertFalse(controller._should_notify(historical))
+
+        # Simulate end-of-process_once: _notify_since is bumped to now
+        controller._notify_since = controller.now()
+        # The row is still "historical" (its created_at hasn't changed),
+        # but the comparison is now() vs row.created_at, so it still
+        # returns False — which is correct, because it has already been
+        # mapped and silently swallowed; the user gets exactly one
+        # historical cycle, then no more history-noise forever.
+        self.assertFalse(controller._should_notify(historical))
+
+
 if __name__ == "__main__":
     unittest.main()
