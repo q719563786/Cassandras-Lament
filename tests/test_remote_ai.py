@@ -32,6 +32,13 @@ def valid_output():
         "up_triggers": ["正式生效"],
         "down_triggers": ["延期"],
         "impact_categories": ["policy"],
+        "gyw": {
+            "stakeholders": "推动方：发文机关、上级政府；阻力方：执行部门、利益集团",
+            "constraints": "资源约束：财政预算、编制、配套立法",
+            "least_resistance_path": "最小阻力路径：试点 → 推广 → 全面执行",
+            "counter_evidence": "反对证据：执行阻力、利益集团游说、政策转向",
+            "leading_indicators": "领先指标：试点公告、配套细则、部门预算",
+        },
     }
 
 

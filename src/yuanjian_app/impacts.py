@@ -249,7 +249,8 @@ class ImpactService:
         with self.database.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT p.impact_id, p.candidate_json, p.updated_at, i.category
+                SELECT p.impact_id, p.candidate_json, p.updated_at,
+                       p.cluster_id, p.judgment_id, i.category
                 FROM personal_impacts p
                 JOIN interest_objects i ON i.object_id = p.interest_id
                 WHERE p.candidate_json NOT LIKE '%confirmed_forecast_id%'
@@ -259,9 +260,26 @@ class ImpactService:
                 """,
                 (_iso(self.now()), max(1, min(int(limit), 100))),
             ).fetchall()
+            # Pre-fetch judgment content for all candidates in one query so
+            # we can surface the GYW framework fields the provider generated.
+            judgment_ids = [row["judgment_id"] for row in rows if row["judgment_id"]]
+            judgments_by_id: dict[str, dict] = {}
+            if judgment_ids:
+                placeholders = ",".join("?" for _ in judgment_ids)
+                judgment_rows = connection.execute(
+                    f"SELECT judgment_id, content_json FROM judgments WHERE judgment_id IN ({placeholders})",
+                    judgment_ids,
+                ).fetchall()
+                for jrow in judgment_rows:
+                    try:
+                        content = json.loads(jrow["content_json"] or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        content = {}
+                    judgments_by_id[jrow["judgment_id"]] = content
         output = []
         for row in rows:
             candidate = json.loads(row["candidate_json"] or "{}")
+            judgment_content = judgments_by_id.get(row["judgment_id"], {})
             output.append(
                 {
                     "id": row["impact_id"],
@@ -269,6 +287,12 @@ class ImpactService:
                     "summary": candidate.get("title", ""),
                     "category": row["category"] or "general",
                     "window_end": candidate.get("window_end", ""),
+                    "cluster_id": row["cluster_id"],
+                    "judgment_id": row["judgment_id"],
+                    "gyw": judgment_content.get("gyw") or {},
+                    "fact_summary": judgment_content.get("fact_summary", ""),
+                    "actors": judgment_content.get("actors", []),
+                    "causal_chain": judgment_content.get("causal_chain", []),
                 }
             )
         return output

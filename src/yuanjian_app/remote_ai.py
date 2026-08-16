@@ -80,6 +80,28 @@ def _result_schema():
             "type": "array",
             "items": {"type": "string", "enum": sorted(ALLOWED_IMPACT_CATEGORIES)},
         },
+        # GYW framework (《登高望远》): require the provider to emit the
+        # five structured fields so the home page can show real stakeholder
+        # / constraint / least-resistance / counter-evidence / leading-
+        # indicator analysis instead of UI fallback templates.
+        "gyw": {
+            "type": "object",
+            "properties": {
+                "stakeholders": {"type": "string"},
+                "constraints": {"type": "string"},
+                "least_resistance_path": {"type": "string"},
+                "counter_evidence": {"type": "string"},
+                "leading_indicators": {"type": "string"},
+            },
+            "required": [
+                "stakeholders",
+                "constraints",
+                "least_resistance_path",
+                "counter_evidence",
+                "leading_indicators",
+            ],
+            "additionalProperties": False,
+        },
     }
     return {
         "type": "object",

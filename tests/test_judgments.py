@@ -52,6 +52,13 @@ class JudgmentTests(unittest.TestCase):
             "up_triggers": ["正式文件生效"],
             "down_triggers": ["执行延期"],
             "impact_categories": ["health", "policy"],
+            "gyw": {
+                "stakeholders": "推动方：医保局、卫健部门；阻力方：财政、地方执行",
+                "constraints": "资源约束：医保基金、财政补贴、医院承载",
+                "least_resistance_path": "最小阻力路径：分批纳入医保 / 试点城市先行",
+                "counter_evidence": "反对证据：基金穿底风险、地方拖延、舆情反弹",
+                "leading_indicators": "领先指标：医保目录调整、试点城市名单",
+            },
         }
 
     def test_public_bundle_keeps_only_public_fields_and_has_hard_limits(self):
@@ -131,6 +138,75 @@ class JudgmentTests(unittest.TestCase):
         self.assertTrue(stronger.causal_chain)
         self.assertTrue(stronger.uncertainties)
         self.assertIn("health", stronger.impact_categories)
+
+    def test_local_provider_emits_gyw_framework_for_every_category(self):
+        """《登高望远》GYW-005/006/007/010/012: every judgment must carry
+        the five structured fields. The home page consumes them directly
+        to render the deep-dive analysis; without them it falls back to
+        UI templates, which the user explicitly rejected as boilerplate."""
+        provider = LocalHeuristicProvider()
+        # Cycle through every category template plus the default fallback.
+        for categories in (
+            ("health", "policy"),
+            ("policy",),
+            ("finance",),
+            ("cashflow",),
+            ("opportunity",),
+            ("work",),
+            ("family",),
+            ("unknown_category",),  # falls through to default template
+        ):
+            cluster = {
+                "cluster_id": "C-gyw",
+                "title": "GYW 测试事件",
+                "summary": "测试摘要",
+                "evidence_level": "E2",
+                "categories_json": json.dumps(list(categories), ensure_ascii=False),
+                "evidence_hash": "hash-gyw",
+                "items": [],
+            }
+            bundle = build_public_bundle(cluster, [self.item()])
+            result = provider.analyze(bundle)
+            self.assertIsInstance(result.gyw, dict, f"gyw missing for {categories}")
+            for field in (
+                "stakeholders",
+                "constraints",
+                "least_resistance_path",
+                "counter_evidence",
+                "leading_indicators",
+            ):
+                value = result.gyw.get(field, "")
+                self.assertTrue(
+                    value.strip(),
+                    f"gyw.{field} empty for {categories}",
+                )
+
+    def test_validate_judgment_rejects_partial_gyw(self):
+        """A judgment missing any GYW sub-key must fail validation — the
+        home page relies on all five fields being present."""
+        result = self.valid_result()
+        result["gyw"] = {
+            "stakeholders": "推动方",
+            "constraints": "约束",
+            # missing least_resistance_path, counter_evidence, leading_indicators
+        }
+        with self.assertRaises(InvalidJudgmentError):
+            validate_judgment(result, {"S-1"})
+
+    def test_validate_judgment_rejects_empty_gyw_string(self):
+        """An empty string in any GYW slot is worse than missing the slot
+        entirely — it would let the provider ship a framework it never
+        filled. Reject loudly."""
+        result = self.valid_result()
+        result["gyw"] = {
+            "stakeholders": "推动方",
+            "constraints": "约束",
+            "least_resistance_path": "   ",
+            "counter_evidence": "反对",
+            "leading_indicators": "指标",
+        }
+        with self.assertRaises(InvalidJudgmentError):
+            validate_judgment(result, {"S-1"})
 
 
 if __name__ == "__main__":

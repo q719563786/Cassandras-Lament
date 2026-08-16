@@ -54,6 +54,13 @@ class ImpactServiceTests(unittest.TestCase):
             "up_triggers": ["正式生效"],
             "down_triggers": ["延期"],
             "impact_categories": ["health"],
+            "gyw": {
+                "stakeholders": "推动方：医保局；阻力方：财政、地方执行",
+                "constraints": "资源约束：医保基金、财政补贴",
+                "least_resistance_path": "最小阻力路径：试点城市先行",
+                "counter_evidence": "反对证据：基金穿底风险",
+                "leading_indicators": "领先指标：试点城市名单",
+            },
         }
         with self.database.connect() as connection:
             connection.execute(
@@ -150,6 +157,37 @@ class ImpactServiceTests(unittest.TestCase):
 
         self.assertEqual(confirmed["version"], 1)
         self.assertEqual(self.forecasts.list_forecasts()[0][0]["probability"], 0.65)
+
+    def test_pending_candidates_surfaces_gyw_framework_from_judgment(self):
+        """The Action Home deep-dive card reads candidate.gyw to render
+        the 《登高望远》 stakeholder/constraint/least-resistance/counter/
+        leading-indicator analysis. pending_candidates must surface the
+        gyw sub-structure stored in the judgment's content_json."""
+        cluster_id, judgment_id = self.add_judgment("gyw", "E3")
+        self.service.map_judgment(cluster_id, judgment_id)
+
+        candidates = self.service.pending_candidates()
+
+        self.assertTrue(candidates)
+        candidate = candidates[0]
+        self.assertEqual(candidate["judgment_id"], judgment_id)
+        self.assertEqual(candidate["cluster_id"], cluster_id)
+        self.assertIsInstance(candidate["gyw"], dict)
+        for field in (
+            "stakeholders",
+            "constraints",
+            "least_resistance_path",
+            "counter_evidence",
+            "leading_indicators",
+        ):
+            self.assertTrue(
+                candidate["gyw"].get(field, "").strip(),
+                f"gyw.{field} missing or empty in pending_candidates output",
+            )
+        # Also surface fact_summary / actors / causal_chain so the home
+        # page can show the judgment's plain-language summary.
+        self.assertTrue(candidate["fact_summary"])
+        self.assertTrue(candidate["actors"])
 
 
 if __name__ == "__main__":

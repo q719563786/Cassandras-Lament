@@ -273,7 +273,12 @@ class HttpApiTests(unittest.TestCase):
             self.base_url + "/js/views/today.js", timeout=2
         ) as response:
             today = response.read().decode("utf-8")
-        self.assertIn("/api/risk-dashboard", today)
+        # Action Home v0.9 consumes /api/cognition/candidates + /api/forecasts/progress
+        # instead of /api/risk-dashboard. The deep-dive card surfaces backend
+        # GYW analysis from candidate.gyw.
+        self.assertIn("/api/cognition/candidates", today)
+        self.assertIn("/api/forecasts/progress", today)
+        self.assertIn("gyw", today)
 
     def test_personal_behavior_input_is_one_step_from_the_main_navigation(self):
         with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:
@@ -315,7 +320,7 @@ class HttpApiTests(unittest.TestCase):
 
         self.assertIn('<script type="module" src="/js/app.js"></script>', home)
         for asset, marker in (
-            ("/js/views/today.js", "risk-dashboard"),
+            ("/js/views/today.js", "/api/cognition/candidates"),
             ("/js/views/diag.js", "/api/diagnostics"),
             ("/js/views/calib.js", "/api/calibration"),
             ("/js/views/settings.js", "/api/settings/backup"),
