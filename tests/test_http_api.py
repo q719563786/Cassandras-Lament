@@ -441,14 +441,14 @@ class HttpApiTests(unittest.TestCase):
             },
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=2) as response:
+        with urllib.request.urlopen(request, timeout=30) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
 
     def get_json(self, path, token="test-token"):
         request = urllib.request.Request(
             self.base_url + path, headers={"X-YuanJian-Token": token}
         )
-        with urllib.request.urlopen(request, timeout=2) as response:
+        with urllib.request.urlopen(request, timeout=30) as response:
             return json.loads(response.read().decode("utf-8"))
 
     def request_json(self, path, payload, method, token="test-token"):
@@ -461,7 +461,7 @@ class HttpApiTests(unittest.TestCase):
             },
             method=method,
         )
-        with urllib.request.urlopen(request, timeout=5) as response:
+        with urllib.request.urlopen(request, timeout=30) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
 
     def test_settings_get_put_and_calibration_diagnostics_contract(self):

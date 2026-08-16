@@ -25,7 +25,11 @@ runButton?.addEventListener('click', () => {
   withBusy(runButton, '正在研判…', async () => {
     if (spinner) spinner.classList.add('spinning');
     try {
-      const result = await api('/api/cognition/run', {method: 'POST', body: ''});
+      // If the background scheduler is mid-run, the operation is locked and
+      // POST /api/cognition/run would 409 with "认知任务正在运行". Poll
+      // /api/cognition/status every 2s (up to 30s) until idle, then retry
+      // once. This turns a "失败" into a transparent wait-and-go.
+      const result = await runCognitionWithAutoRetry();
       showToast(summarizeRun(result));
       updateChrome({connected: true});
       await renderView();          // 当前视图重拉数据
@@ -38,6 +42,19 @@ runButton?.addEventListener('click', () => {
     }
   });
 });
+
+async function runCognitionWithAutoRetry(maxWaitMs = 30000) {
+  const deadline = Date.now() + maxWaitMs;
+  while (true) {
+    try {
+      return await api('/api/cognition/run', {method: 'POST', body: ''});
+    } catch (error) {
+      const busy = /认知任务正在运行/.test(error.message || '');
+      if (!busy || Date.now() >= deadline) throw error;
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+  }
+}
 
 // ===== 侧栏底部：安全退出（confirm 后 POST /api/shutdown） =====
 document.getElementById('shutdown')?.addEventListener('click', () => {

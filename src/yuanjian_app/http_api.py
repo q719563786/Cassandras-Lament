@@ -246,7 +246,14 @@ def create_server(host, port, token, services):
             elif path == "/api/external/rules":
                 self._json({"rules": services.external.list_rules()})
             elif path == "/api/cognition/status":
-                self._json(services.cognition_controller.status())
+                status = services.cognition_controller.status()
+                if services.cognition_operation is not None:
+                    status["running"] = services.cognition_operation.running
+                    if services.cognition_operation.started_at_monotonic is not None:
+                        status["started_at_monotonic"] = (
+                            services.cognition_operation.started_at_monotonic
+                        )
+                self._json(status)
             elif path == "/api/risk-dashboard":
                 source_states = (
                     services.external.list_sources()
