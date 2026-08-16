@@ -130,11 +130,20 @@ class DesktopLifecycleTests(unittest.TestCase):
             request_shutdown=lambda: self.shutdown_calls.append("shutdown"),
         )
 
-    def test_close_hides_window_without_requesting_shutdown(self):
+    def test_close_exits_app_instead_of_hiding_to_tray(self):
+        """Regression: closing the window must trigger safe shutdown, not
+        hide to tray. Non-technical users closing the window expected the
+        process to exit; the previous hide-to-tray behavior left the
+        loopback server and port listener alive, surprising users and
+        locking dist dlls on the next build (PermissionError on
+        ClrLoader.dll). The tray '退出远见' item still routes through
+        request_exit for tray-first users.
+        """
         self.assertFalse(self.lifecycle.close_to_tray())
 
-        self.assertEqual(self.window.calls, ["hide"])
-        self.assertEqual(self.shutdown_calls, [])
+        self.assertEqual(self.tray.calls, ["stop"])
+        self.assertEqual(self.shutdown_calls, ["shutdown"])
+        self.assertEqual(self.window.calls, ["destroy"])
 
     def test_show_window_restores_the_existing_window(self):
         self.lifecycle.show_window()
@@ -211,7 +220,7 @@ class PyWebViewDesktopTests(unittest.TestCase):
         self.assertIn("run_detached", shell.lifecycle.tray.calls)
 
         self.assertFalse(webview.window.events.closing.handlers[0]())
-        self.assertEqual(webview.window.calls, ["hide"])
+        self.assertEqual(webview.window.calls, ["destroy"])
 
 
 if __name__ == "__main__":

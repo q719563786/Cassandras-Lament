@@ -54,11 +54,18 @@ class DesktopLifecycle:
         self.exiting = False
 
     def close_to_tray(self) -> bool:
-        """Hide a normal close, but allow destruction during a real exit."""
+        """Closing the window exits the app — non-technical users expect
+        closing the window to stop the process. The previous hide-to-tray
+        behavior left the loopback server and port listener alive,
+        surprising users who closed the window assuming the app had quit,
+        and it locked dist dlls on the next build (PermissionError on
+        ClrLoader.dll). The tray icon's '退出远见' item still routes
+        through request_exit for users who prefer the tray.
+        """
         if self.exiting:
             return True
-        self.window.hide()
-        return False
+        self.request_exit()
+        return False  # request_exit already destroyed the window
 
     def show_window(self) -> None:
         self.window.show()
