@@ -6,7 +6,7 @@ import { tellBoxHtml, bindTellBox } from './tell.js';
 
 // 从 risk-dashboard 取最高优先级一条（mode action 优先 → L4 → impact_score）
 function topRisk(dashboard) {
-  const items = Array.isArray(dashboard?.risks) ? dashboard.risks : [];
+  const items = Array.isArray(dashboard?.items) ? dashboard.items : [];
   const visible = items.filter(item => item && (item.alert_level === 'L3' || item.alert_level === 'L4'));
   if (!visible.length) return null;
   return visible.sort((left, right) => {
@@ -58,9 +58,9 @@ export async function render(root) {
     showPageError(root, `风险面板读取失败：${error.message}`, () => render(root));
     return;
   }
-  // 覆盖不足空态沿用：dashboard 概览为 coverage_gap 或无可见风险时明示，不渲染假数据
-  if (dashboard?.overview === 'coverage_gap') {
-    root.innerHTML = `<div class="note u-max u-mb-md">监控覆盖不足——启用的信息源太少，暂时无法形成可靠判断。</div>${EMPTY_HTML}`;
+  // 覆盖不足空态沿用：dashboard state 为 coverage_gap 或无可见风险时明示，不渲染假数据
+  if (dashboard?.state === 'coverage_gap') {
+    root.innerHTML = `<div class="note u-max u-mb-md">${escapeHtml(dashboard?.summary || '监控覆盖不足——启用的信息源太少，暂时无法形成可靠判断。')}</div>${EMPTY_HTML}`;
   } else {
     const item = topRisk(dashboard);
     root.innerHTML = item ? heroHtml(item) : EMPTY_HTML;

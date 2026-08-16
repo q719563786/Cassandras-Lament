@@ -749,18 +749,25 @@ class CognitionController:
             if source.get("last_status") == "ok" and not source.get("stale", False)
         ]
         coverage_gap = bool(enabled) and not healthy
-        if coverage_gap:
-            state = "coverage_gap"
-            summary = "公开信息监控覆盖不足，系统正在重试，暂不能判断目前平稳。"
-        elif action_count:
+        # Prioritise showing actual risks over the coverage_gap empty state:
+        # the user already has L3/L4 impacts in the database, and hiding them
+        # behind "覆盖不足" (even when sources are temporarily stale) leaves
+        # the Action Home looking empty — which was the regression that made
+        # the user think the app produced "no 预知策略 at all".
+        if action_count:
             state = "action"
             summary = f"今天有 {action_count} 件事需要处理，先保护最重要的个人利益。"
         elif watch_count:
             state = "watch"
             summary = f"有 {watch_count} 件事需要继续观察，目前不必仓促行动。"
+        elif coverage_gap:
+            state = "coverage_gap"
+            summary = "公开信息监控覆盖不足，系统正在重试，暂不能判断目前平稳。"
         else:
             state = "stable"
             summary = "目前没有需要你处理的高等级风险，系统仍在后台监控。"
+        if coverage_gap and (action_count or watch_count):
+            summary = f"部分信息源正在重试。{summary}"
         return {
             "state": state,
             "summary": summary,
