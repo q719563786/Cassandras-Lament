@@ -172,6 +172,23 @@ assert.equal(ui.formatBytes(-1), '未知');
         self.assertIn("(Number(f.probability) * 100).toFixed(0)", view)
         self.assertIn("/api/calibration", view)
 
+    def test_calibration_view_explains_every_metric_to_a_non_technical_user(self):
+        """Regression: the calibration page used to ship four unexplained
+        KPI cards (命中率 /误报率 /Brier /已结算预测) and a candidate list
+        whose percentage dropdowns had no tooltip — non-technical users
+        had to guess. The page now embeds a help panel that defines each
+        term and explains the percentage dropdown is the user's own
+        subjective probability."""
+        view = (STATIC / "js" / "views" / "calib.js").read_text(encoding="utf-8")
+        for term in ("命中率", "误报率", "Brier 分数", "已结算预测"):
+            self.assertIn(f"<strong>{term}</strong>", view, f"missing explanation for {term}")
+        # The percentage dropdown must explain what the number represents.
+        self.assertIn("你判断这件事发生的概率", view)
+        self.assertIn("主观概率", view)
+        # The whole help panel must be in a <details> so it doesn't crowd
+        # the dashboard on every visit.
+        self.assertIn("<details class=\"card calib-help", view)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,3 +1,20 @@
+// 校准面板的使用说明：让非技术用户能读懂每个数字的含义。
+// 折叠面板默认收起，标题直接告诉用户"为什么要做这件事"。
+const HELP_HTML = `<details class="card calib-help u-mb-md">
+    <summary class="section-title">如何使用这个面板？</summary>
+    <div class="u-mt-sm body">
+      <p>这个面板衡量<strong>你的判断</strong>准不准——不只是远见猜得准不准，而是远见帮你做出的判断、加上你自己的概率选择，最后有没有真的发生。</p>
+      <ul>
+        <li><strong>命中率</strong>：你确认过的预测里，真的发生了的比例。100% = 全部命中。</li>
+        <li><strong>误报率</strong>：你确认过的预测里，事实没发生的比例。越低越好。</li>
+        <li><strong>Brier 分数</strong>：衡量概率预测的准确性。0 = 完美，0.25 = 一般，越低越好。计算方法：把每次预测的"你给的概率 − 实际结果"平方后求平均。</li>
+        <li><strong>已结算预测</strong>：观察期已结束、结果已记录的预测数量。这个数越多，上面三个数字越有参考价值。</li>
+        <li><strong>候选预测的百分比</strong>：这是<strong>你判断它会发生的主观概率</strong>。选中一个数（10%-90%），点"确认"后，远见会在截止日期检查它是否真的发生，并把你的概率和实际结果对比，记入 Brier 分数。</li>
+      </ul>
+      <p class="u-dim">一句话：选个概率 → 点确认 → 等到期看远见标对错。这是你训练自己判断力的方式。</p>
+    </div>
+  </details>`;
+
 // 远见 v0.9 · 校准面板 —— KPI×4 / Brier 周序列 SVG / 按类别条形 / 候选确认 + 预测账本（AC-02/AC-08）
 import { api, escapeHtml, showToast, paginationHtml, bindPagination, pageRange } from '../api.js';
 import { statusLabel, categoryLabel, formatLocalTime } from '../ui_core.js';
@@ -55,10 +72,10 @@ function candidatesHtml(candidates) {
   <div class="card">${list.map(c => `<div class="candidate" data-id="${escapeHtml(c.id)}">
     <div class="u-flex1"><p>${escapeHtml(c.statement || c.summary || '候选预测')}</p>
     <p class="u-dim">${escapeHtml(categoryLabel(c.category))} · 截止 ${escapeHtml(formatLocalTime(c.window_end))}</p></div>
-    <div class="u-row"><select aria-label="确认概率">
+    <div class="u-row"><select aria-label="你判断这件事发生的概率" title="你判断这件事发生的概率：10% = 不太可能，50% = 五五开，90% = 几乎必然。选完后点确认，远见会在截止日检查是否真的发生。">
       ${PROBS.map(p => `<option value="${p}">${p}%</option>`).join('')}
     </select>
-    <button type="button" class="btn btn-sm btn-primary" data-confirm>确认</button></div>
+    <button type="button" class="btn btn-sm btn-primary" data-confirm title="把这个预测连同你选的概率一起记入预测账本。">确认</button></div>
   </div>`).join('')}</div>`;
 }
 
@@ -96,6 +113,7 @@ export async function render(root) {
   const chart = brierChartSvg(calib?.brier_series);
   const cats = byCategoryRows(calib?.by_category);
   root.innerHTML = `<div class="u-max">
+    ${HELP_HTML}
     <section class="grid-kpi">${kpis}</section>
     <h2 class="section-title u-mt-md">Brier 周趋势（≥8 周）</h2>
     <section class="card">${chart || NO_SAMPLE}</section>
