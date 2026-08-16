@@ -254,6 +254,11 @@ def create_server(host, port, token, services):
                             services.cognition_operation.started_at_monotonic
                         )
                 self._json(status)
+            elif path == "/api/cognition/candidates":
+                self._json({
+                    "candidates": services.impacts.pending_candidates()
+                    if services.impacts is not None else []
+                })
             elif path == "/api/risk-dashboard":
                 source_states = (
                     services.external.list_sources()
