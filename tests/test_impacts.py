@@ -184,10 +184,167 @@ class ImpactServiceTests(unittest.TestCase):
                 candidate["gyw"].get(field, "").strip(),
                 f"gyw.{field} missing or empty in pending_candidates output",
             )
+        # And the source flag must be 'judgment' (real engine output),
+        # not 'legacy-backfill'.
+        self.assertEqual(candidate["gyw_source"], "judgment")
         # Also surface fact_summary / actors / causal_chain so the home
         # page can show the judgment's plain-language summary.
         self.assertTrue(candidate["fact_summary"])
         self.assertTrue(candidate["actors"])
+
+    def test_pending_candidates_backfills_gyw_for_legacy_judgments(self):
+        """Judgments that pre-date the GYW schema (v0.8 and earlier) have
+        no gyw sub-structure in content_json. pending_candidates must
+        fill the gap from a per-category template and mark gyw_source as
+        'legacy-backfill' so the home page can label it accurately.
+        The judgment table is immutable by design (UPDATE/DELETE triggers
+        abort), so we bypass add_judgment() and INSERT a v0.8-shaped
+        judgment directly via SQL — content_json missing the gyw key
+        simulates pre-GYW data, and INSERT does not run validate_judgment.
+        """
+        cluster_id = "C-legacy"
+        judgment_id = "J-legacy"
+        timestamp = "2026-08-10T00:00:00Z"
+        # Register interest + cluster + impact directly so the impact
+        # table is consistent with the candidate we'll fetch.
+        self.interests.create_object({
+            "name": "测试现金流利益", "category": "cashflow",
+            "importance": 3, "privacy_level": "P2",
+        })
+        with self.database.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO event_clusters(
+                    cluster_id,title,summary,first_seen_at,last_seen_at,
+                    evidence_level,evidence_hash,categories_json,
+                    latest_judgment_id,created_at,updated_at
+                ) VALUES (?,?, '',?,?,?,?,?,?,?,?)
+                """,
+                (cluster_id, "升级前旧 judgment 测试", timestamp, timestamp,
+                 "E3", "hash-legacy", '["cashflow"]', judgment_id,
+                 timestamp, timestamp),
+            )
+            # v0.8-shaped judgment — no gyw key.
+            legacy_content = {
+                "fact_summary": "升级前旧 judgment",
+                "actors": [], "causal_chain": [], "uncertainties": [],
+                "horizons": ["未来30天"],
+                "probability_low": 0.4, "probability_high": 0.6, "confidence": 0.5,
+                "supporting_source_ids": ["S-1"], "counter_source_ids": [],
+                "up_triggers": [], "down_triggers": [],
+                "impact_categories": ["cashflow"],
+            }
+            conn.execute(
+                "INSERT INTO judgments VALUES (?,?,?,?,?,?)",
+                (judgment_id, cluster_id, "local", "hash-legacy",
+                 json.dumps(legacy_content, ensure_ascii=False), timestamp),
+            )
+            conn.execute(
+                """
+                INSERT INTO personal_impacts(
+                    impact_id,cluster_id,judgment_id,interest_id,impact_score,
+                    alert_level,components_json,reason,candidate_json,created_at,updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                ("P-legacy", cluster_id, judgment_id, self.health["object_id"],
+                 0.5, "L3", '{"confidence":0.5}', "旧 judgment 触发",
+                 json.dumps({"title": "测试候选", "window_end": "2026-09-15"},
+                            ensure_ascii=False),
+                 timestamp, timestamp),
+            )
+
+        candidates = self.service.pending_candidates()
+        candidate = next(c for c in candidates if c["judgment_id"] == judgment_id)
+        self.assertEqual(candidate["gyw_source"], "legacy-backfill")
+        for field in (
+            "stakeholders",
+            "constraints",
+            "least_resistance_path",
+            "counter_evidence",
+            "leading_indicators",
+        ):
+            self.assertTrue(
+                candidate["gyw"].get(field, "").strip(),
+                f"backfilled gyw.{field} empty for legacy judgment",
+            )
+
+    def test_pending_candidates_uses_category_template(self):
+        """Legacy judgments with a known category (work) get the work
+        template; the template choice is driven by interest_id.category.
+        Sanity check that the right per-category branch fires."""
+        work = self.interests.create_object(
+            {"name": "测试工作利益", "category": "work",
+             "importance": 3, "privacy_level": "P2"}
+        )
+        cluster_id = "C-work"
+        judgment_id = "J-work"
+        timestamp = "2026-08-10T00:00:00Z"
+        with self.database.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO event_clusters(
+                    cluster_id,title,summary,first_seen_at,last_seen_at,
+                    evidence_level,evidence_hash,categories_json,
+                    latest_judgment_id,created_at,updated_at
+                ) VALUES (?,?, '',?,?,?,?,?,?,?,?)
+                """,
+                (cluster_id, "工作类别测试", timestamp, timestamp,
+                 "E2", "hash-work", '["work"]', judgment_id,
+                 timestamp, timestamp),
+            )
+            content = {
+                "fact_summary": "测试 work 类别",
+                "actors": [], "causal_chain": [], "uncertainties": [],
+                "horizons": ["未来30天"],
+                "probability_low": 0.4, "probability_high": 0.6, "confidence": 0.5,
+                "supporting_source_ids": ["S-1"], "counter_source_ids": [],
+                "up_triggers": [], "down_triggers": [],
+                "impact_categories": ["work"],
+            }
+            conn.execute(
+                "INSERT INTO judgments VALUES (?,?,?,?,?,?)",
+                (judgment_id, cluster_id, "local", "hash-work",
+                 json.dumps(content, ensure_ascii=False), timestamp),
+            )
+            conn.execute(
+                """
+                INSERT INTO personal_impacts(
+                    impact_id,cluster_id,judgment_id,interest_id,impact_score,
+                    alert_level,components_json,reason,candidate_json,created_at,updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                ("P-work", cluster_id, judgment_id, work["object_id"],
+                 0.5, "L3", '{"confidence":0.5}', "work 测试",
+                 json.dumps({"title": "测试候选", "window_end": "2026-09-15"},
+                            ensure_ascii=False),
+                 timestamp, timestamp),
+            )
+
+        candidates = self.service.pending_candidates()
+        candidate = next(c for c in candidates if c["judgment_id"] == judgment_id)
+        self.assertEqual(candidate["gyw_source"], "legacy-backfill")
+        # The work template mentions '分阶段执行' as the least-resistance
+        # path — that confirms the work branch was picked, not the default.
+        self.assertIn("分阶段执行", candidate["gyw"]["least_resistance_path"])
+
+    def test_backfill_gyw_defaults_for_unknown_category(self):
+        """_backfill_gyw returns _GYW_BACKFILL_DEFAULT when no template
+        matches the category. Direct unit test (not through the DB) — the
+        default fallback path is hard to exercise via interests because
+        the interests schema whitelists valid categories."""
+        from yuanjian_app.impacts import _backfill_gyw
+        analysis = _backfill_gyw("safety")
+        for field in (
+            "stakeholders",
+            "constraints",
+            "least_resistance_path",
+            "counter_evidence",
+            "leading_indicators",
+        ):
+            self.assertTrue(analysis.get(field, "").strip())
+        # A known category returns the per-category template, not the default.
+        cashflow = _backfill_gyw("cashflow")
+        self.assertIn("拨付", cashflow["least_resistance_path"])
 
 
 if __name__ == "__main__":

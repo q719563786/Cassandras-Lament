@@ -9,6 +9,66 @@ from datetime import datetime, timedelta, timezone
 
 from .forecasts import ALLOWED_PROBABILITIES
 
+# GYW framework fallback templates (mirror of LocalHeuristicProvider._GYW_TEMPLATES).
+# Used by pending_candidates to backfill gyw for legacy judgments that
+# pre-date the GYW schema, without rewriting historical judgment rows.
+_GYW_BACKFILL = {
+    "cashflow": {
+        "stakeholders": "推动方：付款方、金融机构；阻力方：风控合规、审计",
+        "constraints": "现金流约束：银行不良率、上下游账期、企业利润空间",
+        "least_resistance_path": "最小阻力路径：分期拨付 / 展期重组 / 国资兜底",
+        "counter_evidence": "反对证据：政策叫停、流动性收紧、反腐审计",
+        "leading_indicators": "领先指标：实际拨付时间、配套政策落地",
+    },
+    "finance": {
+        "stakeholders": "推动方：监管、机构投资者；阻力方：散户、合规",
+        "constraints": "市场约束：流动性、估值、跨境资本",
+        "least_resistance_path": "最小阻力路径：渐进调整 / 试点先行",
+        "counter_evidence": "反对证据：监管反向、市场恐慌、外部冲击",
+        "leading_indicators": "领先指标：监管口径、北向资金、信用利差",
+    },
+    "policy": {
+        "stakeholders": "推动方：发文机关、上级政府；阻力方：执行部门、利益集团",
+        "constraints": "资源约束：财政预算、编制、配套立法",
+        "least_resistance_path": "最小阻力路径：试点 → 推广 → 全面执行",
+        "counter_evidence": "反对证据：执行阻力、利益集团游说、政策转向",
+        "leading_indicators": "领先指标：试点公告、配套细则、部门预算",
+    },
+    "work": {
+        "stakeholders": "推动方：雇主、地方政府；阻力方：工会、员工",
+        "constraints": "成本约束：企业利润空间、财政补贴",
+        "least_resistance_path": "最小阻力路径：分阶段执行 / 试点先行",
+        "counter_evidence": "反对证据：经济下行、财政紧张、企业抵制",
+        "leading_indicators": "领先指标：地方实施细则、行业响应",
+    },
+    "opportunity": {
+        "stakeholders": "推动方：投资人、地方政府、产业方；阻力方：竞争者、监管",
+        "constraints": "市场约束：需求、资本、关键技术",
+        "least_resistance_path": "最小阻力路径：先小规模试水 → 复制扩张",
+        "counter_evidence": "反对证据：竞争者抢先、政策转向、技术失败",
+        "leading_indicators": "领先指标：投资公告、试点规模、关键客户签约",
+    },
+    "family": {
+        "stakeholders": "推动方：家庭成员；阻力方：其他家庭成员、时间",
+        "constraints": "资源约束：时间、金钱、精力",
+        "least_resistance_path": "最小阻力路径：分阶段执行 / 借力外部",
+        "counter_evidence": "反对证据：家庭沟通阻力、突发情况",
+        "leading_indicators": "领先指标：家庭讨论结果、资源到位",
+    },
+}
+_GYW_BACKFILL_DEFAULT = {
+    "stakeholders": "推动方：事件发起方；阻力方：执行部门、外部不确定",
+    "constraints": "资源约束：财政、编制、执行能力、外部配合",
+    "least_resistance_path": "最小阻力路径：分阶段执行 / 试点先行",
+    "counter_evidence": "反对证据：执行阻力、政策转向、外部冲击",
+    "leading_indicators": "领先指标：配套细则、试点公告、执行进度",
+}
+
+
+def _backfill_gyw(category: str) -> dict:
+    key = str(category or "").casefold()
+    return dict(_GYW_BACKFILL.get(key) or _GYW_BACKFILL_DEFAULT)
+
 
 EVIDENCE_WEIGHTS = {"E1": 0.25, "E2": 0.50, "E3": 0.75, "E4": 1.0}
 CATEGORY_EXPOSURE = {
@@ -280,6 +340,23 @@ class ImpactService:
         for row in rows:
             candidate = json.loads(row["candidate_json"] or "{}")
             judgment_content = judgments_by_id.get(row["judgment_id"], {})
+            gyw = judgment_content.get("gyw") or {}
+            # Backfill for legacy judgments that pre-date the GYW schema.
+            # Do not write back to disk — keep history immutable; the home
+            # page just needs the analysis rendered today.
+            if not gyw or not all(
+                gyw.get(field) for field in (
+                    "stakeholders",
+                    "constraints",
+                    "least_resistance_path",
+                    "counter_evidence",
+                    "leading_indicators",
+                )
+            ):
+                gyw = _backfill_gyw(row["category"])
+                gyw_source = "legacy-backfill"
+            else:
+                gyw_source = "judgment"
             output.append(
                 {
                     "id": row["impact_id"],
@@ -289,7 +366,8 @@ class ImpactService:
                     "window_end": candidate.get("window_end", ""),
                     "cluster_id": row["cluster_id"],
                     "judgment_id": row["judgment_id"],
-                    "gyw": judgment_content.get("gyw") or {},
+                    "gyw": gyw,
+                    "gyw_source": gyw_source,
                     "fact_summary": judgment_content.get("fact_summary", ""),
                     "actors": judgment_content.get("actors", []),
                     "causal_chain": judgment_content.get("causal_chain", []),

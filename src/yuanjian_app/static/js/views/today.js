@@ -10,7 +10,7 @@ const PROBS = [90, 80, 70, 60, 50, 40, 30, 20, 10];
 // 才用这套 category 模板。新版 LocalHeuristicProvider 已直接生成 gyw 字段，
 // 优先消费 candidate.gyw 而不是这套兜底。
 function gywFallback(category) {
-  const cat = String(category || 'general').casefold();
+  const cat = String(category || 'general').toLowerCase();
   const map = {
     cashflow: {
       stakeholders: '推动方：付款方、金融机构；阻力方：风控合规、审计',
@@ -69,18 +69,25 @@ function gywFallback(category) {
 // 首页立刻显示真实分析而不是 UI 模板。
 function resolveGyw(candidate) {
   const backend = candidate?.gyw;
-  if (backend && typeof backend === 'object'
+  const hasComplete = backend && typeof backend === 'object'
       && backend.stakeholders && backend.constraints
       && backend.least_resistance_path && backend.counter_evidence
-      && backend.leading_indicators) {
-    return backend;
+      && backend.leading_indicators;
+  if (hasComplete) {
+    if (candidate?.gyw_source === 'legacy-backfill') {
+      return { analysis: backend, source: '旧 judgment，后端按类目模板补全（等 cognition 重跑后会用真 GYW 覆盖）' };
+    }
+    return { analysis: backend, source: '后端 judgment 引擎' };
   }
-  return gywFallback(candidate?.category);
+  // Truly nothing on the backend — show UI fallback, but only for new
+  // candidates that the engine never produced gyw for. Today this path
+  // is unreachable in practice (pending_candidates always backfills), but
+  // keep it as a defensive last-resort.
+  return { analysis: gywFallback(candidate?.category), source: 'UI 兜底模板' };
 }
 
 function candidateCard(c) {
-  const analysis = resolveGyw(c);
-  const source = c?.gyw ? '后端 judgment 引擎' : 'UI 兜底模板';
+  const { analysis, source } = resolveGyw(c);
   const factSummary = c?.fact_summary || c?.statement || c?.summary || '候选预测';
   return `<div class="candidate" data-id="${escapeHtml(c.id)}">
     <div class="u-flex1">

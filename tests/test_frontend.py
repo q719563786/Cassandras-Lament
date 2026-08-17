@@ -1,3 +1,4 @@
+import json
 import subprocess
 import unittest
 from pathlib import Path
@@ -215,6 +216,327 @@ assert.equal(ui.formatBytes(-1), '未知');
         # framework slots — otherwise the user sees analysis with no event.
         self.assertIn("fact_summary", view)
         self.assertIn("actors", view)
+
+
+# ---------------------------------------------------------------------------
+# 真实执行测试：脚本 + DOM stub + 真实 import + 真实 render(root)
+# 之前只跑 grep 文本契约，蒙混了 .casefold() 这种 Python 习语移植。
+# 现在用 node + 最小 DOM stub 真的 import 每个视图并调用一次 render，
+# runtime 错误（不存在的方法 / 引用未定义）会在这里炸出来。
+# ---------------------------------------------------------------------------
+
+
+# Canned responses for the URLs the views fetch on first render. Each
+# view has its own endpoint list; the script picks the first match.
+CANNED_RESPONSES = [
+    ("/api/forecasts/progress", json.dumps({
+        "resolved_total": 0, "hit_total": 0,
+        "miss_total": 0, "due_this_week": 0,
+    })),
+    ("/api/cognition/candidates", json.dumps({"candidates": [
+        {
+            "id": "P-test",
+            "statement": "广东省最低工资标准调整可能在观察期内影响工作收入",
+            "summary": "广东省最低工资标准调整",
+            "category": "work",
+            "window_end": "2026-09-15",
+            "cluster_id": "C-1",
+            "judgment_id": "J-1",
+            "gyw": {
+                "stakeholders": "推动方：广东省人社厅；阻力方：企业雇主",
+                "constraints": "成本约束：企业利润空间",
+                "least_resistance_path": "最小阻力路径：分阶段执行",
+                "counter_evidence": "反对证据：经济下行",
+                "leading_indicators": "领先指标：地方实施细则",
+            },
+            "fact_summary": "广东省最低工资标准调整通知",
+            "actors": ["广东省人社厅"],
+            "causal_chain": ["政策发布", "执行落地", "工资变化"],
+        },
+    ]})),
+    ("/api/risk-dashboard", json.dumps({"state": "stable", "items": []})),
+    ("/api/calibration", json.dumps({"hit_rate": None, "false_positive_rate": None, "brier": None, "resolved_total": 0, "brier_series": [], "by_category": {}, "candidates": []})),
+    ("/api/diagnostics", json.dumps({"tiles": []})),
+    ("/api/external/sources", json.dumps({"sources": []})),
+    ("/api/external/rules", json.dumps({"rules": []})),
+    ("/api/interests", json.dumps({"interests": []})),
+    ("/api/settings", json.dumps({"settings": {}})),
+    ("/api/notifications", json.dumps({"items": [], "total": 0, "limit": 20, "offset": 0})),
+    ("/api/events", json.dumps({"items": []})),
+    ("/api/cognition/clusters", json.dumps({"items": [], "total": 0, "limit": 10, "offset": 0, "clusters": []})),
+    ("/api/cognition/status", json.dumps({"running": False, "clusters": 0, "judgments": 0, "open_jobs": 0, "open_impacts": 0})),
+    ("/api/forecasts", json.dumps({"forecasts": [], "total": 0})),
+    ("/api/export/mobile-summary", json.dumps({"summary": "测试摘要"})),
+]
+
+
+def _build_view_runner_script(view_name, view_path):
+    """Return a Node script that stubs the browser, imports the view
+    module, and calls render(root). Catches runtime errors like the
+    String.prototype.casefold() bug that would otherwise ship to users.
+    """
+    view_url = "file:" + pathname2url(str(view_path))
+    # The stub has to cover everything the view touches at render time
+    # without trying to emulate a real DOM. Anything the view references
+    # that we don't stub → TypeError → test fails with a clear message.
+    return f"""
+const assert = require('node:assert/strict');
+const {{ pathToFileURL }} = require('node:url');
+const path = require('node:path');
+const viewUrl = '{view_url}';
+
+// ---- minimal browser stub ----
+class FakeElement {{
+  constructor(tag) {{
+    this.tag = tag || 'div';
+    this.children = [];
+    this.attrs = {{}};
+    this.dataset = {{}};
+    this.style = {{}};
+    this.classList = new Set();
+    this.innerHTML = '';
+    this.textContent = '';
+    this.hidden = false;
+    this.value = '';
+  }}
+  appendChild(c) {{ this.children.push(c); return c; }}
+  removeChild(c) {{ this.children = this.children.filter(x => x !== c); }}
+  setAttribute(k, v) {{ this.attrs[k] = String(v); }}
+  addEventListener() {{ return null; }}
+  removeEventListener() {{ return null; }}
+  querySelector() {{ return new FakeElement(); }}
+  querySelectorAll() {{ return []; }}
+  getElementsByTagName() {{ return []; }}
+  click() {{ return null; }}
+}}
+class FakeLocation {{
+  constructor() {{ this.href = 'http://localhost/'; this.search = ''; this.hash = '#/today'; }}
+}}
+class FakeDocument {{
+  constructor() {{ this.body = new FakeElement('body'); this._byId = {{}}; }}
+  createElement(tag) {{ return new FakeElement(tag); }}
+  getElementById(id) {{
+    if (!this._byId[id]) this._byId[id] = new FakeElement('div');
+    return this._byId[id];
+  }}
+  querySelector() {{ return new FakeElement(); }}
+  querySelectorAll() {{ return []; }}
+  addEventListener() {{ return null; }}
+}}
+class FakeMutationObserver {{ constructor() {{ }} observe() {{ }} disconnect() {{ }} }}
+class FakeFile {{
+  constructor(name, content) {{ this.name = name; this._c = content; }}
+  async text() {{ return this._c; }}
+}}
+class FakeResponse {{
+  constructor(ok, body) {{ this.ok = ok; this._body = body; this.status = ok ? 200 : 500; }}
+  async text() {{ return this._body; }}
+}}
+const canned = {json.dumps(CANNED_RESPONSES)};
+function cannedFor(url) {{
+  for (const [pattern, body] of canned) if (url.includes(pattern)) return body;
+  return 'null';
+}}
+const fetchLog = [];
+async function fakeFetch(url, options) {{
+  fetchLog.push({{ url, options }});
+  return new FakeResponse(true, cannedFor(url));
+}}
+
+globalThis.window = {{ location: new FakeLocation() }};
+globalThis.location = globalThis.window.location;
+globalThis.document = new FakeDocument();
+globalThis.MutationObserver = FakeMutationObserver;
+globalThis.File = FakeFile;
+globalThis.HTMLElement = FakeElement;
+globalThis.Node = class {{ }};
+globalThis.fetch = fakeFetch;
+globalThis.localStorage = {{ getItem: () => null, setItem: () => null, removeItem: () => null }};
+globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+globalThis.cancelAnimationFrame = (h) => clearTimeout(h);
+
+(async () => {{
+  const mod = await import(viewUrl);
+  const root = document.getElementById('view-root');
+  await mod.render(root);
+  console.log('RENDER_OK');
+}})().catch(error => {{
+  console.error('RENDER_FAIL', error && error.stack || String(error));
+  process.exit(1);
+}});
+"""
+
+
+class BrowserViewRenderTests(unittest.TestCase):
+    """Real JS execution: import each view module and call render(root).
+
+    Catches the class of bugs the text-contract tests cannot — runtime
+    errors like calling a non-existent string method (the .casefold()
+    Pythonism that broke the Action Home on first launch).
+    """
+
+    JS_VIEWS = (
+        "today", "calib", "sources", "diag", "settings", "tell",
+    )
+
+    def _run_view(self, view_name):
+        view_path = STATIC / "js" / "views" / (view_name + ".js")
+        script = _build_view_runner_script(view_name, view_path)
+        result = subprocess.run(
+            ["node", "-e", script],
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        return result
+
+    def test_every_view_renders_without_runtime_error(self):
+        """Regression: today.js used String.prototype.casefold() — a Python
+        method, not a JS one. The text-contract test missed it. This test
+        actually imports the module under a minimal DOM stub and calls
+        render(root), so any future Pythonism-translation bug surfaces
+        here in CI instead of on a user's desktop."""
+        for view in self.JS_VIEWS:
+            with self.subTest(view=view):
+                result = self._run_view(view)
+                self.assertEqual(
+                    result.returncode, 0,
+                    f"view '{view}' failed to render: stdout={result.stdout!r} stderr={result.stderr!r}",
+                )
+                self.assertIn("RENDER_OK", result.stdout, result.stderr)
+
+    def test_no_pythonism_in_static_js(self):
+        """The bug that caused today's crash: .casefold() is Python-only.
+        Scan every JS file under static/ for it (and any future
+        Pythonic idiom that would silently break in V8)."""
+        offenders = []
+        for path in STATIC.rglob("*.js"):
+            text = path.read_text(encoding="utf-8")
+            for line_num, line in enumerate(text.splitlines(), 1):
+                if ".casefold(" in line:
+                    offenders.append(f"{path.relative_to(STATIC)}:{line_num}: {line.strip()}")
+        self.assertEqual(
+            offenders, [],
+            f"Python-only methods found in JS (not supported by V8/Node/browsers):\n"
+            + "\n".join(offenders),
+        )
+
+
+def _build_router_runner_script(hash_route):
+    """Render a hash route through the actual router module end-to-end.
+
+    Catches problems that single-view tests cannot — e.g. a renderView()
+    call that fails when two views try to share the same root element,
+    or a route that imports something missing.
+    """
+    router_url = "file:" + pathname2url(str(STATIC / "js" / "router.js"))
+    app_url = "file:" + pathname2url(str(STATIC / "js" / "app.js"))
+    return f"""
+class FakeElement {{
+  constructor(tag) {{ this.tag = tag||'div'; this.children = []; this.attrs = {{}}; this.dataset = {{}}; this.style = {{}}; this.classList = new Set(); this.innerHTML = ''; this.textContent = ''; this.hidden = false; this.value = ''; }}
+  appendChild(c) {{ this.children.push(c); return c; }}
+  removeChild(c) {{ this.children = this.children.filter(x=>x!==c); }}
+  setAttribute(k,v) {{ this.attrs[k]=String(v); }}
+  addEventListener(ev,cb) {{ this._cb = this._cb || {{}}; this._cb[ev] = cb; }}
+  removeEventListener() {{ }}
+  querySelector() {{ return new FakeElement(); }}
+  querySelectorAll(sel) {{
+    if (sel && sel.startsWith('.nav-item[data-view]')) {{
+      return ROUTES.map(name => {{
+        const el = new FakeElement('button');
+        el.dataset = {{ view: name, label: name }};
+        return el;
+      }});
+    }}
+    return [];
+  }}
+  getElementsByTagName() {{ return []; }}
+  click() {{ }}
+}}
+class FakeLocation {{
+  constructor(h) {{ this._hash = h || '#/today'; }}
+  get hash() {{ return this._hash; }}
+  set hash(v) {{ this._hash = v; if (this._onchange) this._onchange(); }}
+  set onchange(cb) {{ this._onchange = cb; }}
+  set href(v) {{ this._hash = v; if (this._onchange) this._onchange(); }}
+  get href() {{ return 'http://localhost/' + this._hash; }}
+  get search() {{ return ''; }}
+  get pathname() {{ return '/'; }}
+}}
+class FakeDocument {{
+  constructor() {{ this.body = new FakeElement('body'); this._byId = {{}}; }}
+  createElement(tag) {{ return new FakeElement(tag); }}
+  getElementById(id) {{ if (!this._byId[id]) this._byId[id] = new FakeElement('div'); return this._byId[id]; }}
+  querySelector() {{ return new FakeElement(); }}
+  querySelectorAll() {{ return []; }}
+  addEventListener() {{ }}
+}}
+class FakeMutationObserver {{ constructor(){{}} observe(){{}} disconnect(){{}} }}
+class FakeFile {{ constructor(n,c){{this.name=n;this._c=c;}} async text(){{return this._c;}} }}
+class FakeResponse {{ constructor(ok,b){{this.ok=ok;this._b=b;this.status=ok?200:500;}} async text(){{return this._b;}} }}
+const ROUTES = ['today','tell','calib','sources','diag','settings'];
+const canned = {json.dumps(CANNED_RESPONSES)};
+function cannedFor(url) {{
+  for (const [pattern, body] of canned) if (url.includes(pattern)) return body;
+  return 'null';
+}}
+async function fakeFetch(url, options) {{ return new FakeResponse(true, cannedFor(url)); }}
+
+globalThis.window = {{
+  location: new FakeLocation({json.dumps(hash_route)}),
+  addEventListener(ev, cb) {{ if (ev === 'hashchange') this._hashcb = cb; }},
+}};
+globalThis.location = globalThis.window.location;
+globalThis.document = new FakeDocument();
+globalThis.MutationObserver = FakeMutationObserver;
+globalThis.File = FakeFile;
+globalThis.HTMLElement = FakeElement;
+globalThis.Node = class {{ }};
+globalThis.fetch = fakeFetch;
+globalThis.localStorage = {{ getItem: () => null, setItem: () => null, removeItem: () => null }};
+globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+globalThis.cancelAnimationFrame = (h) => clearTimeout(h);
+globalThis.addEventListener = (ev, cb) => {{ if (ev === 'hashchange') globalThis.window._hashcb = cb; }};
+
+(async () => {{
+  const router = await import('{router_url}');
+  await router.renderView();
+  // Also try to render the next route by flipping the hash and dispatching.
+  for (const next of ['tell', 'calib', 'sources', 'diag', 'settings']) {{
+    globalThis.location.hash = '#/' + next;
+    if (globalThis.window._hashcb) globalThis.window._hashcb();
+    await router.renderView();
+  }}
+  console.log('ROUTER_OK');
+}})().catch(error => {{
+  console.error('ROUTER_FAIL', error && error.stack || String(error));
+  process.exit(1);
+}});
+"""
+
+
+class RouterIntegrationTests(unittest.TestCase):
+    """End-to-end: import router.js, exercise every hash route through
+    renderView(). Catches cross-view problems — a view that fails to
+    import, a renderView() that fails when the root is reused, etc."""
+
+    def test_every_hash_route_renders_via_router(self):
+        script = _build_router_runner_script("#/today")
+        result = subprocess.run(
+            ["node", "-e", script],
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual(
+            result.returncode, 0,
+            f"router end-to-end failed: stdout={result.stdout!r} stderr={result.stderr!r}",
+        )
+        self.assertIn("ROUTER_OK", result.stdout, result.stderr)
 
 
 if __name__ == "__main__":
