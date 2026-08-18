@@ -201,7 +201,7 @@ class ForecastServiceTests(unittest.TestCase):
                     "INSERT INTO resolutions(forecast_id, outcome, resolved_at, probability, brier_score) VALUES (?,?,?,?,?)",
                     (fid, outcome, "2026-08-10T00:00:00Z", prob, 0.2),
                 )
-        progress = service.progress_summary()
+        progress = service.progress_summary(now=now)
         self.assertEqual(progress["resolved_total"], 3)
         self.assertEqual(progress["hit_total"], 1)
         self.assertEqual(progress["miss_total"], 1)

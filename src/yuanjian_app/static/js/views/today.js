@@ -4,7 +4,7 @@ import { yjIcon } from '../icons.js';
 import { riskTag, categoryLabel, formatLocalTime } from '../ui_core.js';
 import { tellBoxHtml, bindTellBox } from './tell.js';
 
-const PROBS = [90, 80, 70, 60, 50, 40, 30, 20, 10];
+const PROBS = [95, 90, 80, 65, 50, 35, 20, 10, 5];
 
 // GYW 框架的 UI 兜底模板：当后端没给 gyw 子结构（旧 judgment / 远端未填）
 // 才用这套 category 模板。新版 LocalHeuristicProvider 已直接生成 gyw 字段，
@@ -112,6 +112,11 @@ function candidateCard(c) {
       </select>
       <button type="button" class="btn btn-sm btn-primary" data-confirm>确认</button>
     </div>
+    ${c?.cluster_id ? `<div class="u-row u-feedback u-mt-sm">
+      <button type="button" class="btn btn-sm" data-feedback="false_positive" data-cluster="${escapeHtml(c.cluster_id)}">误报</button>
+      <button type="button" class="btn btn-sm" data-feedback="mute" data-cluster="${escapeHtml(c.cluster_id)}">静音</button>
+      <button type="button" class="btn btn-sm" data-feedback="lower_importance" data-cluster="${escapeHtml(c.cluster_id)}">降低</button>
+    </div>` : ''}
   </div>`;
 }
 
@@ -186,6 +191,23 @@ export async function render(root) {
       }
     }));
   });
+  // 误报反馈：误报 / 静音 / 降低重要度 → POST /api/cognition/clusters/{id}/feedback
+  root.querySelectorAll('[data-feedback]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const clusterId = btn.dataset.cluster;
+      const action = btn.dataset.feedback;
+      if (!clusterId) { showToast('该候选没有可反馈的事件', 'err'); return; }
+      btn.disabled = true;
+      try {
+        await api(`/api/cognition/clusters/${encodeURIComponent(clusterId)}/feedback`, {
+          method: 'POST',
+          body: JSON.stringify({action})
+        });
+        showToast(action === 'false_positive' ? '已标记为误报' : action === 'mute' ? '已静音该事件' : '已降低重要度');
+      } catch (e) { btn.disabled = false; showToast(`反馈失败：${e.message}`, 'err'); }
+    });
+  });
+
   // data-go 跳转链：直接改 hash，避免 router ↔ views 循环依赖
   root.querySelectorAll('[data-go-view]').forEach(btn => {
     btn.addEventListener('click', () => { location.hash = `#/${btn.dataset.view}`; });

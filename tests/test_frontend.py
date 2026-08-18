@@ -173,6 +173,18 @@ assert.equal(ui.formatBytes(-1), '未知');
         self.assertIn("(Number(f.probability) * 100).toFixed(0)", view)
         self.assertIn("/api/calibration", view)
 
+    def test_calibration_confirm_button_is_wired(self):
+        view = (STATIC / "js" / "views" / "calib.js").read_text(encoding="utf-8")
+        # 回归守护 A2：候选 div 必须带 data-id，且绑定用 .candidate[data-id]，
+        # 否则确认按钮点击无反应（旧 bug：选择器 .candidate[data-confirm]
+        # 恒匹配空——data-confirm 在内层按钮上，不在 candidate div 上）。
+        self.assertIn('class="candidate" data-id="', view)
+        self.assertIn(".candidate[data-id]", view)
+        # 最强回退守护：旧的错误选择器一旦复活，测试必失败。
+        self.assertNotIn(".candidate[data-confirm]", view)
+        # 确认时概率必须 /100 转成 0-1 比率（对齐后端白名单），否则被 400 拒绝。
+        self.assertIn("Number(row.querySelector('select').value) / 100", view)
+
     def test_calibration_view_explains_every_metric_to_a_non_technical_user(self):
         """Regression: the calibration page used to ship four unexplained
         KPI cards (命中率 /误报率 /Brier /已结算预测) and a candidate list
@@ -259,7 +271,7 @@ CANNED_RESPONSES = [
     ("/api/diagnostics", json.dumps({"tiles": []})),
     ("/api/external/sources", json.dumps({"sources": []})),
     ("/api/external/rules", json.dumps({"rules": []})),
-    ("/api/interests", json.dumps({"interests": []})),
+    ("/api/interests", json.dumps({"objects": [], "links": []})),
     ("/api/settings", json.dumps({"settings": {}})),
     ("/api/notifications", json.dumps({"items": [], "total": 0, "limit": 20, "offset": 0})),
     ("/api/events", json.dumps({"items": []})),

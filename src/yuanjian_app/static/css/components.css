@@ -93,6 +93,9 @@ th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--color-borde
 th{color:var(--color-text-muted);font-weight:400;font-size:.6875rem;letter-spacing:1px}
 tbody tr:hover{background:var(--color-surface-raised)}
 td.num{font-variant-numeric:tabular-nums}
+.is-resolved{opacity:.5}
+.is-resolved td:last-child{opacity:1}
+.resolve-cell .u-row{gap:var(--space-xs);flex-wrap:nowrap}
 
 /* ===== 杂项 ===== */
 .note{border:1px dashed var(--color-warning);background:var(--note-bg);color:var(--color-warning);padding:10px 12px;font-size:.8125rem;border-radius:3px}

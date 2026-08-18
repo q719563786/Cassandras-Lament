@@ -45,6 +45,12 @@ export async function render(root) {
     sources = Array.isArray(response?.sources) ? response.sources : [];
   } catch (e) { error = e; }
 
+  let rules = [];
+  try {
+    const rresp = await api('/api/external/rules');
+    rules = Array.isArray(rresp?.rules) ? rresp.rules : [];
+  } catch (_) { rules = []; }
+
   const regions = ['all', 'heyuan', 'guangdong', 'national', 'global'];
   root.innerHTML = `<div class="u-max">
     <div class="u-between u-mb-md">
@@ -69,6 +75,19 @@ export async function render(root) {
       <div id="src-empty" hidden class="empty">${yjIcon('ic_offline', 24, '无源')}<p>当前区域没有信息源。</p></div>
     </section>
     <section id="src-form-slot" class="u-mt-md"></section>
+    <section class="set-sec">
+      <h2>关注词管理</h2>
+      <div class="card">
+        <form data-rule-form class="u-mb-md">
+          <div class="field u-mb-md"><label for="rule-query">关注词</label>
+          <input id="rule-query" name="query" type="text" placeholder="如 拆迁 / 水质 / 招标" maxlength="60"></div>
+          <div class="field u-mb-md"><label for="rule-importance">重要度（1-5）</label>
+          <input id="rule-importance" name="importance" type="number" min="1" max="5" value="3"></div>
+          <div class="u-end"><button type="submit" class="btn btn-primary btn-sm">新增关注词</button></div>
+        </form>
+        <div class="rule-list" id="rule-list"></div>
+      </div>
+    </section>
   </div>`;
 
   let filter = 'all';
@@ -187,4 +206,72 @@ export async function render(root) {
       file.value = '';
     }
   });
+
+  // 关注词管理：列表 + 启停 + 删除 + 新增
+  const ruleList = root.querySelector('#rule-list');
+  const paintRules = () => {
+    if (!rules.length) {
+      ruleList.innerHTML = `<p class="u-dim">暂无关注词。</p>`;
+      return;
+    }
+    ruleList.innerHTML = rules.map(r => `<div class="src" data-rule="${escapeHtml(r.rule_id)}">
+      <span class="name">${escapeHtml(r.query || '')}</span>
+      <span class="badge">重要度 ${r.importance ?? 3}</span>
+      <span class="badge">${r.enabled ? '启用中' : '已停用'}</span>
+      <span class="u-dim">${escapeHtml(String(r.created_at || '').slice(0, 10))}</span>
+      <span class="acts">
+        <button type="button" class="btn btn-sm" data-rule-toggle="${escapeHtml(r.rule_id)}" data-next="${r.enabled ? 'false' : 'true'}">${r.enabled ? '停用' : '启用'}</button>
+        <button type="button" class="btn btn-sm btn-danger" data-rule-del="${escapeHtml(r.rule_id)}">删除</button>
+      </span>
+    </div>`).join('');
+  };
+  const bindRules = () => {
+    ruleList.querySelectorAll('[data-rule-toggle]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.ruleToggle;
+        const enabled = btn.dataset.next === 'true';
+        btn.disabled = true;
+        try {
+          await api(`/api/external/rules/${encodeURIComponent(id)}/enabled`, {method: 'POST', body: JSON.stringify({enabled})});
+          const idx = rules.findIndex(r => r.rule_id === id);
+          if (idx >= 0) rules[idx].enabled = enabled;
+          paintRules();
+          bindRules();
+        } catch (e) { btn.disabled = false; showToast(`操作失败：${e.message}`, 'err'); }
+      });
+    });
+    ruleList.querySelectorAll('[data-rule-del]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!window.confirm('删除这条关注词？历史命中保留。')) return;
+        btn.disabled = true;
+        try {
+          await api(`/api/external/rules/${encodeURIComponent(btn.dataset.ruleDel)}`, {method: 'DELETE'});
+          rules = rules.filter(r => r.rule_id !== btn.dataset.ruleDel);
+          paintRules();
+          bindRules();
+          showToast('已删除');
+        } catch (e) { btn.disabled = false; showToast(`删除失败：${e.message}`, 'err'); }
+      });
+    });
+  };
+  root.querySelector('[data-rule-form]').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const query = event.target.querySelector('#rule-query').value.trim();
+    const importance = Number(event.target.querySelector('#rule-importance').value) || 3;
+    if (!query) { showToast('关注词不能为空', 'err'); return; }
+    const btn = event.target.querySelector('button[type="submit"]');
+    btn.disabled = true;
+    try {
+      const resp = await api('/api/external/rules', {method: 'POST', body: JSON.stringify({query, importance})});
+      const rule_id = resp?.rule_id;
+      if (rule_id) rules.unshift({rule_id, query, importance, enabled: true, created_at: ''});
+      event.target.reset();
+      paintRules();
+      bindRules();
+      showToast('已新增关注词');
+    } catch (e) { showToast(`新增失败：${e.message}`, 'err'); }
+    finally { btn.disabled = false; }
+  });
+  paintRules();
+  bindRules();
 }

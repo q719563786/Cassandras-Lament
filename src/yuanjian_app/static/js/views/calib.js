@@ -9,7 +9,7 @@ const HELP_HTML = `<details class="card calib-help u-mb-md">
         <li><strong>误报率</strong>：你确认过的预测里，事实没发生的比例。越低越好。</li>
         <li><strong>Brier 分数</strong>：衡量概率预测的准确性。0 = 完美，0.25 = 一般，越低越好。计算方法：把每次预测的"你给的概率 − 实际结果"平方后求平均。</li>
         <li><strong>已结算预测</strong>：观察期已结束、结果已记录的预测数量。这个数越多，上面三个数字越有参考价值。</li>
-        <li><strong>候选预测的百分比</strong>：这是<strong>你判断它会发生的主观概率</strong>。选中一个数（10%-90%），点"确认"后，远见会在截止日期检查它是否真的发生，并把你的概率和实际结果对比，记入 Brier 分数。</li>
+        <li><strong>候选预测的百分比</strong>：这是<strong>你判断它会发生的主观概率</strong>。从九个固定档位里选一个（5% / 10% / 20% / 35% / 50% / 65% / 80% / 90% / 95%），点"确认"后，远见会在截止日期检查它是否真的发生，并把你的概率和实际结果对比，记入 Brier 分数。</li>
       </ul>
       <p class="u-dim">一句话：选个概率 → 点确认 → 等到期看远见标对错。这是你训练自己判断力的方式。</p>
     </div>
@@ -64,7 +64,7 @@ function byCategoryRows(byCategory) {
 }
 
 // 候选确认：九档概率选择 → POST /api/cognition/candidates/{id}/confirm（AC-08）
-const PROBS = [90, 80, 70, 60, 50, 40, 30, 20, 10];
+const PROBS = [95, 90, 80, 65, 50, 35, 20, 10, 5];
 function candidatesHtml(candidates) {
   const list = Array.isArray(candidates) ? candidates : [];
   if (!list.length) return '';
@@ -79,16 +79,56 @@ function candidatesHtml(candidates) {
   </div>`).join('')}</div>`;
 }
 
-// 预测账本只读表（分页）
+// 预测账本表（分页）：每行可结算；已结算行置灰
 function ledgerRows(forecasts) {
   const list = Array.isArray(forecasts) ? forecasts : [];
-  return list.map(f => `<tr>
-    <td>${escapeHtml(String(f.statement || f.summary || '').slice(0, 80))}</td>
-    <td>${escapeHtml(categoryLabel(f.category))}</td>
-    <td class="num">${escapeHtml(f.probability != null ? `${(Number(f.probability) * 100).toFixed(0)}%` : '—')}</td>
-    <td>${escapeHtml(statusLabel(f.status))}</td>
-    <td>${escapeHtml(formatLocalTime(f.created_at))}</td>
-  </tr>`).join('');
+  return list.map(f => {
+    const resolved = f.status === 'resolved';
+    const resolveCell = resolved
+      ? `<span class="u-dim">已结算</span>`
+      : `<div class="u-row">
+          <select aria-label="结算结果" data-outcome="${escapeHtml(f.forecast_id)}">
+            <option value="occurred">发生</option>
+            <option value="not_occurred">未发生</option>
+            <option value="partial">部分发生</option>
+            <option value="indeterminate">无法判定</option>
+          </select>
+          <input type="date" data-resolved-at="${escapeHtml(f.forecast_id)}" aria-label="结算日期">
+          <button type="button" class="btn btn-sm" data-resolve="${escapeHtml(f.forecast_id)}">结算</button>
+        </div>`;
+    return `<tr class="${resolved ? 'is-resolved' : ''}" data-id="${escapeHtml(f.forecast_id)}">
+      <td>${escapeHtml(String(f.statement || f.summary || '').slice(0, 80))}</td>
+      <td>${escapeHtml(categoryLabel(f.category))}</td>
+      <td class="num">${escapeHtml(f.probability != null ? `${(Number(f.probability) * 100).toFixed(0)}%` : '—')}</td>
+      <td>${escapeHtml(statusLabel(f.status))}</td>
+      <td>${escapeHtml(formatLocalTime(f.created_at))}</td>
+      <td class="resolve-cell">${resolveCell}</td>
+    </tr>`;
+  }).join('');
+}
+
+// 结算按钮绑定：四选结果 + 日期 → POST /api/forecasts/{id}/resolve
+function bindResolve(body) {
+  body.querySelectorAll('[data-resolve]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.resolve;
+      const outcome = body.querySelector(`select[data-outcome="${CSS.escape(id)}"]`)?.value;
+      const resolvedAt = body.querySelector(`input[data-resolved-at="${CSS.escape(id)}"]`)?.value || '';
+      if (!outcome) { showToast('请选择结算结果', 'err'); return; }
+      btn.disabled = true;
+      try {
+        await api(`/api/forecasts/${encodeURIComponent(id)}/resolve`, {
+          method: 'POST',
+          body: JSON.stringify({outcome, resolved_at: resolvedAt})
+        });
+        showToast('已结算');
+        await paintLedger();
+      } catch (error) {
+        btn.disabled = false;
+        showToast(`结算失败：${error.message}`, 'err');
+      }
+    });
+  });
 }
 
 export async function render(root) {
@@ -119,9 +159,9 @@ export async function render(root) {
     <section class="card">${chart || NO_SAMPLE}</section>
     ${cats ? `<h2 class="section-title u-mt-md">按类别准确率</h2><section class="card u-row">${cats}</section>` : ''}
     <div id="calib-candidates">${candidatesHtml(calib?.candidates)}</div>
-    <h2 class="section-title u-mt-md">预测账本（只读）</h2>
+    <h2 class="section-title u-mt-md">预测账本（可结算）</h2>
     <section class="card"><div class="table-wrap"><table>
-      <thead><tr><th>预测</th><th>类别</th><th>概率</th><th>状态</th><th>创建</th></tr></thead>
+      <thead><tr><th>预测</th><th>类别</th><th>概率</th><th>状态</th><th>创建</th><th>结算</th></tr></thead>
       <tbody id="ledger-body"></tbody>
     </table></div><div id="ledger-page"></div></section>
   </div>`;
@@ -129,8 +169,8 @@ export async function render(root) {
   // 条形宽度 CSSOM 写入
   root.querySelectorAll('.bar-fill[data-width]').forEach(el => { el.style.width = `${el.dataset.width}%`; });
 
-  // 候选确认绑定
-  root.querySelectorAll('.candidate[data-confirm]').forEach(row => {
+  // 候选确认绑定（candidate div 带 data-id，按钮带 data-confirm）
+  root.querySelectorAll('.candidate[data-id]').forEach(row => {
     const btn = row.querySelector('[data-confirm]');
     btn.addEventListener('click', async () => {
       btn.disabled = true;
@@ -159,12 +199,13 @@ export async function render(root) {
       const forecasts = Array.isArray(response?.forecasts) ? response.forecasts : (Array.isArray(response) ? response : []);
       const total = Number(response?.total ?? forecasts.length) || forecasts.length;
       body.innerHTML = forecasts.length ? ledgerRows(forecasts)
-        : `<tr><td colspan="5" class="u-dim">账本为空——确认候选预测后出现在这里。</td></tr>`;
+        : `<tr><td colspan="6" class="u-dim">账本为空——确认候选预测后出现在这里。</td></tr>`;
       const range = pageRange(total, state.limit, state.offset);
       pageBox.innerHTML = paginationHtml(range);
       bindPagination(pageBox, '', dir => { state = {...state, offset: Math.max(0, state.offset + (dir === 'next' ? state.limit : -state.limit))}; paintLedger(); });
+      bindResolve(body);
     } catch (error) {
-      body.innerHTML = `<tr><td colspan="5" class="u-dim">账本读取失败：${escapeHtml(error.message)}</td></tr>`;
+      body.innerHTML = `<tr><td colspan="6" class="u-dim">账本读取失败：${escapeHtml(error.message)}</td></tr>`;
     }
   };
   await paintLedger();

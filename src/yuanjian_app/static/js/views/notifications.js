@@ -21,8 +21,14 @@ export async function refreshUnread() {
 }
 
 function rowHtml(n) {
+  const feedback = n.cluster_id ? `<div class="u-row u-feedback u-mt-sm">
+    <button type="button" class="btn btn-sm" data-feedback="false_positive" data-cluster="${escapeHtml(n.cluster_id)}">误报</button>
+    <button type="button" class="btn btn-sm" data-feedback="mute" data-cluster="${escapeHtml(n.cluster_id)}">静音</button>
+    <button type="button" class="btn btn-sm" data-feedback="lower_importance" data-cluster="${escapeHtml(n.cluster_id)}">降低</button>
+  </div>` : '';
   return `<div class="notif-row ${n.status === 'unread' ? 'unread' : ''}" data-id="${escapeHtml(n.id)}">
     <p class="t">${escapeHtml(String(n.title || n.summary || '').slice(0, 120))}</p>
+    ${feedback}
     <div class="u-row u-between"><span class="m">${escapeHtml(formatLocalTime(n.created_at))}</span>
     ${n.status === 'unread' ? '<button type="button" class="btn btn-sm" data-read>标为已读</button>' : ''}</div>
   </div>`;
@@ -90,6 +96,22 @@ export async function openDrawer() {
             await paintList();
             await refreshUnread();
           } catch (e) { showToast(`标记失败：${e.message}`, 'err'); }
+        });
+      });
+      // 误报反馈：误报 / 静音 / 降低重要度 → POST /api/cognition/clusters/{id}/feedback
+      list.querySelectorAll('[data-feedback]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const clusterId = btn.dataset.cluster;
+          const action = btn.dataset.feedback;
+          if (!clusterId) { showToast('该通知没有可反馈的事件', 'err'); return; }
+          btn.disabled = true;
+          try {
+            await api(`/api/cognition/clusters/${encodeURIComponent(clusterId)}/feedback`, {
+              method: 'POST',
+              body: JSON.stringify({action})
+            });
+            showToast(action === 'false_positive' ? '已标记为误报' : action === 'mute' ? '已静音该事件' : '已降低重要度');
+          } catch (e) { btn.disabled = false; showToast(`反馈失败：${e.message}`, 'err'); }
         });
       });
     } catch (e) {

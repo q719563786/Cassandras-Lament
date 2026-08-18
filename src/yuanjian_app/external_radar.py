@@ -480,6 +480,29 @@ class ExternalRadarService:
             for row in rows
         ]
 
+    def set_rule_enabled(self, rule_id, enabled):
+        """启用/停用一条关注词规则（UI 管理区复用）。"""
+        if not isinstance(enabled, bool):
+            raise ValueError("关注词状态无效")
+        with self.database.connect() as connection:
+            result = connection.execute(
+                "UPDATE watch_rules SET enabled = ? WHERE rule_id = ?",
+                (1 if enabled else 0, rule_id),
+            )
+            if result.rowcount == 0:
+                raise KeyError(rule_id)
+        return {"rule_id": rule_id, "enabled": enabled}
+
+    def delete_watch_rule(self, rule_id):
+        """删除一条关注词规则；历史命中记录保留。"""
+        with self.database.connect() as connection:
+            result = connection.execute(
+                "DELETE FROM watch_rules WHERE rule_id = ?", (rule_id,)
+            )
+            if result.rowcount == 0:
+                raise KeyError(rule_id)
+        return {"rule_id": rule_id, "deleted": True}
+
     def list_sources(self, region=None, category=None, enabled=None):
         now = self.now()
         with self.database.connect() as connection:

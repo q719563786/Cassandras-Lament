@@ -227,6 +227,8 @@ def create_server(host, port, token, services):
                         "links": services.interests.list_links(),
                     }
                 )
+            elif path == "/api/interests/objects":
+                self._json({"objects": services.interests.list_objects()})
             elif path == "/api/signals":
                 self._json({"signals": services.signals.list_signals()})
             elif path == "/api/knowledge/vaults":
@@ -456,6 +458,24 @@ def create_server(host, port, token, services):
                     rule_id = services.external.add_watch_rule(payload)
                     self._json({"rule_id": rule_id}, 201)
                     return
+                if path.startswith("/api/external/rules/") and path.endswith("/enabled"):
+                    rule_id = unquote(
+                        path.removeprefix("/api/external/rules/").removesuffix("/enabled")
+                    ).rstrip("/")
+                    enabled = payload.get("enabled")
+                    if not rule_id or not isinstance(enabled, bool):
+                        raise ValueError("关注词状态无效")
+                    try:
+                        self._json(services.external.set_rule_enabled(rule_id, enabled))
+                    except KeyError:
+                        self._error(404, "rule_not_found", "关注词不存在")
+                    return
+                if path == "/api/interests/objects":
+                    self._json(services.interests.create_object(payload), 201)
+                    return
+                if path == "/api/interests/links":
+                    self._json(services.interests.create_link(payload), 201)
+                    return
                 if path == "/api/external/refresh":
                     source_id = str(payload.get("source_id", "")).strip()
                     if not source_id:
@@ -614,6 +634,18 @@ def create_server(host, port, token, services):
                     self._error(400, "invalid_request", str(error))
                 except KeyError:
                     self._error(404, "not_found", "数据源不存在")
+                return
+            elif path.startswith("/api/external/rules/"):
+                rule_id = unquote(path.removeprefix("/api/external/rules/")).rstrip("/")
+                if not rule_id or "/" in rule_id:
+                    self._error(400, "invalid_request", "关注词编号无效")
+                    return
+                try:
+                    self._json(services.external.delete_watch_rule(rule_id))
+                except ValueError as error:
+                    self._error(400, "invalid_request", str(error))
+                except KeyError:
+                    self._error(404, "rule_not_found", "关注词不存在")
                 return
             self._error(404, "not_found", "接口不存在")
 
