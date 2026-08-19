@@ -81,9 +81,12 @@ def _result_schema():
             "items": {"type": "string", "enum": sorted(ALLOWED_IMPACT_CATEGORIES)},
         },
         # GYW framework (《登高望远》): require the provider to emit the
-        # five structured fields so the home page can show real stakeholder
-        # / constraint / least-resistance / counter-evidence / leading-
-        # indicator analysis instead of UI fallback templates.
+        # five structured legacy fields so the home page can show real
+        # stakeholder / constraint / least-resistance / counter-evidence /
+        # leading-indicator analysis instead of UI fallback templates.
+        # 稿C v2: four new keys carry structured stakeholder/indicator data —
+        # beneficiaries / cost_bearers (with evidence_refs for anti-hallucination),
+        # historical_parallel (nullable), observable_signals (array of strings).
         "gyw": {
             "type": "object",
             "properties": {
@@ -92,6 +95,34 @@ def _result_schema():
                 "least_resistance_path": {"type": "string"},
                 "counter_evidence": {"type": "string"},
                 "leading_indicators": {"type": "string"},
+                "beneficiaries": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "subject": {"type": "string"},
+                            "gain": {"type": "string"},
+                            "evidence_refs": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["subject", "gain", "evidence_refs"],
+                        "additionalProperties": False,
+                    },
+                },
+                "cost_bearers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "subject": {"type": "string"},
+                            "cost": {"type": "string"},
+                            "evidence_refs": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["subject", "cost", "evidence_refs"],
+                        "additionalProperties": False,
+                    },
+                },
+                "historical_parallel": {"type": ["string", "null"]},
+                "observable_signals": {"type": "array", "items": {"type": "string"}},
             },
             "required": [
                 "stakeholders",
@@ -99,6 +130,10 @@ def _result_schema():
                 "least_resistance_path",
                 "counter_evidence",
                 "leading_indicators",
+                "beneficiaries",
+                "cost_bearers",
+                "historical_parallel",
+                "observable_signals",
             ],
             "additionalProperties": False,
         },

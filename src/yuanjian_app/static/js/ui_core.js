@@ -133,3 +133,27 @@ export function formatBytes(value) {
   if (size < 1024 * 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
   return `${(size / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
+
+// 稿C v2 · 研判来源统一标注（消灭"贴标签"——界面词由 judgments.provider 驱动）
+// 所有展示 gyw 的视图（today/calib/通知卡片）一律调此函数，禁止视图内自写文案。
+// tone → CSS 徽标样式：remote=磷绿实线 / template=琥珀虚线 / muted=灰点线。
+export function sourceBadge(candidate) {
+  const c = candidate || {};
+  if (c.gyw_source === 'legacy-backfill') {
+    return { text: '类目模板补全 · 重跑后覆盖', tone: 'muted' };
+  }
+  const provider = String(c.judgment_provider || '').trim();
+  if (provider && provider !== 'local') {
+    return { text: `AI 研判 · ${provider}`, tone: 'remote' };
+  }
+  if (provider === 'local') {
+    return { text: '模板推断 · 非真实研判', tone: 'template' };
+  }
+  return { text: '占位模板 · 引擎未产出', tone: 'muted' };
+}
+
+// 研判来源徽标 HTML（统一渲染，配合 sourceBadge）
+export function sourceBadgeHtml(candidate) {
+  const { text, tone } = sourceBadge(candidate);
+  return `<span class="judgment-source judgment-${tone}" title="${text}">${text}</span>`;
+}

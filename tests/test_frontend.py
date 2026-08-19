@@ -222,8 +222,10 @@ assert.equal(ui.formatBytes(-1), '未知');
             self.assertIn(field, view, f"today.js missing GYW field {field}")
         # The UI must label the source so the user knows whether they are
         # seeing real backend analysis or the UI fallback template.
-        self.assertIn("后端 judgment 引擎", view)
-        self.assertIn("UI 兜底模板", view)
+        self.assertIn("sourceBadge", view)
+        # 旧脱钩来源文案（作为 source 赋值字面量）应已移除；注释里的裸词允许。
+        self.assertNotIn("'后端 judgment 引擎'", view, "旧脱钩来源赋值应已移除")
+        self.assertNotIn("'UI 兜底模板'", view, "旧脱钩来源赋值应已移除")
         # The page must surface fact_summary and actors too, not just the
         # framework slots — otherwise the user sees analysis with no event.
         self.assertIn("fact_summary", view)

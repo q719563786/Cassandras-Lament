@@ -477,6 +477,19 @@ class CognitionController:
             return remote.name
         return "local"
 
+    def _should_use_remote(self, cluster) -> bool:
+        """稿C v2 选择性远程闸：把有限的远程调用集中到有决策价值的事件上。
+        - E3/E4（高等级证据）：必远程
+        - E2 且独立域名 >= 3（多源交叉的中级事件）：远程
+        - 其余（E1、单薄 E2）：本地模板，省预算、UI 标「模板推断」
+        当远程未启用时 _provider_name 返回 local，本闸结果会被覆盖，天然兼容。"""
+        level = str(cluster.get("evidence_level") or "E1")
+        if level in ("E3", "E4"):
+            return True
+        if level == "E2" and int(cluster.get("independent_domains") or 0) >= 3:
+            return True
+        return False
+
     def _should_notify(self, row) -> bool:
         """False for judgments older than the bootstrap cutoff.
 
@@ -490,11 +503,18 @@ class CognitionController:
 
     def process_once(self):
         backfill = self.cognition.backfill_unclustered(limit=1000)
-        provider = self._provider_name()
+        remote_provider = self._provider_name()
+        remote_enabled = remote_provider != "local"
         clusters = [
             item for item in self.cognition.list_clusters(limit=1000) if item["needs_judgment"]
         ]
+        # provider 透传给 summary 供诊断展示；空库（无 cluster）时回退到 remote_provider
+        # 的语义值，保持"本次循环实际会用的 provider"口径一致。
+        provider = remote_provider if not remote_enabled else "local"
         for cluster in clusters:
+            # 稿C v2 选择性调用：按事件等级决定走远程还是本地模板，
+            # 把每日预算（30）花在高决策价值的事件上，低等级走本地并标「模板推断」。
+            provider = remote_provider if (remote_enabled and self._should_use_remote(cluster)) else "local"
             self.judgment_queue.enqueue(
                 cluster["cluster_id"], cluster["evidence_hash"], provider
             )

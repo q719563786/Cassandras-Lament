@@ -324,10 +324,11 @@ class ImpactService:
             # we can surface the GYW framework fields the provider generated.
             judgment_ids = [row["judgment_id"] for row in rows if row["judgment_id"]]
             judgments_by_id: dict[str, dict] = {}
+            judgment_providers: dict[str, str] = {}
             if judgment_ids:
                 placeholders = ",".join("?" for _ in judgment_ids)
                 judgment_rows = connection.execute(
-                    f"SELECT judgment_id, content_json FROM judgments WHERE judgment_id IN ({placeholders})",
+                    f"SELECT judgment_id, content_json, provider FROM judgments WHERE judgment_id IN ({placeholders})",
                     judgment_ids,
                 ).fetchall()
                 for jrow in judgment_rows:
@@ -336,10 +337,12 @@ class ImpactService:
                     except (TypeError, json.JSONDecodeError):
                         content = {}
                     judgments_by_id[jrow["judgment_id"]] = content
+                    judgment_providers[jrow["judgment_id"]] = str(jrow["provider"] or "local")
         output = []
         for row in rows:
             candidate = json.loads(row["candidate_json"] or "{}")
             judgment_content = judgments_by_id.get(row["judgment_id"], {})
+            judgment_provider = judgment_providers.get(row["judgment_id"], "local")
             gyw = judgment_content.get("gyw") or {}
             # Backfill for legacy judgments that pre-date the GYW schema.
             # Do not write back to disk — keep history immutable; the home
@@ -368,6 +371,7 @@ class ImpactService:
                     "judgment_id": row["judgment_id"],
                     "gyw": gyw,
                     "gyw_source": gyw_source,
+                    "judgment_provider": judgment_provider,
                     "fact_summary": judgment_content.get("fact_summary", ""),
                     "actors": judgment_content.get("actors", []),
                     "causal_chain": judgment_content.get("causal_chain", []),

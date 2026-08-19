@@ -1,7 +1,7 @@
 // 远见 v0.9 · 今日远见 —— 1 个深度预知（按 GYW 框架分析）+ 预测进度（AC-01）
 import { api, escapeHtml, showPageError, showToast, withBusy } from '../api.js';
 import { yjIcon } from '../icons.js';
-import { riskTag, categoryLabel, formatLocalTime } from '../ui_core.js';
+import { riskTag, categoryLabel, formatLocalTime, sourceBadge } from '../ui_core.js';
 import { tellBoxHtml, bindTellBox } from './tell.js';
 
 const PROBS = [95, 90, 80, 65, 50, 35, 20, 10, 5];
@@ -65,8 +65,8 @@ function gywFallback(category) {
 }
 
 // 解析 candidate 的 GYW 分析：优先用后端 judgment.gyw（真实结构化字段），
-// 没有时回退到 UI 兜底模板。这样 LocalHeuristicProvider 改造完成后，
-// 首页立刻显示真实分析而不是 UI 模板。
+// 没有时回退到 UI 兜底模板。来源标注统一走 ui_core.sourceBadge（稿C v2），
+// 界面词由 judgments.provider 驱动，消灭"贴标签"。
 function resolveGyw(candidate) {
   const backend = candidate?.gyw;
   const hasComplete = backend && typeof backend === 'object'
@@ -74,16 +74,15 @@ function resolveGyw(candidate) {
       && backend.least_resistance_path && backend.counter_evidence
       && backend.leading_indicators;
   if (hasComplete) {
-    if (candidate?.gyw_source === 'legacy-backfill') {
-      return { analysis: backend, source: '旧 judgment，后端按类目模板补全（等 cognition 重跑后会用真 GYW 覆盖）' };
-    }
-    return { analysis: backend, source: '后端 judgment 引擎' };
+    const { text } = sourceBadge(candidate);
+    return { analysis: backend, source: text };
   }
   // Truly nothing on the backend — show UI fallback, but only for new
   // candidates that the engine never produced gyw for. Today this path
   // is unreachable in practice (pending_candidates always backfills), but
-  // keep it as a defensive last-resort.
-  return { analysis: gywFallback(candidate?.category), source: 'UI 兜底模板' };
+  // keep it as a defensive last-resort. 来源标注统一走 sourceBadge 占位分支。
+  const { text } = sourceBadge(candidate);
+  return { analysis: gywFallback(candidate?.category), source: text };
 }
 
 function candidateCard(c) {

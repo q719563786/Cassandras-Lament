@@ -38,6 +38,14 @@ def valid_output():
             "least_resistance_path": "最小阻力路径：试点 → 推广 → 全面执行",
             "counter_evidence": "反对证据：执行阻力、利益集团游说、政策转向",
             "leading_indicators": "领先指标：试点公告、配套细则、部门预算",
+            "beneficiaries": [
+                {"subject": "发文机关", "gain": "政绩落地", "evidence_refs": ["S-1"]}
+            ],
+            "cost_bearers": [
+                {"subject": "[推断]执行部门", "cost": "配套资源压力", "evidence_refs": []}
+            ],
+            "historical_parallel": None,
+            "observable_signals": ["配套细则挂网", "部门预算批复"],
         },
     }
 
