@@ -305,6 +305,31 @@ class ImpactService:
                 pass  # 自动确认失败不影响主流程，候选仍保留待手动确认
         return sorted(results, key=lambda item: (-item["impact_score"], item["interest_id"]))
 
+    def auto_confirm_all_pending(self) -> int:
+        """启动时批量确认所有未确认的历史候选预测（无需人工干预）。
+        用候选预测的概率区间中值映射到固定档位，返回确认成功的数量。
+        """
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT impact_id, candidate_json FROM personal_impacts
+                WHERE candidate_json NOT LIKE '%confirmed_forecast_id%'
+                  AND candidate_json IS NOT NULL AND candidate_json != ''
+                """
+            ).fetchall()
+        confirmed = 0
+        for row in rows:
+            try:
+                candidate = json.loads(row["candidate_json"] or "{}")
+                prob_low = float(candidate.get("probability_low", 0.5))
+                prob_high = float(candidate.get("probability_high", 0.8))
+                prob_mid = (prob_low + prob_high) / 2
+                self.confirm_candidate(row["impact_id"], _nearest_probability(prob_mid))
+                confirmed += 1
+            except Exception:
+                continue  # 单个失败不影响其他
+        return confirmed
+
     def candidate_forecast(self, impact_id: str) -> dict:
         with self.database.connect() as connection:
             row = connection.execute(

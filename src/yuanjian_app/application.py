@@ -164,6 +164,13 @@ class Application:
     def run(self, hidden=False, headless=False):
         """Run the loopback server and either the desktop or explicit smoke shell."""
         self.scheduler.start()
+        # 启动时批量确认历史未确认候选预测（后台线程，不阻塞启动）
+        def _auto_confirm_startup():
+            try:
+                self.scheduler.cognition.impacts.auto_confirm_all_pending()
+            except Exception:
+                pass
+        threading.Thread(target=_auto_confirm_startup, name="YuanJianAutoConfirm", daemon=True).start()
         server_thread = threading.Thread(
             target=self.server.serve_forever,
             kwargs={"poll_interval": 0.25},
