@@ -9,6 +9,18 @@ from datetime import datetime, timedelta, timezone
 
 from .forecasts import ALLOWED_PROBABILITIES
 
+_ALLOWED_PROB_LIST = sorted(ALLOWED_PROBABILITIES)
+
+
+def _nearest_probability(value: float) -> float:
+    """把任意概率映射到最近的固定档位（ALLOWED_PROBABILITIES）。"""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return 0.50
+    value = max(0.0, min(1.0, value))
+    return min(_ALLOWED_PROB_LIST, key=lambda p: abs(p - value))
+
 # GYW framework fallback templates (mirror of LocalHeuristicProvider._GYW_TEMPLATES).
 # Used by pending_candidates to backfill gyw for legacy judgments that
 # pre-date the GYW schema, without rewriting historical judgment rows.
@@ -165,7 +177,7 @@ class ImpactService:
             "supporting_evidence": "\n".join(judgment.get("supporting_source_ids", [])),
             "opposing_evidence": "\n".join(judgment.get("uncertainties", [])),
             "falsification": "\n".join(judgment.get("down_triggers", [])),
-            "recommended_action": "继续收集执行证据；人工确认后才进入正式预测账本。",
+            "recommended_action": "继续收集执行证据，系统已自动确认并进入预测账本。",
         }
 
     def _category_penalties(self):
@@ -194,6 +206,7 @@ class ImpactService:
         penalties = self._category_penalties()
         now = _iso(self.now())
         results = []
+        auto_confirm = []
         for interest in self.interest_service.list_objects():
             if interest["status"] != "active":
                 continue
@@ -266,6 +279,10 @@ class ImpactService:
                         now,
                     ),
                 )
+                # 新候选预测：自动确认（用概率区间中值映射到固定档位）
+                if not candidate.get("confirmed_forecast_id"):
+                    prob_mid = (candidate["probability_low"] + candidate["probability_high"]) / 2
+                    auto_confirm.append((impact_id, _nearest_probability(prob_mid)))
             results.append(
                 {
                     "impact_id": impact_id,
@@ -280,6 +297,12 @@ class ImpactService:
                     "candidate": candidate,
                 }
             )
+        # 自动确认所有新候选预测（无需人工干预）
+        for impact_id, prob in auto_confirm:
+            try:
+                self.confirm_candidate(impact_id, prob)
+            except Exception:
+                pass  # 自动确认失败不影响主流程，候选仍保留待手动确认
         return sorted(results, key=lambda item: (-item["impact_score"], item["interest_id"]))
 
     def candidate_forecast(self, impact_id: str) -> dict:
@@ -313,8 +336,8 @@ class ImpactService:
                        p.cluster_id, p.judgment_id, i.category
                 FROM personal_impacts p
                 JOIN interest_objects i ON i.object_id = p.interest_id
-                WHERE p.candidate_json NOT LIKE '%confirmed_forecast_id%'
-                    AND (p.muted_until IS NULL OR p.muted_until < ?)
+                WHERE (p.muted_until IS NULL OR p.muted_until < ?)
+                    AND p.candidate_json IS NOT NULL AND p.candidate_json != ''
                 ORDER BY p.impact_score DESC, p.updated_at DESC
                 LIMIT ?
                 """,
@@ -375,6 +398,8 @@ class ImpactService:
                     "fact_summary": judgment_content.get("fact_summary", ""),
                     "actors": judgment_content.get("actors", []),
                     "causal_chain": judgment_content.get("causal_chain", []),
+                    "confirmed": bool(candidate.get("confirmed_forecast_id")),
+                    "confirmed_probability": candidate.get("confirmed_probability"),
                 }
             )
         return output

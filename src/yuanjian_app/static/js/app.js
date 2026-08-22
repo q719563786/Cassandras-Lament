@@ -2,7 +2,6 @@
 import { yjMountIcons } from './icons.js';
 import { api, showToast, withBusy, updateChrome } from './api.js';
 import { initRouter, renderView, currentView } from './router.js';
-import { summarizeRun } from './ui_core.js';
 import { openDrawer, refreshUnread } from './views/notifications.js';
 
 // 静态壳里的 data-icon 占位一次性注入
@@ -18,43 +17,28 @@ document.querySelectorAll('.nav-item[data-view]').forEach(btn => {
 // ===== 顶栏：通知抽屉 =====
 document.getElementById('open-notifications')?.addEventListener('click', () => openDrawer());
 
-// ===== 顶栏：立即更新判断（ic_refresh 旋转 + 摘要 toast + 重渲染当前视图） =====
+// ===== 顶栏：刷新（后台每60秒自动研判，前端每30秒自动刷新，按钮手动刷新当前视图） =====
 const runButton = document.getElementById('run-cognition');
 runButton?.addEventListener('click', () => {
   const spinner = runButton.querySelector('svg');
-  withBusy(runButton, '正在研判…', async () => {
+  withBusy(runButton, '刷新中…', async () => {
     if (spinner) spinner.classList.add('spinning');
     try {
-      // If the background scheduler is mid-run, the operation is locked and
-      // POST /api/cognition/run would 409 with "认知任务正在运行". Poll
-      // /api/cognition/status every 2s (up to 30s) until idle, then retry
-      // once. This turns a "失败" into a transparent wait-and-go.
-      const result = await runCognitionWithAutoRetry();
-      showToast(summarizeRun(result));
-      updateChrome({connected: true});
       await renderView();          // 当前视图重拉数据
       await refreshUnread();       // 新通知可能产生
+      showToast('已刷新');
     } catch (error) {
-      showToast(`运行失败：${error.message}`, 'err');
-      updateChrome({connected: false});
+      showToast(`刷新失败：${error.message}`, 'err');
     } finally {
       if (spinner) spinner.classList.remove('spinning');
     }
   });
 });
 
-async function runCognitionWithAutoRetry(maxWaitMs = 30000) {
-  const deadline = Date.now() + maxWaitMs;
-  while (true) {
-    try {
-      return await api('/api/cognition/run', {method: 'POST', body: ''});
-    } catch (error) {
-      const busy = /认知任务正在运行/.test(error.message || '');
-      if (!busy || Date.now() >= deadline) throw error;
-      await new Promise(resolve => setTimeout(resolve, 2000));
-    }
-  }
-}
+// 前端每30秒自动刷新当前视图（后台认知每60秒自动运行）
+setInterval(async () => {
+  try { await renderView(); } catch (_) { /* 静默失败，下次再试 */ }
+}, 30000);
 
 // ===== 侧栏底部：安全退出（confirm 后 POST /api/shutdown） =====
 document.getElementById('shutdown')?.addEventListener('click', () => {

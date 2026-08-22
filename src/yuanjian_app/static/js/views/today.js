@@ -106,10 +106,13 @@ function candidateCard(c) {
       </ul>
     </details>
     <div class="u-row">
-      <select aria-label="你判断这件事发生的概率" title="选完后点确认，远见会在截止日检查并记入 Brier 分数。">
-        ${PROBS.map(p => `<option value="${p}">${p}%</option>`).join('')}
-      </select>
-      <button type="button" class="btn btn-sm btn-primary" data-confirm>确认</button>
+      ${c.confirmed ?
+        `<span class="u-dim">已自动确认 · 系统判断概率 ${Math.round((c.confirmed_probability || 0) * 100)}%</span>` :
+        `<select aria-label="你判断这件事发生的概率" title="选完后点确认，远见会在截止日检查并记入 Brier 分数。">
+          ${PROBS.map(p => `<option value="${p}">${p}%</option>`).join('')}
+        </select>
+        <button type="button" class="btn btn-sm btn-primary" data-confirm>确认</button>`
+      }
     </div>
     ${c?.cluster_id ? `<div class="u-row u-feedback u-mt-sm">
       <button type="button" class="btn btn-sm" data-feedback="false_positive" data-cluster="${escapeHtml(c.cluster_id)}">误报</button>
@@ -177,6 +180,7 @@ export async function render(root) {
   // 候选预测确认绑定：调 /api/cognition/candidates/{id}/confirm
   root.querySelectorAll('.candidate[data-id]').forEach(row => {
     const btn = row.querySelector('[data-confirm]');
+    if (!btn) return; // 已自动确认的候选没有确认按钮
     btn.addEventListener('click', () => withBusy(btn, '记录中…', async () => {
       try {
         await api(`/api/cognition/candidates/${encodeURIComponent(row.dataset.id)}/confirm`, {
