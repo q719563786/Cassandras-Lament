@@ -18,6 +18,7 @@ from .judgments import (
     LocalHeuristicProvider,
     MAX_BUNDLE_CHARACTERS,
     MAX_EVIDENCE_SOURCES,
+    repair_judgment,
     validate_judgment,
 )
 
@@ -260,7 +261,15 @@ class OpenAIResponsesProvider:
             decoded = json.loads(self._output_text(response))
         except json.JSONDecodeError as error:
             raise InvalidJudgmentError("远程输出不是有效的研判JSON") from error
-        return validate_judgment(decoded, set(bundle.allowed_source_ids))
+        try:
+            return validate_judgment(decoded, set(bundle.allowed_source_ids))
+        except InvalidJudgmentError:
+            # 稿D：严格校验失败时尝试宽松修复（缺字段/类型错/数组长度不对），
+            # 修复成功则用修复后的远程结果，失败才抛出由调用方降级 local。
+            repaired = repair_judgment(decoded, set(bundle.allowed_source_ids))
+            if repaired is not None:
+                return repaired
+            raise
 
 
 class AiSettingsService:

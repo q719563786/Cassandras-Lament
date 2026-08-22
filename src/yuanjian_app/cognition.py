@@ -478,17 +478,14 @@ class CognitionController:
         return "local"
 
     def _should_use_remote(self, cluster) -> bool:
-        """稿C v2 选择性远程闸：把有限的远程调用集中到有决策价值的事件上。
-        - E3/E4（高等级证据）：必远程
-        - E2 且独立域名 >= 3（多源交叉的中级事件）：远程
-        - 其余（E1、单薄 E2）：本地模板，省预算、UI 标「模板推断」
+        """稿D 放宽远程闸：把有限的远程调用集中到有决策价值的事件上。
+        - E2/E3/E4（中高等级证据）：必远程
+        - E1（低等级证据）：本地模板兜底，省预算、UI 标「模板推断」
+        原稿C v2 要求 E2 且独立域名>=3 才远程，过于严格导致大部分事件走模板；
+        放宽后所有中高等级事件均走远程，远程质量由 SYSTEM_INSTRUCTION 约束。
         当远程未启用时 _provider_name 返回 local，本闸结果会被覆盖，天然兼容。"""
         level = str(cluster.get("evidence_level") or "E1")
-        if level in ("E3", "E4"):
-            return True
-        if level == "E2" and int(cluster.get("independent_domains") or 0) >= 3:
-            return True
-        return False
+        return level in ("E2", "E3", "E4")
 
     def _should_notify(self, row) -> bool:
         """False for judgments older than the bootstrap cutoff.
