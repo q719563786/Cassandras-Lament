@@ -272,6 +272,97 @@ class OpenAIResponsesProvider:
             raise
 
 
+class DeepSeekChatProvider:
+    """DeepSeek Chat Completions 格式 provider（/chat/completions + messages + response_format）。
+
+    DeepSeek 不兼容 OpenAI Responses API（/v1/responses），只支持 Chat Completions。
+    JSON Output 通过 response_format={"type":"json_object"} + prompt 内字段说明实现。
+    """
+
+    name = "deepseek_chat"
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        token_loader,
+        endpoint: str = "https://api.deepseek.com/chat/completions",
+        transport=None,
+        timeout: int = 60,
+    ):
+        self.model = str(model or "").strip()
+        if not self.model:
+            raise ValueError("启用远程AI时必须明确填写模型编号")
+        self.endpoint = _validate_endpoint(endpoint)
+        self.token_loader = token_loader
+        self.transport = transport or _default_transport
+        self.timeout = int(timeout)
+
+    def _request_body(self, bundle):
+        public = bundle.to_public_dict()
+        system_instruction = public.pop("system_instruction")
+        # DeepSeek 的 json_object 只保证输出合法 JSON，不保证字段齐全，
+        # 必须在 prompt 内明确列出所有字段，再靠 repair_judgment 兜底。
+        system_with_schema = (
+            system_instruction
+            + "\n\n输出要求：严格返回一个JSON对象，字段包括 fact_summary(str)、"
+            "actors(string[])、causal_chain(string[])、uncertainties(string[])、"
+            "horizons(string[])、probability_low(number 0-1)、probability_high(number 0-1)、"
+            "confidence(number 0-1)、supporting_source_ids(string[])、counter_source_ids(string[])、"
+            "up_triggers(string[])、down_triggers(string[])、impact_categories(string[])、"
+            "gyw(object，含 stakeholders/constraints/least_resistance_path/counter_evidence/"
+            "leading_indicators/beneficiaries/cost_bearers/historical_parallel/observable_signals)。"
+            "不要输出JSON以外的任何文字。"
+        )
+        return {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_with_schema},
+                {"role": "user", "content": json.dumps(public, ensure_ascii=False)},
+            ],
+            "response_format": {"type": "json_object"},
+            "stream": False,
+        }
+
+    @staticmethod
+    def _output_text(response):
+        if isinstance(response, dict):
+            choices = response.get("choices", [])
+            if choices and isinstance(choices[0], dict):
+                msg = choices[0].get("message", {})
+                content = msg.get("content")
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
+        raise InvalidJudgmentError("DeepSeek响应缺少文本内容")
+
+    def analyze(self, bundle) -> JudgmentResult:
+        token = str(self.token_loader() or "").strip()
+        if not token:
+            raise RemoteProviderError("auth")
+        body = self._request_body(bundle)
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        try:
+            response = self.transport(self.endpoint, headers, body, self.timeout)
+        except RemoteProviderError:
+            raise
+        except (TimeoutError, socket.timeout) as error:
+            raise RemoteProviderError("timeout") from error
+        try:
+            decoded = json.loads(self._output_text(response))
+        except json.JSONDecodeError as error:
+            raise InvalidJudgmentError("DeepSeek输出不是有效的研判JSON") from error
+        try:
+            return validate_judgment(decoded, set(bundle.allowed_source_ids))
+        except InvalidJudgmentError:
+            repaired = repair_judgment(decoded, set(bundle.allowed_source_ids))
+            if repaired is not None:
+                return repaired
+            raise
+
+
 class AiSettingsService:
     """Persist non-secret AI settings while keeping the token in DPAPI storage."""
 
@@ -341,6 +432,16 @@ class AiSettingsService:
         settings = self.get()
         if not settings["enabled"] or not settings["configured"]:
             return None
+        endpoint = settings["endpoint"]
+        # DeepSeek 只支持 Chat Completions，不支持 Responses API；
+        # 自动识别 deepseek.com 端点并修正为 /chat/completions。
+        if "deepseek.com" in endpoint.casefold():
+            endpoint = "https://api.deepseek.com/chat/completions"
+            return DeepSeekChatProvider(
+                endpoint=endpoint,
+                model=settings["model"],
+                token_loader=self.secret_store.load,
+            )
         return OpenAIResponsesProvider(
             endpoint=settings["endpoint"],
             model=settings["model"],
