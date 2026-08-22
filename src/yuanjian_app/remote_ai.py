@@ -335,6 +335,41 @@ class DeepSeekChatProvider:
                     return content.strip()
         raise InvalidJudgmentError("DeepSeek响应缺少文本内容")
 
+    @staticmethod
+    def _extract_json(text: str) -> str:
+        """从 DeepSeek 输出中提取 JSON 部分，处理 markdown 代码块等常见格式问题。"""
+        if not text:
+            return text
+        text = text.strip()
+        # 去掉 markdown 代码块标记 ```json ... ```
+        if text.startswith("```"):
+            # 找到第一个 { 或 [
+            start = min(
+                (text.find(c) for c in "{[" if text.find(c) >= 0),
+                default=0
+            )
+            end = max(
+                (text.rfind(c) for c in "}]" if text.rfind(c) >= 0),
+                default=len(text)
+            )
+            if end > start:
+                text = text[start:end+1]
+        # 去掉前后多余的文字（如果 JSON 在中间）
+        first_brace = text.find("{")
+        first_bracket = text.find("[")
+        starts = [x for x in [first_brace, first_bracket] if x >= 0]
+        if starts:
+            start = min(starts)
+            # 找到匹配的结束符
+            end_brace = text.rfind("}")
+            end_bracket = text.rfind("]")
+            ends = [x for x in [end_brace, end_bracket] if x >= 0]
+            if ends:
+                end = max(ends)
+                if end > start:
+                    text = text[start:end+1]
+        return text.strip()
+
     def analyze(self, bundle) -> JudgmentResult:
         token = str(self.token_loader() or "").strip()
         if not token:
@@ -350,10 +385,27 @@ class DeepSeekChatProvider:
             raise
         except (TimeoutError, socket.timeout) as error:
             raise RemoteProviderError("timeout") from error
+        raw_text = self._output_text(response)
+        # 先尝试直接解析
         try:
-            decoded = json.loads(self._output_text(response))
-        except json.JSONDecodeError as error:
-            raise InvalidJudgmentError("DeepSeek输出不是有效的研判JSON") from error
+            decoded = json.loads(raw_text)
+        except json.JSONDecodeError:
+            # 提取 JSON 部分后重试
+            extracted = self._extract_json(raw_text)
+            try:
+                decoded = json.loads(extracted)
+            except json.JSONDecodeError:
+                # 尝试修复常见 JSON 格式问题
+                try:
+                    import re
+                    fixed = extracted
+                    # 修复单引号
+                    fixed = re.sub(r"(?<!\\)'", '"', fixed)
+                    # 修复 trailing commas
+                    fixed = re.sub(r",\s*([}\]])", r"\1", fixed)
+                    decoded = json.loads(fixed)
+                except (json.JSONDecodeError, Exception):
+                    raise InvalidJudgmentError("DeepSeek输出不是有效的研判JSON")
         try:
             return validate_judgment(decoded, set(bundle.allowed_source_ids))
         except InvalidJudgmentError:
