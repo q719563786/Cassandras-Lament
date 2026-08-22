@@ -65,16 +65,23 @@ class RadarScheduler:
         if self.database is None:
             return
         updated_at = _iso(self.now())
-        with self.database.connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO runtime_state(state_key,value_json,updated_at)
-                VALUES (?,?,?)
-                ON CONFLICT(state_key) DO UPDATE SET
-                    value_json=excluded.value_json,updated_at=excluded.updated_at
-                """,
-                (f"task.{task}", json.dumps(payload, sort_keys=True), updated_at),
-            )
+        try:
+            value_json = json.dumps(payload, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            value_json = json.dumps({"status": "serialization_error", "task": task}, sort_keys=True)
+        try:
+            with self.database.connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO runtime_state(state_key,value_json,updated_at)
+                    VALUES (?,?,?)
+                    ON CONFLICT(state_key) DO UPDATE SET
+                        value_json=excluded.value_json,updated_at=excluded.updated_at
+                    """,
+                    (f"task.{task}", value_json, updated_at),
+                )
+        except Exception:
+            pass  # 记录失败不影响主循环
 
     def _execute(self, name, callback):
         started_at = _iso(self.now())
@@ -199,21 +206,39 @@ class RadarScheduler:
         while not self._stop.is_set():
             current = time.monotonic()
             if current >= next_external:
-                self.run_external_once()
+                try:
+                    self.run_external_once()
+                except Exception:
+                    pass
                 next_external = current + self.poll_seconds
             if self.cognition is not None and current >= next_cognition:
-                self.run_cognition_once()
+                try:
+                    self.run_cognition_once()
+                except Exception:
+                    pass
                 next_cognition = current + 60
             if self.cognition is not None and current >= next_trends:
-                self.run_trends_once()
+                try:
+                    self.run_trends_once()
+                except Exception:
+                    pass
                 next_trends = current + 3600
             if current >= next_learning:
-                self.run_learning_once()
+                try:
+                    self.run_learning_once()
+                except Exception:
+                    pass
                 next_learning = current + 6 * 3600
             if current >= next_daily:
                 # 备份/清理只做"到期与否"检查，真正执行由墙钟判断（R6）。
-                self.run_backup_once()
-                self.run_retention_once()
+                try:
+                    self.run_backup_once()
+                except Exception:
+                    pass
+                try:
+                    self.run_retention_once()
+                except Exception:
+                    pass
                 next_daily = current + 300
             waits = [next_external - time.monotonic()]
             if self.cognition is not None:
