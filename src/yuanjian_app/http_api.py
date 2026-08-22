@@ -106,7 +106,7 @@ def create_server(host, port, token, services):
         raise ValueError("只允许本机访问")
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "YuanJian/0.9"
+        server_version = "YuanJian/1.0"
 
         def log_message(self, format, *args):
             return None

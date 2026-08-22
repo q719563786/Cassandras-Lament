@@ -104,7 +104,7 @@ def fetch_bytes(
     _validate_dns(urlparse(safe_url).hostname, resolver)
     request = urllib.request.Request(
         safe_url,
-        headers={"User-Agent": "YuanJian-Cognition/0.9 (+local personal research)"},
+        headers={"User-Agent": "YuanJian-Cognition/1.0 (+local personal research)"},
     )
     try:
         with opener(request, timeout=timeout) as response:
@@ -138,7 +138,7 @@ def fetch_json(
         safe_url,
         data=body,
         headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) YuanJian/0.9",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) YuanJian/1.0",
             "Content-Type": "application/json",
         },
         method="POST",
