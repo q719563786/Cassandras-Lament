@@ -726,7 +726,7 @@ class CognitionController:
                 WHERE c.status='active'
                   AND c.latest_judgment_id=p.judgment_id
                   AND p.alert_level IN ('L3','L4')
-                  AND p.user_label!='false_positive'
+                  AND p.user_label NOT IN ('false_positive','dismissed')
                   AND (p.muted_until IS NULL OR p.muted_until<=?)
                 ORDER BY p.updated_at DESC
                 """,
@@ -794,6 +794,10 @@ class CognitionController:
                     "decision_by": plain_text(candidate.get("window_end"), 32) or "按时间窗口复查",
                     "updated_at": row["updated_at"],
                     "impact_score": float(row["impact_score"]),
+                    "candidate_confirmed": bool(candidate.get("confirmed_forecast_id")),
+                    "candidate_prob_low": candidate.get("probability_low", 0.3),
+                    "candidate_prob_high": candidate.get("probability_high", 0.7),
+                    "candidate_title": candidate.get("title", ""),
                 }
             )
 
@@ -852,6 +856,8 @@ class CognitionController:
             field, value = "importance_override", importance
         elif action == "false_positive":
             field, value = "user_label", "false_positive"
+        elif action == "dismiss":
+            field, value = "user_label", "dismissed"
         else:
             raise ValueError("反馈动作无效")
         with self.database.connect() as connection:

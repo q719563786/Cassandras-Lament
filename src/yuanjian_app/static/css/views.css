@@ -116,3 +116,127 @@
 .badge-tier-T2{background:rgba(52,152,219,.18);color:#3498db;border-color:rgba(52,152,219,.4)}
 .badge-tier-T3{background:rgba(149,165,166,.18);color:#95a5a6;border-color:rgba(149,165,166,.4)}
 .badge-tier-T4{background:rgba(241,196,15,.18);color:#b58300;border-color:rgba(241,196,15,.4)}
+
+/* ===== v1.1 行动卡可交互样式 ===== */
+.action-card{cursor:default;transition:opacity .3s,transform .2s}
+.action-card.ac-done{opacity:0;transform:translateX(20px);pointer-events:none}
+.action-card.l4{border-left-color:var(--color-danger);background:linear-gradient(90deg,rgba(231,76,60,.04),transparent 40%)}
+.action-card .ac-main{cursor:pointer}
+.action-card .ac-main:hover{background:rgba(255,255,255,.03)}
+.action-card .ac-header{display:flex;gap:var(--space-sm);align-items:center;flex-wrap:wrap;margin-bottom:4px}
+.action-card .ac-window{font-size:.6875rem;color:var(--color-text-muted)}
+.action-card .ac-actions{display:flex;gap:6px;margin-top:var(--space-sm);padding-top:var(--space-xs);border-top:1px dashed var(--color-border);flex-wrap:wrap}
+.ac-btn{background:var(--color-surface-raised);border:1px solid var(--color-border);color:var(--color-text-secondary);padding:4px 10px;border-radius:3px;font-size:.6875rem;cursor:pointer;transition:all .15s}
+.ac-btn:hover{border-color:var(--color-border-strong);color:var(--color-text-primary);background:var(--color-surface)}
+.ac-btn:disabled{opacity:.5;cursor:wait}
+.ac-btn-predict{border-color:var(--color-accent);color:var(--color-accent)}
+.ac-btn-predict:hover{background:var(--color-accent);color:#fff}
+.ac-btn-warn{border-color:rgba(231,76,60,.4);color:var(--color-danger)}
+.ac-btn-warn:hover{background:var(--color-danger);color:#fff;border-color:var(--color-danger)}
+.badge{display:inline-block;padding:1px 6px;border-radius:2px;font-size:.625rem;font-weight:600;border:1px solid var(--color-border);letter-spacing:.3px}
+.badge-alert-L4{background:rgba(231,76,60,.15);color:#e74c3c;border-color:rgba(231,76,60,.35)}
+.badge-alert-L3{background:rgba(243,156,18,.15);color:#f39c12;border-color:rgba(243,156,18,.35)}
+.badge-evidence{background:rgba(52,152,219,.12);color:#3498db;border-color:rgba(52,152,219,.3)}
+.badge-conf{background:rgba(149,165,166,.12);color:#95a5a6;border-color:rgba(149,165,166,.3)}
+.badge-window{background:rgba(155,89,182,.12);color:#9b59b6;border-color:rgba(155,89,182,.3)}
+.badge-confirmed{background:rgba(46,204,113,.15);color:#2ecc73;border-color:rgba(46,204,113,.35)}
+.badge-pending{background:rgba(243,156,18,.12);color:#f39c12;border-color:rgba(243,156,18,.3)}
+
+/* 概率选择弹窗 */
+.modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:1000;padding:var(--space-md)}
+.modal-card{background:var(--color-surface);border:1px solid var(--color-border-strong);border-radius:var(--radius);padding:var(--space-lg);max-width:420px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.modal-card h3{margin:0 0 var(--space-sm);font-size:1rem}
+.modal-hint{font-size:.8125rem;color:var(--color-text-secondary);margin:0 0 var(--space-sm)}
+.modal-hint strong{color:var(--color-accent)}
+.prob-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin:var(--space-md) 0}
+.prob-btn{background:var(--color-surface-raised);border:1px solid var(--color-border);color:var(--color-text-primary);padding:8px 10px;border-radius:3px;font-size:.75rem;cursor:pointer;text-align:left;transition:all .15s}
+.prob-btn:hover{border-color:var(--color-accent);background:rgba(46,204,113,.08)}
+.prob-btn.prob-suggested{border-color:var(--color-accent);background:rgba(46,204,113,.1);color:var(--color-accent);font-weight:600}
+.prob-btn:disabled{opacity:.5;cursor:wait}
+.modal-footer{display:flex;justify-content:flex-end;margin-top:var(--space-md)}
+.btn-text{background:none;border:none;color:var(--color-text-muted);cursor:pointer;font-size:.8125rem;padding:4px 8px}
+.btn-text:hover{color:var(--color-text-primary)}
+.btn-primary{background:var(--color-accent);color:#fff;border:none;padding:6px 14px;border-radius:3px;font-size:.75rem;cursor:pointer;font-weight:600}
+.btn-primary:hover{opacity:.9}
+.btn-sm{padding:4px 10px;font-size:.6875rem}
+.dot-pending{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--color-warning);flex:none;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.radar-hint{font-size:.8125rem;color:var(--color-text-secondary);padding:var(--space-sm) 0}
+.radar-hint a{color:var(--color-accent);font-weight:600}
+
+/* 新手引导 */
+.radar-onboarding{background:var(--color-surface);border:1px solid var(--color-accent);border-radius:var(--radius);padding:var(--space-lg);margin-bottom:var(--space-md)}
+.radar-onboarding h3{margin:0 0 var(--space-sm);font-size:1rem;color:var(--color-accent)}
+.radar-onboarding p{font-size:.8125rem;color:var(--color-text-secondary);margin:0 0 var(--space-sm)}
+.radar-onboarding ol{margin:0;padding-left:1.2em;font-size:.8125rem;color:var(--color-text-secondary)}
+.radar-onboarding li{margin-bottom:var(--space-xs)}
+.radar-onboarding a{color:var(--color-accent);font-weight:600}
+.radar-onboarding strong{color:var(--color-text-primary)}
+
+/* ===== 事件详情页 ===== */
+.page-nav{margin-bottom:var(--space-md)}
+.detail-header .detail-badges{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:var(--space-sm)}
+.detail-title{font-size:1.15rem;font-weight:700;line-height:1.5;margin:0 0 var(--space-sm)}
+.detail-summary{font-size:.875rem;color:var(--color-text-secondary);line-height:1.6;margin:0 0 var(--space-sm)}
+.detail-meta{display:flex;gap:var(--space-md);flex-wrap:wrap;font-size:.6875rem;color:var(--color-text-muted)}
+.section-title{font-size:.8125rem;letter-spacing:1px;margin:0 0 var(--space-md);color:var(--color-text-secondary);padding-bottom:var(--space-xs);border-bottom:1px solid var(--color-border)}
+.section-title::before{content:'■ ';color:var(--color-accent)}
+
+/* GYW六步分析 */
+.gyw-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--space-md)}
+.gyw-item{background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:var(--radius);padding:var(--space-md)}
+.gyw-item h4{font-size:.75rem;margin:0 0 var(--space-xs);color:var(--color-accent);letter-spacing:.5px}
+.gyw-item p{font-size:.8125rem;color:var(--color-text-secondary);line-height:1.6;margin:0}
+.gyw-item .text-warn{color:var(--color-danger)}
+
+/* 多路径推演 */
+.scenario-list{display:flex;flex-direction:column;gap:var(--space-sm)}
+.scenario-item{border:1px solid var(--color-border);border-radius:var(--radius);padding:var(--space-md);border-left:3px solid var(--color-border)}
+.scenario-most{border-left-color:var(--color-accent);background:rgba(46,204,113,.03)}
+.scenario-secondary{border-left-color:var(--color-info);background:rgba(52,152,219,.03)}
+.scenario-swan{border-left-color:var(--color-danger);background:rgba(231,76,60,.03)}
+.scenario-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--space-xs)}
+.scenario-prob{font-size:.75rem;color:var(--color-text-muted);font-variant-numeric:tabular-nums}
+.scenario-desc{font-size:.8125rem;color:var(--color-text-primary);line-height:1.6;margin:0 0 var(--space-xs)}
+.scenario-impl,.scenario-watch{font-size:.75rem;color:var(--color-text-secondary);margin-top:4px}
+.scenario-impl strong{color:var(--color-warning)}
+.scenario-watch strong{color:var(--color-info)}
+
+/* 个人影响列表 */
+.impact-list{display:flex;flex-direction:column;gap:var(--space-sm)}
+.impact-row{display:flex;justify-content:space-between;align-items:flex-start;gap:var(--space-md);padding:var(--space-md);border:1px solid var(--color-border);border-radius:var(--radius)}
+.impact-main{flex:1;min-width:0}
+.impact-header{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:4px}
+.impact-name{font-size:.75rem;color:var(--color-text-muted)}
+.impact-title{font-size:.875rem;font-weight:600;line-height:1.5}
+.impact-action{font-size:.8125rem;color:var(--color-accent);margin-top:4px}
+.impact-meta{display:flex;gap:var(--space-md);font-size:.6875rem;color:var(--color-text-muted);margin-top:4px;flex-wrap:wrap}
+
+/* 证据来源列表 */
+.source-evidence-list{display:flex;flex-direction:column;gap:var(--space-sm)}
+.evidence-item{padding:var(--space-sm) 0;border-bottom:1px solid var(--color-border)}
+.evidence-item:last-child{border-bottom:none}
+.evidence-title a{color:var(--color-text-primary);text-decoration:none;font-size:.8125rem;font-weight:500}
+.evidence-title a:hover{color:var(--color-accent);text-decoration:underline}
+.evidence-meta{display:flex;gap:var(--space-md);font-size:.6875rem;color:var(--color-text-muted);margin-top:2px}
+.evidence-summary{font-size:.75rem;color:var(--color-text-secondary);margin-top:4px;line-height:1.5}
+.evidence-more{font-size:.75rem;color:var(--color-text-muted);text-align:center;padding:var(--space-sm)}
+
+/* 事实摘要 */
+.fact-summary{font-size:.875rem;line-height:1.7;color:var(--color-text-primary);margin-bottom:var(--space-md)}
+.fact-actors{margin-bottom:var(--space-sm);font-size:.8125rem}
+.actor-tag{display:inline-block;background:var(--color-surface-raised);border:1px solid var(--color-border);padding:1px 6px;border-radius:2px;font-size:.6875rem;margin:2px 4px 2px 0;color:var(--color-text-secondary)}
+.fact-chain{margin-top:var(--space-sm);font-size:.8125rem}
+.fact-chain h4{font-size:.75rem;margin:0 0 var(--space-xs);color:var(--color-text-muted)}
+.fact-chain ol{margin:0;padding-left:1.2em;color:var(--color-text-secondary);line-height:1.6}
+.triggers{margin-top:var(--space-sm);display:flex;flex-direction:column;gap:4px;font-size:.75rem}
+.trigger-up{color:var(--color-danger)}
+.trigger-down{color:var(--color-success)}
+.triggers strong{margin-right:4px}
+
+/* 响应式 */
+@media(max-width:640px){
+  .gyw-grid{grid-template-columns:1fr}
+  .prob-grid{grid-template-columns:1fr}
+  .impact-row{flex-direction:column}
+}

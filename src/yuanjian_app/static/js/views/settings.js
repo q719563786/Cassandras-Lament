@@ -1,5 +1,4 @@
-// 远见 v0.9 · 设置 —— 备份/保留/学习开关持久化 + 移动摘要导出 + 外部 AI 表单
-// 总监裁决：情报后台 / Obsidian 入口砍掉，不照抄原型；只留通知中心 + 告诉远见入口
+// 远见 v1.1 · 设置 —— 备份/保留/学习开关持久化 + 移动摘要导出 + 外部 AI 表单
 import { api, escapeHtml, showToast } from '../api.js';
 
 // 通用 toggle 行：GET 容错（端点未就绪显示未知）+ PUT 持久化
@@ -160,10 +159,11 @@ export async function render(root) {
     </section>
 
     <section class="set-sec">
-      <h2>其他入口</h2>
+      <h2>快捷入口</h2>
       <div class="card">
-        <div class="set-row"><p class="name">通知中心</p><button type="button" class="btn btn-sm" data-go-tell-note="notif">从顶栏消息图标打开</button></div>
-        <div class="set-row"><p class="name">告诉远见</p><button type="button" class="btn btn-sm" data-go-tell>打开录入视图</button></div>
+        <div class="set-row"><p class="name">行动雷达</p><button type="button" class="btn btn-sm" data-go-today>查看今日风险</button></div>
+        <div class="set-row"><p class="name">校准面板</p><button type="button" class="btn btn-sm" data-go-calib>确认预测 / 复盘</button></div>
+        <div class="set-row"><p class="name">告诉远见</p><button type="button" class="btn btn-sm" data-go-tell>手动录入新情况</button></div>
       </div>
     </section>
   </div>`;
@@ -284,4 +284,6 @@ export async function render(root) {
   paintInterests();
 
   root.querySelector('[data-go-tell]')?.addEventListener('click', () => { location.hash = '#/tell'; });
+  root.querySelector('[data-go-today]')?.addEventListener('click', () => { location.hash = '#/today'; });
+  root.querySelector('[data-go-calib]')?.addEventListener('click', () => { location.hash = '#/calib'; });
 }

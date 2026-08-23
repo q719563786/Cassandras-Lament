@@ -206,7 +206,6 @@ class ImpactService:
         penalties = self._category_penalties()
         now = _iso(self.now())
         results = []
-        auto_confirm = []
         for interest in self.interest_service.list_objects():
             if interest["status"] != "active":
                 continue
@@ -214,6 +213,9 @@ class ImpactService:
             if exposure <= 0:
                 continue
             exposure = round(exposure * penalties.get(interest["category"], 1.0), 6)
+            # 低暴露度事件对该利益影响微弱，不生成候选预测
+            if exposure < 0.3:
+                continue
             importance = max(1, min(int(interest["importance"]), 5)) / 5
             components = {
                 "evidence": evidence,
@@ -279,10 +281,6 @@ class ImpactService:
                         now,
                     ),
                 )
-                # 新候选预测：自动确认（用概率区间中值映射到固定档位）
-                if not candidate.get("confirmed_forecast_id"):
-                    prob_mid = (candidate["probability_low"] + candidate["probability_high"]) / 2
-                    auto_confirm.append((impact_id, _nearest_probability(prob_mid)))
             results.append(
                 {
                     "impact_id": impact_id,
@@ -297,38 +295,42 @@ class ImpactService:
                     "candidate": candidate,
                 }
             )
-        # 自动确认所有新候选预测（无需人工干预）
-        for impact_id, prob in auto_confirm:
-            try:
-                self.confirm_candidate(impact_id, prob)
-            except Exception:
-                pass  # 自动确认失败不影响主流程，候选仍保留待手动确认
         return sorted(results, key=lambda item: (-item["impact_score"], item["interest_id"]))
 
-    def auto_confirm_all_pending(self) -> int:
-        """启动时批量确认所有未确认的历史候选预测（无需人工干预）。
-        用候选预测的概率区间中值映射到固定档位，返回确认成功的数量。
+    def purge_garbage_forecasts(self) -> int:
+        """清理v1.0自动确认产生的垃圾F-CAND预测，重置为待确认状态。
+        旧版本在map_judgment中自动将候选预测写入正式账本，产生大量未经验证的F-CAND记录。
+        此方法删除所有F-CAND-*预测，并清除对应impact的confirmed标记，让用户重新确认。
+        返回清理的预测数量。
         """
+        purged = 0
         with self.database.connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT impact_id, candidate_json FROM personal_impacts
-                WHERE candidate_json NOT LIKE '%confirmed_forecast_id%'
-                  AND candidate_json IS NOT NULL AND candidate_json != ''
-                """
+            garbage = connection.execute(
+                "SELECT forecast_id FROM forecasts WHERE forecast_id LIKE 'F-CAND-%'"
             ).fetchall()
-        confirmed = 0
-        for row in rows:
-            try:
-                candidate = json.loads(row["candidate_json"] or "{}")
-                prob_low = float(candidate.get("probability_low", 0.5))
-                prob_high = float(candidate.get("probability_high", 0.8))
-                prob_mid = (prob_low + prob_high) / 2
-                self.confirm_candidate(row["impact_id"], _nearest_probability(prob_mid))
-                confirmed += 1
-            except Exception:
-                continue  # 单个失败不影响其他
-        return confirmed
+            for row in garbage:
+                fid = row["forecast_id"]
+                # 找出引用此forecast的impact，清除confirmed标记
+                impact_rows = connection.execute(
+                    "SELECT impact_id, candidate_json FROM personal_impacts "
+                    "WHERE candidate_json LIKE ?",
+                    (f'%"confirmed_forecast_id": "{fid}"%',),
+                ).fetchall()
+                for irow in impact_rows:
+                    try:
+                        cj = json.loads(irow["candidate_json"] or "{}")
+                        cj.pop("confirmed_forecast_id", None)
+                        cj.pop("confirmed_probability", None)
+                        connection.execute(
+                            "UPDATE personal_impacts SET candidate_json=? WHERE impact_id=?",
+                            (json.dumps(cj, ensure_ascii=False, sort_keys=True), irow["impact_id"]),
+                        )
+                    except Exception:
+                        pass
+                connection.execute("DELETE FROM forecasts WHERE forecast_id=?", (fid,))
+                purged += 1
+            connection.commit()
+        return purged
 
     def candidate_forecast(self, impact_id: str) -> dict:
         with self.database.connect() as connection:
@@ -363,6 +365,8 @@ class ImpactService:
                 JOIN interest_objects i ON i.object_id = p.interest_id
                 WHERE (p.muted_until IS NULL OR p.muted_until < ?)
                     AND p.candidate_json IS NOT NULL AND p.candidate_json != ''
+                    AND p.candidate_json NOT LIKE '%"confirmed_forecast_id":%'
+                    AND p.alert_level IN ('L3','L4')
                 ORDER BY p.impact_score DESC, p.updated_at DESC
                 LIMIT ?
                 """,

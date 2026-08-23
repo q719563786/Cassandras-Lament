@@ -63,6 +63,10 @@ STATIC_FILES = {
         "js/views/notifications.js",
         "text/javascript; charset=utf-8",
     ),
+    "/js/views/cluster.js": (
+        "js/views/cluster.js",
+        "text/javascript; charset=utf-8",
+    ),
     "/fonts/JetBrainsMono-Regular.woff2": (
         "fonts/JetBrainsMono-Regular.woff2",
         "font/woff2",

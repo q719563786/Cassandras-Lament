@@ -1,4 +1,4 @@
-// 远见 v0.9 · hash 路由 —— #/today #/tell #/calib #/sources #/diag #/settings
+// 远见 v1.1 · hash 路由 —— #/today #/tell #/calib #/sources #/diag #/settings #/cluster/:id
 import { showLoading, showPageError } from './api.js';
 import * as today from './views/today.js';
 import * as tell from './views/tell.js';
@@ -6,6 +6,7 @@ import * as calib from './views/calib.js';
 import * as sources from './views/sources.js';
 import * as diag from './views/diag.js';
 import * as settings from './views/settings.js';
+import * as cluster from './views/cluster.js';
 
 const ROUTES = Object.freeze({
   today: {title: '今日远见', cap: 'DAILY BRIEF · 最高优先级', mod: today},
@@ -13,15 +14,17 @@ const ROUTES = Object.freeze({
   sources: {title: '源管理', cap: 'SOURCES · 监听信道', mod: sources},
   diag: {title: '诊断中心', cap: 'DIAGNOSTICS · 系统体检', mod: diag},
   settings: {title: '设置', cap: 'SETTINGS · 本机配置', mod: settings},
-  tell: {title: '告诉远见', cap: 'INPUT · 手动录入', mod: tell}
+  tell: {title: '告诉远见', cap: 'INPUT · 手动录入', mod: tell},
+  cluster: {title: '事件详情', cap: 'EVENT DETAIL · 登高望远分析', mod: cluster}
 });
 
 export function currentView() {
-  const name = (location.hash || '').replace(/^#\/?/, '').split('?')[0];
-  return ROUTES[name] ? name : 'today';
+  const raw = (location.hash || '').replace(/^#\/?/, '').split('?')[0];
+  // 支持 #/cluster/:id 格式
+  if (raw.startsWith('cluster/')) return 'cluster';
+  return ROUTES[raw] ? raw : 'today';
 }
 
-// 渲染当前视图：nav aria-current 同步 + 顶栏标题/caption + try/catch 错误面板兜底
 export async function renderView() {
   const name = currentView();
   const route = ROUTES[name];
@@ -30,7 +33,6 @@ export async function renderView() {
   document.querySelectorAll('.nav-item[data-view]').forEach(btn => {
     if (btn.dataset.view === name) btn.setAttribute('aria-current', 'page');
     else btn.removeAttribute('aria-current');
-    // 折叠态 aria-label 同步（designer §3.1）
     if (btn.dataset.label) btn.setAttribute('aria-label', btn.dataset.label);
   });
   const title = document.getElementById('page-title');
