@@ -152,7 +152,8 @@ class Database:
                     next_fetch_at TEXT,
                     region TEXT NOT NULL DEFAULT 'global',
                     category TEXT NOT NULL DEFAULT 'general',
-                    user_managed INTEGER NOT NULL DEFAULT 0
+                    user_managed INTEGER NOT NULL DEFAULT 0,
+                    tier TEXT NOT NULL DEFAULT 'T3'
                 );
                 CREATE TABLE IF NOT EXISTS watch_rules(
                     rule_id TEXT PRIMARY KEY,
@@ -371,6 +372,7 @@ class Database:
             ("external_sources", "region", "TEXT NOT NULL DEFAULT 'global'"),
             ("external_sources", "category", "TEXT NOT NULL DEFAULT 'general'"),
             ("external_sources", "user_managed", "INTEGER NOT NULL DEFAULT 0"),
+            ("external_sources", "tier", "TEXT NOT NULL DEFAULT 'T3'"),
         )
         existing_tables = {
             row[0]

@@ -25,6 +25,9 @@ SOURCE_CATEGORIES = {
     "finance", "general", "legacy",
 }
 SOURCE_KINDS = {"rss", "gdelt", "html_list", "json_api"}
+# P4: 信源分级——T1官方源 / T2权威媒体 / T3聚合或一般 / T4未验证
+SOURCE_TIERS = {"T1", "T2", "T3", "T4"}
+TIER_RELIABILITY = {"T1": 0.9, "T2": 0.7, "T3": 0.5, "T4": 0.3}
 
 
 def utc_now():
@@ -227,11 +230,17 @@ class ExternalRadarService:
         reliability = float(data.get("reliability_weight", 0.6))
         region = str(data.get("region", "global")).strip() or "global"
         category = str(data.get("category", "general")).strip() or "general"
+        tier = str(data.get("tier", "T3")).strip().upper() or "T3"
         user_managed = 1 if int(data.get("user_managed", 1)) else 0
         if not name or kind not in SOURCE_KINDS:
             raise ValueError("数据源名称或类型无效")
         if region not in REGIONS or category not in SOURCE_CATEGORIES:
             raise ValueError("区域或类别无效")
+        if tier not in SOURCE_TIERS:
+            raise ValueError("信源分级无效（T1/T2/T3/T4）")
+        # 未显式指定可靠度时，按分级设定默认值
+        if "reliability_weight" not in data:
+            reliability = TIER_RELIABILITY[tier]
         if refresh < 5 or refresh > 1440 or not 0 <= reliability <= 1:
             raise ValueError("刷新周期或可靠度无效")
         with self.database.connect() as connection:
@@ -240,8 +249,8 @@ class ExternalRadarService:
                 INSERT INTO external_sources(
                     source_id, name, kind, endpoint, enabled, refresh_minutes,
                     reliability_weight, config_json, next_fetch_at,
-                    region, category, user_managed
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    region, category, user_managed, tier
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     source_id,
@@ -256,6 +265,7 @@ class ExternalRadarService:
                     region,
                     category,
                     user_managed,
+                    tier,
                 ),
             )
         return source_id
@@ -297,6 +307,11 @@ class ExternalRadarService:
             if not 0 <= reliability <= 1:
                 raise ValueError("可靠度无效")
             updates["reliability_weight"] = reliability
+        if "tier" in data:
+            tier = str(data.get("tier", "")).strip().upper()
+            if tier not in SOURCE_TIERS:
+                raise ValueError("信源分级无效（T1/T2/T3/T4）")
+            updates["tier"] = tier
         if not updates:
             raise ValueError("没有可更新的字段")
         assignments = ", ".join(f"{key}=?" for key in updates)
