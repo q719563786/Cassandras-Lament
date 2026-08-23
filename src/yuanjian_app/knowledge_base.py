@@ -143,3 +143,207 @@ ALL_KNOWLEDGE = "\n\n".join([
     KNOWLEDGE_SOCIETY,
     KNOWLEDGE_EXTRATERRESTRIAL,
 ])
+
+
+# ════════════════════════════════════════════════════════════
+# 可执行规则引擎（P1：登高望远方法论 → 代码规则）
+# ════════════════════════════════════════════════════════════
+
+# 慷慨激昂 = 感知风险：当官方表态出现这些词时，自动上调风险等级
+RISK_SIGNAL_KEYWORDS = (
+    "坚决打赢", "不惜一切代价", "史无前例", "前所未有", "攻坚战",
+    "雷霆万钧", "壮士断腕", "破釜沉舟", "背水一战", "决战决胜",
+    "严防死守", "零容忍", "坚决遏制", "铁腕", "重拳出击",
+)
+
+# 领先指标模式：事件标题/摘要匹配这些模式时，标记为领先信号
+LEADING_INDICATOR_PATTERNS = {
+    "policy_trial": {
+        "keywords": ("试点", "示范区", "先行区", "试验区"),
+        "signal": "政策试点公告出现，通常先于全面推广6-12个月",
+        "risk_boost": 0.15,
+    },
+    "budget_allocation": {
+        "keywords": ("专项债", "预算", "转移支付", "财政补贴", "专项资金"),
+        "signal": "财政资金下达，先于实际支出和项目落地3-6个月",
+        "risk_boost": 0.10,
+    },
+    "personnel_change": {
+        "keywords": ("任命", "免去", "出任", "接任", "卸任", "换届"),
+        "signal": "人事变动通常先于政策方向调整3-9个月",
+        "risk_boost": 0.08,
+    },
+    "regulatory_draft": {
+        "keywords": ("征求意见", "草案", "征求意见稿", "公开征求意见"),
+        "signal": "法规草案发布，通常先于正式实施6-12个月",
+        "risk_boost": 0.12,
+    },
+    "data_release": {
+        "keywords": ("同比", "环比", "CPI", "PPI", "PMI", "社融", "M2", "GDP"),
+        "signal": "关键经济数据发布，可能触发政策调整窗口",
+        "risk_boost": 0.05,
+    },
+    "rate_change": {
+        "keywords": ("降息", "加息", "降准", "LPR", "MLF", "逆回购"),
+        "signal": "利率/准备金变动，传导至实体经济需3-9个月",
+        "risk_boost": 0.15,
+    },
+    "trade_action": {
+        "keywords": ("关税", "制裁", "出口管制", "贸易壁垒", "双反调查"),
+        "signal": "贸易措施发布，影响供应链和市场预期",
+        "risk_boost": 0.12,
+    },
+    "supply_warning": {
+        "keywords": ("限产", "停产", "检修", "供应紧张", "缺货", "断供"),
+        "signal": "供应端预警，可能传导至价格和下游利润",
+        "risk_boost": 0.10,
+    },
+}
+
+
+def detect_leading_indicators(title: str, summary: str) -> list[dict]:
+    """检测文本中是否包含已知领先指标模式。
+    
+    返回匹配到的指标列表，每项含 pattern_key, signal, risk_boost。
+    """
+    text = f"{title} {summary}".casefold()
+    matches = []
+    for key, config in LEADING_INDICATOR_PATTERNS.items():
+        if any(kw.casefold() in text for kw in config["keywords"]):
+            matches.append({
+                "pattern": key,
+                "signal": config["signal"],
+                "risk_boost": config["risk_boost"],
+            })
+    return matches
+
+
+def detect_risk_signals(title: str, summary: str) -> bool:
+    """检测文本中是否包含慷慨激昂的风险信号关键词。
+    
+    登高望远原则：慷慨激昂往往是内心已感知风险的表达。
+    真正稳的项目，不会用激情来驱动。
+    """
+    text = f"{title} {summary}".casefold()
+    return any(kw.casefold() in text for kw in RISK_SIGNAL_KEYWORDS)
+
+
+def generate_scenario_paths(event_type: str, institutions: list, text: str) -> list[dict]:
+    """生成多路径推演：最可能路径、次可能路径、黑天鹅路径。
+    
+    登高望远原则：最小阻力路径不是结论，只是候选。
+    必须同时给出替代假设和黑天鹅场景。
+    """
+    pusher = institutions[0] if institutions else "事件发起方"
+    
+    scenarios = {
+        "policy": [
+            {
+                "label": "最可能",
+                "path": f"{pusher}发布政策 → 执行部门制定细则 → 试点先行 → 逐步推广",
+                "probability": "60-70%",
+                "trigger": "试点公告和配套资金到位",
+            },
+            {
+                "label": "次可能",
+                "path": "政策发布但执行阻力大 → 选择性执行或变通 → 效果打折扣",
+                "probability": "20-30%",
+                "trigger": "执行层消极应对或利益集团游说",
+            },
+            {
+                "label": "黑天鹅",
+                "path": "政策意外加速或被叫停 → 短期市场剧烈反应",
+                "probability": "5-10%",
+                "trigger": "上级强力推动或外部重大事件触发",
+            },
+        ],
+        "monetary": [
+            {
+                "label": "最可能",
+                "path": f"{pusher}调整利率/准备金 → 银行传导 → 信贷条件变化 → 实体经济3-6个月后响应",
+                "probability": "55-65%",
+                "trigger": "后续数据验证传导效果",
+            },
+            {
+                "label": "次可能",
+                "path": "宽松但传导不畅 → 资金空转或流入资产 → 实体受益有限",
+                "probability": "25-35%",
+                "trigger": "社融数据低于预期或资产价格异常上涨",
+            },
+            {
+                "label": "黑天鹅",
+                "path": "外部冲击打断货币政策节奏 → 被迫转向",
+                "probability": "5-10%",
+                "trigger": "汇率剧烈波动或国际资本异常流动",
+            },
+        ],
+    }
+    
+    default_scenarios = [
+        {
+            "label": "最可能",
+            "path": f"{pusher}推进事件 → 按常规节奏传导 → 影响在预期时间内显现",
+            "probability": "55-65%",
+            "trigger": "后续进展符合预期",
+        },
+        {
+            "label": "次可能",
+            "path": "推进遇阻或变通执行 → 影响减弱或延后",
+            "probability": "25-35%",
+            "trigger": "执行阻力出现或资源不足",
+        },
+        {
+            "label": "黑天鹅",
+            "path": "意外因素打断原有逻辑 → 短期不可预测",
+            "probability": "5-10%",
+            "trigger": "超出模型范围的外部冲击",
+        },
+    ]
+    
+    return scenarios.get(event_type, default_scenarios)
+
+
+# 权力结构规则：标记哪些政策需要哪一层执行
+POWER_STRUCTURE_RULES = {
+    "central_direct": {
+        "markers": ("国务院", "中央", "全国人大", "国家"),
+        "execution_layer": "部委和省级政府",
+        "veto_power": "中央层有直接否决权，地方变通空间小",
+        "risk_of_delay": "低",
+    },
+    "ministry_lead": {
+        "markers": ("部", "委员会", "总局", "总署"),
+        "execution_layer": "省级对口部门和市县执行",
+        "veto_power": "省级有变通空间，市县有执行裁量权",
+        "risk_of_delay": "中",
+    },
+    "local_lead": {
+        "markers": ("省", "市", "区", "县"),
+        "execution_layer": "基层政府和具体执行机构",
+        "veto_power": "基层执行层有较大裁量权，可能变通或拖延",
+        "risk_of_delay": "高",
+    },
+}
+
+
+def analyze_power_structure(institutions: list, text: str) -> dict:
+    """分析权力结构：谁有否决权，执行层会不会拖延。
+    
+    登高望远原则：改革威胁执行者利益就会停。
+    合法性来源经济增长，减速后会找替代来源。
+    """
+    for rule_key, rule in POWER_STRUCTURE_RULES.items():
+        if any(marker in " ".join(institutions) or marker in text
+               for marker in rule["markers"]):
+            return {
+                "rule": rule_key,
+                "execution_layer": rule["execution_layer"],
+                "veto_analysis": rule["veto_power"],
+                "delay_risk": rule["risk_of_delay"],
+            }
+    return {
+        "rule": "unknown",
+        "execution_layer": "待确认",
+        "veto_analysis": "权力结构不清晰",
+        "delay_risk": "未知",
+    }

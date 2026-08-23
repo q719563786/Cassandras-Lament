@@ -1,8 +1,7 @@
-// 远见 v0.9 · 启动装配 —— 图标注入 → 路由 → 顶栏动作 → 监控轮询 → 安全退出
+// 远见 v1.0 · 启动装配 —— 图标注入 → 路由 → 顶栏动作 → 监控轮询 → 安全退出
 import { yjMountIcons } from './icons.js';
 import { api, showToast, withBusy, updateChrome } from './api.js';
 import { initRouter, renderView, currentView } from './router.js';
-import { openDrawer, refreshUnread } from './views/notifications.js';
 
 // 静态壳里的 data-icon 占位一次性注入
 yjMountIcons(document);
@@ -14,9 +13,6 @@ document.querySelectorAll('.nav-item[data-view]').forEach(btn => {
   });
 });
 
-// ===== 顶栏：通知抽屉 =====
-document.getElementById('open-notifications')?.addEventListener('click', () => openDrawer());
-
 // ===== 顶栏：刷新（后台每60秒自动研判，前端每30秒自动刷新，按钮手动刷新当前视图） =====
 const runButton = document.getElementById('run-cognition');
 runButton?.addEventListener('click', () => {
@@ -25,7 +21,6 @@ runButton?.addEventListener('click', () => {
     if (spinner) spinner.classList.add('spinning');
     try {
       await renderView();          // 当前视图重拉数据
-      await refreshUnread();       // 新通知可能产生
       showToast('已刷新');
     } catch (error) {
       showToast(`刷新失败：${error.message}`, 'err');
@@ -48,7 +43,7 @@ document.getElementById('shutdown')?.addEventListener('click', () => {
   });
 });
 
-// ===== 连接状态 + 未读角标轮询 =====
+// ===== 连接状态检查 =====
 (async () => {
   try {
     await api('/api/cognition/status');
@@ -56,10 +51,8 @@ document.getElementById('shutdown')?.addEventListener('click', () => {
   } catch (_) {
     updateChrome({connected: false});
   }
-  await refreshUnread();
 })();
-setInterval(refreshUnread, 60000);
 
-// ===== 启动路由（默认 #/today，AC-01） =====
+// ===== 启动路由（默认 #/today） =====
 if (!location.hash) location.hash = `#/${currentView()}`;
 initRouter();

@@ -8,7 +8,13 @@ from dataclasses import asdict, dataclass, field
 from typing import Protocol
 from urllib.parse import urlsplit
 
-from .knowledge_base import ALL_KNOWLEDGE
+from .knowledge_base import (
+    ALL_KNOWLEDGE,
+    analyze_power_structure,
+    detect_leading_indicators,
+    detect_risk_signals,
+    generate_scenario_paths,
+)
 
 
 MAX_BUNDLE_CHARACTERS = 12_000
@@ -1087,6 +1093,24 @@ class LocalHeuristicProvider:
         historical_parallel = self._find_historical_parallel(text)
         causal_chain = self._build_causal_chain(event_type, institutions, bool(numbers))
 
+        # P1 规则引擎：用登高望远方法论的结构化规则增强研判
+        # 1) 领先指标检测：从证据文本中匹配已知的领先信号模式（试点/预算/人事/草案/数据/利率等）
+        detected_indicators = detect_leading_indicators(bundle.title, bundle.summary)
+        if detected_indicators:
+            extra = "；".join(
+                f"{m['signal']}（风险上调 +{m['risk_boost']:.0%}）"
+                for m in detected_indicators
+            )
+            leading_indicators = f"{leading_indicators}｜规则引擎命中：{extra}"
+        # 2) 风险信号检测：慷慨激昂 = 内心已感知风险，命中则上调置信度
+        risk_signal_hit = detect_risk_signals(bundle.title, bundle.summary)
+        if risk_signal_hit:
+            confidence = min(0.95, confidence + 0.08)
+        # 3) 多路径推演：最可能 / 次可能 / 黑天鹅（方法论要求不能只给最小阻力路径）
+        scenario_paths = generate_scenario_paths(event_type, institutions, text)
+        # 4) 权力结构分析：谁有否决权、执行层会不会拖延
+        power_structure = analyze_power_structure(institutions, text)
+
         # 紧急程度判断
         urgent = any(word in text for word in ("今日", "本月", "立即", "生效", "实施", "紧急", "突发"))
         horizons = ("未来7天", "未来30天") if urgent else ("未来30天", "未来90天")
@@ -1130,4 +1154,10 @@ class LocalHeuristicProvider:
                 "observable_signals": observable_signals,
             },
         }
-        return validate_judgment(raw, set(bundle.allowed_source_ids))
+        result = validate_judgment(raw, set(bundle.allowed_source_ids))
+        # P1 规则引擎结果在 schema 校验通过后附加，不进入严格 gyw schema
+        # （避免破坏远程 AI provider 的输出契约）。
+        result.gyw["scenario_paths"] = scenario_paths
+        result.gyw["power_structure"] = power_structure
+        result.gyw["risk_signal_hit"] = risk_signal_hit
+        return result
