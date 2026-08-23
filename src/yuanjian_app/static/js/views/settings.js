@@ -15,13 +15,15 @@ async function putSetting(path, body) {
   await api(path, {method: 'PUT', body: JSON.stringify(body)});
 }
 
-  // 远程 AI 当前状态文案（端点域名 + 模型 + 启用/密钥状态）
+  // 远程 AI 当前状态文案（端点域名 + 模型 + 启用/密钥状态 + 频率）
 function aiStatusText(ai) {
   if (!ai) return '读取中…未知';
   const domain = (ai.endpoint || '').replace(/^https?:\/\//, '').split('/')[0] || '—';
   const state = ai.enabled ? '已启用' : '未启用';
   const key = ai.configured ? '密钥已配置' : '密钥未配置';
-  return `${state} · 模型 ${ai.model || '—'} · 端点 ${domain} · ${key}`;
+  const freqMap = {low: '低(每日21点)', medium: '中(每6小时)', high: '高(每小时)'};
+  const freq = freqMap[ai.frequency] || '中(每6小时)';
+  return `${state} · 模型 ${ai.model || '—'} · 端点 ${domain} · ${key} · 频率 ${freq}`;
 }
 
 // 通用 toggle 行绑定：只绑定 data-key 匹配的开关，避免重复绑定
@@ -106,6 +108,14 @@ export async function render(root) {
           <div><p class="name">启用远程 AI</p><p class="desc">开启后远见用你填的模型做外部研判，密钥只存本机</p></div>
           <button type="button" class="toggle" role="switch" data-ai-enabled
             aria-checked="${ai?.enabled ? 'true' : 'false'}" aria-label="启用远程AI"></button>
+        </div>
+        <div class="set-row">
+          <div><p class="name">分析频率</p><p class="desc">低=每天21点汇总一次 · 中=每6小时 · 高=每小时</p></div>
+          <div class="u-row" role="radiogroup" aria-label="AI分析频率">
+            <button type="button" class="btn btn-sm ${ai?.frequency === 'low' ? 'btn-primary' : ''}" data-freq="low">低</button>
+            <button type="button" class="btn btn-sm ${ai?.frequency === 'medium' ? 'btn-primary' : ''}" data-freq="medium">中</button>
+            <button type="button" class="btn btn-sm ${ai?.frequency === 'high' ? 'btn-primary' : ''}" data-freq="high">高</button>
+          </div>
         </div>
         <form data-ai-form>
           <div class="field u-mb-md"><label for="ai-endpoint">API 地址</label>
@@ -199,6 +209,18 @@ export async function render(root) {
     const next = aiToggle.getAttribute('aria-checked') !== 'true';
     aiToggle.setAttribute('aria-checked', String(next));
   });
+
+  // 频率选择按钮：点击切换高亮，提交时读取
+  let selectedFreq = ai?.frequency || 'medium';
+  root.querySelectorAll('[data-freq]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      selectedFreq = btn.dataset.freq;
+      root.querySelectorAll('[data-freq]').forEach(b => {
+        b.classList.toggle('btn-primary', b.dataset.freq === selectedFreq);
+      });
+    });
+  });
+
   const aiStatus = root.querySelector('[data-ai-status]');
   if (aiStatus) aiStatus.textContent = aiStatusText(ai);
 
@@ -209,7 +231,7 @@ export async function render(root) {
     const token = event.target.querySelector('#ai-key').value.trim();
     const enabled = root.querySelector('[data-ai-enabled]')?.getAttribute('aria-checked') === 'true';
     // 提交体字段名与 remote_ai.AiSettingsService.save() 读取键逐一对齐
-    const body = {enabled, endpoint, model};
+    const body = {enabled, endpoint, model, frequency: selectedFreq};
     if (token) body.token = token; // 留空 = 不修改已存密钥（save 仅在有 token 键时覆盖）
     const btn = event.target.querySelector('button[type="submit"]');
     btn.disabled = true;

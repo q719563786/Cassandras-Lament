@@ -487,6 +487,52 @@ class CognitionController:
         level = str(cluster.get("evidence_level") or "E1")
         return level in ("E2", "E3", "E4")
 
+    def _last_remote_finished_at(self):
+        """查询最近一次成功的远程研判完成时间，用于频率控制。"""
+        try:
+            with self.database.connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT finished_at FROM judgment_jobs
+                    WHERE status='succeeded' AND provider!='local'
+                    ORDER BY finished_at DESC LIMIT 1
+                    """
+                ).fetchone()
+            if not row or not row["finished_at"]:
+                return None
+            return datetime.fromisoformat(str(row["finished_at"]).replace("Z", "+00:00"))
+        except (ValueError, TypeError, OSError):
+            return None
+
+    def _remote_due(self) -> bool:
+        """根据用户设置的频率判断是否应该进行远程调用。
+        - low：每天本地21点后跑一次，当天跑过则不再跑
+        - medium：距上次远程 >= 6 小时
+        - high：距上次远程 >= 1 小时
+        远程未启用时返回 False（由调用方额外判断）。
+        """
+        settings = self.ai_settings.get()
+        if not settings.get("enabled"):
+            return False
+        frequency = settings.get("frequency", "medium")
+        local_now = self.now().astimezone()
+        last = self._last_remote_finished_at()
+        if frequency == "low":
+            # 每天21点后跑一次，当天已跑过则不再跑
+            if local_now.hour < 21:
+                return False
+            if last is not None and last.astimezone().date() == local_now.date():
+                return False
+            return True
+        if frequency == "high":
+            interval_hours = 1
+        else:  # medium（默认）
+            interval_hours = 6
+        if last is None:
+            return True  # 从未跑过远程，立即到期
+        elapsed = (self.now() - last).total_seconds()
+        return elapsed >= interval_hours * 3600
+
     def _should_notify(self, row) -> bool:
         """False for judgments older than the bootstrap cutoff.
 
@@ -501,7 +547,8 @@ class CognitionController:
     def process_once(self):
         backfill = self.cognition.backfill_unclustered(limit=1000)
         remote_provider = self._provider_name()
-        remote_enabled = remote_provider != "local"
+        # 频率控制：远程启用且到达频率间隔时才允许远程调用，否则全部走本地
+        remote_enabled = remote_provider != "local" and self._remote_due()
         clusters = [
             item for item in self.cognition.list_clusters(limit=1000) if item["needs_judgment"]
         ]

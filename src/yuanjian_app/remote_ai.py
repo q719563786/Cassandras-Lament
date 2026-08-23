@@ -435,15 +435,20 @@ class AiSettingsService:
                 "enabled": False,
                 "endpoint": DEFAULT_ENDPOINT,
                 "model": "",
+                "frequency": "medium",
             }
         try:
             value = json.loads(row["value_json"])
         except json.JSONDecodeError:
             value = {}
+        freq = str(value.get("frequency", "medium")).strip().lower()
+        if freq not in ("low", "medium", "high"):
+            freq = "medium"
         return {
             "enabled": bool(value.get("enabled", False)),
             "endpoint": str(value.get("endpoint") or DEFAULT_ENDPOINT),
             "model": str(value.get("model") or ""),
+            "frequency": freq,
         }
 
     def get(self):
@@ -461,12 +466,15 @@ class AiSettingsService:
             raise ValueError("AI启用状态无效")
         endpoint = _validate_endpoint(payload.get("endpoint", current["endpoint"]))
         model = str(payload.get("model", current["model"])).strip()
+        frequency = str(payload.get("frequency", current["frequency"])).strip().lower()
+        if frequency not in ("low", "medium", "high"):
+            frequency = "medium"
         if "token" in payload:
             self.secret_store.save(str(payload.get("token") or ""))
         configured = bool(self.secret_store.load())
         if enabled and (not model or not configured):
             raise ValueError("启用远程AI前必须填写模型编号和API密钥")
-        value = {"enabled": enabled, "endpoint": endpoint, "model": model}
+        value = {"enabled": enabled, "endpoint": endpoint, "model": model, "frequency": frequency}
         now = _iso(datetime.now(timezone.utc))
         with self.database.connect() as connection:
             connection.execute(
