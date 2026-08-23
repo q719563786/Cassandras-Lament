@@ -22,6 +22,13 @@ const CATEGORIES = [
   {value: 'finance', label: '金融'},
   {value: 'general', label: '综合'}
 ];
+// P4: 信源分级——T1官方源 / T2权威媒体 / T3聚合或一般 / T4未验证
+const TIERS = [
+  {value: 'T1', label: 'T1 · 官方源（默认可靠度 0.9）'},
+  {value: 'T2', label: 'T2 · 权威媒体（默认可靠度 0.7）'},
+  {value: 'T3', label: 'T3 · 聚合或一般（默认可靠度 0.5）'},
+  {value: 'T4', label: 'T4 · 未验证（默认可靠度 0.3）'}
+];
 
 const opt = (list, current) => list.map(o =>
   `<option value="${o.value}"${o.value === current ? ' selected' : ''}>${o.label}</option>`).join('');
@@ -37,6 +44,7 @@ export function sourceFormHtml(source) {
       <div class="field"><label for="sf-kind">类型</label><select id="sf-kind" name="kind">${opt(KINDS, s.kind || 'rss')}</select></div>
       <div class="field"><label for="sf-region">区域</label><select id="sf-region" name="region">${opt(REGIONS, s.region || 'heyuan')}</select></div>
       <div class="field"><label for="sf-category">类别</label><select id="sf-category" name="category">${opt(CATEGORIES, s.category || 'general')}</select></div>
+      <div class="field"><label for="sf-tier">分级</label><select id="sf-tier" name="tier">${opt(TIERS, s.tier || 'T3')}</select></div>
       <div class="u-end"><button type="submit" class="btn btn-primary">保存</button><button type="button" class="btn" data-src-cancel>取消</button></div>
     </form>
   </div>`;

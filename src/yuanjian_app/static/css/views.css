@@ -110,3 +110,9 @@
 .overdue-banner{background:var(--color-danger-tint,var(--color-surface));border:1px solid var(--color-danger);border-radius:var(--radius);padding:var(--space-sm) var(--space-md);margin-bottom:var(--space-sm);font-size:.8125rem;color:var(--color-text)}
 .overdue-banner .overdue-count{font-weight:700;color:var(--color-danger)}
 .overdue-banner a{color:var(--color-danger);font-weight:600}
+
+/* P4: 信源分级徽标——T1官方/T2权威/T3聚合/T4未验证 */
+.badge-tier-T1{background:rgba(46,204,113,.18);color:#2ecc73;border-color:rgba(46,204,113,.4)}
+.badge-tier-T2{background:rgba(52,152,219,.18);color:#3498db;border-color:rgba(52,152,219,.4)}
+.badge-tier-T3{background:rgba(149,165,166,.18);color:#95a5a6;border-color:rgba(149,165,166,.4)}
+.badge-tier-T4{background:rgba(241,196,15,.18);color:#b58300;border-color:rgba(241,196,15,.4)}

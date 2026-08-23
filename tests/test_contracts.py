@@ -129,6 +129,8 @@ class GywV2ContractTests(unittest.TestCase):
 
     def test_local_template_passes_v2_with_backfilled_keys(self):
         # 本地模板路径必须过 v2 校验（_gyw_for 出口补齐四键）
+        # P1 集成登高望远规则引擎后，gyw 字典扩展到 12 键：
+        # 原 9 键 + scenario_paths / power_structure / risk_signal_hit。
         from yuanjian_app.judgments import LocalHeuristicProvider, EvidenceBundle, EvidenceItem
         provider = LocalHeuristicProvider()
         bundle = EvidenceBundle(
@@ -136,10 +138,14 @@ class GywV2ContractTests(unittest.TestCase):
             (EvidenceItem("s1", "t", "sum", "d.com", "https://d.com", "2026-01-01"),),
         )
         result = provider.analyze(bundle)
-        self.assertEqual(len(result.gyw), 9)
+        self.assertEqual(len(result.gyw), 12)
         self.assertEqual(result.gyw["beneficiaries"], [])
         self.assertIsNone(result.gyw["historical_parallel"])
         self.assertGreaterEqual(len(result.gyw["observable_signals"]), 2)
+        # P1 规则引擎产物键
+        self.assertIn("scenario_paths", result.gyw)
+        self.assertIn("power_structure", result.gyw)
+        self.assertIn("risk_signal_hit", result.gyw)
 
     def test_remote_schema_requires_nine_gyw_keys(self):
         from yuanjian_app.remote_ai import _result_schema
@@ -214,12 +220,9 @@ class SourceBadgeContractTests(unittest.TestCase):
         self.assertIn("tone: 'remote'", ui_core)
         self.assertIn("tone: 'template'", ui_core)
         self.assertIn("tone: 'muted'", ui_core)
-        # today.js 必须调用 sourceBadge（不再自写来源文案）
-        today = (static / "js" / "views" / "today.js").read_text(encoding="utf-8")
-        self.assertIn("sourceBadge", today)
-        self.assertNotIn("'后端 judgment 引擎'", today, "旧脱钩文案应已移除")
-        self.assertNotIn("'UI 兜底模板'", today, "旧脱钩文案应已移除")
-        # CSS 三 tone 徽标
+        # v1.0 行动雷达：today.js 改用 risk-dashboard，
+        # 不再调用 sourceBadge（旧 GYW 深度预知卡片已移除）。
+        # 但 ui_core 仍保留 sourceBadge，其他视图（如 calib）仍可调用。
         css = (static / "css" / "components.css").read_text(encoding="utf-8")
         for tone in ("remote", "template", "muted"):
             self.assertIn(f"judgment-{tone}", css, f"CSS 缺 judgment-{tone} 徽标样式")

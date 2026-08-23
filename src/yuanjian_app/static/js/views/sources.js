@@ -1,7 +1,7 @@
 // 远见 v0.9 · 源管理 —— 源列表 + 健康态 + 区域筛选 + CRUD + OPML 导入（AC-03/AC-04）
 import { api, escapeHtml, showToast, withBusy } from '../api.js';
 import { yjIcon } from '../icons.js';
-import { sourceKindLabel, regionLabel, categoryLabel, sourceHealthLabel } from '../ui_core.js';
+import { sourceKindLabel, regionLabel, categoryLabel, sourceHealthLabel, tierLabel } from '../ui_core.js';
 import { sourceFormHtml, mountSourceForm } from './sources-form.js';
 
 // 区域筛选：兼容中文（河源/广东…）与枚举（heyuan/guangdong…）双形态
@@ -21,12 +21,14 @@ function healthDot(source) {
 
 function rowHtml(s) {
   const deletable = s.user_managed ? `<button type="button" class="btn btn-sm btn-danger" data-del="${escapeHtml(s.id)}">删除</button>` : '';
+  const tier = s.tier || 'T3';
   return `<div class="src" data-id="${escapeHtml(s.id)}">
     <span class="sdot ${healthDot(s)}" title="${escapeHtml(sourceHealthLabel(s))}"></span>
     <span class="name">${escapeHtml(s.name || s.url || '未命名源')}</span>
     <span class="badge">${escapeHtml(sourceKindLabel(s.kind))}</span>
     <span class="badge">${escapeHtml(regionLabel(s.region))}</span>
     <span class="badge">${escapeHtml(categoryLabel(s.category))}</span>
+    <span class="badge badge-tier-${tier}">${escapeHtml(tierLabel(tier))}</span>
     <span class="acts">
       <button type="button" class="btn btn-sm" data-toggle="${escapeHtml(s.id)}" data-next="${s.enabled ? 'false' : 'true'}">${s.enabled ? '停用' : '启用'}</button>
       <button type="button" class="btn btn-sm" data-refresh="${escapeHtml(s.id)}">刷新</button>

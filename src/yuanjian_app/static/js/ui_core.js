@@ -27,6 +27,10 @@ const sourceKinds = Object.freeze({
 const regions = Object.freeze({
   heyuan: '河源', guangdong: '广东', national: '全国', global: '全球'
 });
+// P4: 信源分级——T1官方源 / T2权威媒体 / T3聚合或一般 / T4未验证
+const sourceTiers = Object.freeze({
+  T1: 'T1 · 官方源', T2: 'T2 · 权威媒体', T3: 'T3 · 聚合或一般', T4: 'T4 · 未验证'
+});
 
 export function evidenceLabel(value) { return evidence[value] || String(value || '证据待确认'); }
 export function trendLabel(value) { return trends[value] || String(value || '趋势未知'); }
@@ -36,6 +40,11 @@ export function sourceKindLabel(value) { return sourceKinds[value] || String(val
 export function regionLabel(value) {
   if (!value) return '未分区';
   return regions[value] || String(value);
+}
+// P4: 信源分级标签——未知/空值时按 T3 显示（与数据库默认一致）
+export function tierLabel(value) {
+  if (!value) return sourceTiers.T3;
+  return sourceTiers[value] || String(value);
 }
 
 // 风险三档映射：L4→高 / L3→中 / L1-L2→低（对用户呈现中文档位 + 方角标签）

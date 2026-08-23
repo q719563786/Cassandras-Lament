@@ -139,24 +139,36 @@ class ImpactServiceTests(unittest.TestCase):
         serialized = json.dumps(after, ensure_ascii=False)
         self.assertNotIn(self.health["name"], serialized)
 
-    def test_candidate_requires_human_fixed_probability_before_forecast_exists(self):
+    def test_candidate_auto_confirm_with_nearest_fixed_probability(self):
+        """P1 引入自动确认行为：map_judgment 生成新候选预测后，
+        用概率区间中值（0.55+0.78）/2=0.665 → 最近固定档位 0.65 自动确认。
+        后续再次 confirm 同一 impact 会幂等返回已存在的 forecast。"""
         cluster_id, judgment_id = self.add_judgment("candidate", "E3")
         impact = self.service.map_judgment(cluster_id, judgment_id)[0]
 
         candidate = self.service.candidate_forecast(impact["impact_id"])
 
-        self.assertEqual(self.forecasts.list_forecasts()[0], [])
+        # 自动确认后 forecast 表已有一条记录，概率为最近固定档位 0.65。
+        # list_forecasts() 返回 (result_list, total) 元组。
+        forecasts, total = self.forecasts.list_forecasts()
+        self.assertEqual(total, 1)
+        self.assertEqual(len(forecasts), 1)
+        self.assertEqual(forecasts[0]["probability"], 0.65)
+        self.assertEqual(forecasts[0]["version"], 1)
         self.assertEqual(candidate["probability_low"], 0.55)
         self.assertEqual(candidate["probability_high"], 0.78)
         self.assertTrue(candidate["resolution_criteria"])
+
+        # confirm_candidate 仍要求固定档位；非法档位抛 ValueError。
         with self.assertRaisesRegex(ValueError, "固定档位"):
             self.service.confirm_candidate(impact["impact_id"], 0.73)
-        self.assertEqual(self.forecasts.list_forecasts()[0], [])
 
+        # 重复 confirm 同一档位 → 幂等返回已存在的 forecast（不创建新版本）。
         confirmed = self.service.confirm_candidate(impact["impact_id"], 0.65)
-
         self.assertEqual(confirmed["version"], 1)
-        self.assertEqual(self.forecasts.list_forecasts()[0][0]["probability"], 0.65)
+        self.assertEqual(confirmed["probability"], 0.65)
+        _, total_after = self.forecasts.list_forecasts()
+        self.assertEqual(total_after, 1)
 
     def test_pending_candidates_surfaces_gyw_framework_from_judgment(self):
         """The Action Home deep-dive card reads candidate.gyw to render

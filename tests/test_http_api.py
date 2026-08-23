@@ -266,19 +266,18 @@ class HttpApiTests(unittest.TestCase):
         self.assertIn('aria-live="polite"', body)
         with urllib.request.urlopen(self.base_url + "/js/app.js", timeout=2) as response:
             script = response.read().decode("utf-8")
-        self.assertIn("/api/cognition/run", script)
+        # v1.0 行动雷达：app.js 改用 renderView() 重拉当前视图，
+        # 不再直接调用 /api/cognition/run。/api/shutdown 与 hash 路由仍保留。
         self.assertIn("/api/shutdown", script)
         self.assertIn("#/", script)
         with urllib.request.urlopen(
             self.base_url + "/js/views/today.js", timeout=2
         ) as response:
             today = response.read().decode("utf-8")
-        # Action Home v0.9 consumes /api/cognition/candidates + /api/forecasts/progress
-        # instead of /api/risk-dashboard. The deep-dive card surfaces backend
-        # GYW analysis from candidate.gyw.
-        self.assertIn("/api/cognition/candidates", today)
+        # v1.0 行动雷达首页：并行拉取风险面板 + 预测进度，按 L4/L3 渲染行动卡。
+        self.assertIn("/api/risk-dashboard", today)
         self.assertIn("/api/forecasts/progress", today)
-        self.assertIn("gyw", today)
+        self.assertIn("alert_level", today)
 
     def test_personal_behavior_input_is_one_step_from_the_main_navigation(self):
         with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:
@@ -320,7 +319,9 @@ class HttpApiTests(unittest.TestCase):
 
         self.assertIn('<script type="module" src="/js/app.js"></script>', home)
         for asset, marker in (
-            ("/js/views/today.js", "/api/cognition/candidates"),
+            # v1.0 行动雷达：today.js 改用风险面板接口；
+            # diag/calib/settings 仍按原契约断言。
+            ("/js/views/today.js", "/api/risk-dashboard"),
             ("/js/views/diag.js", "/api/diagnostics"),
             ("/js/views/calib.js", "/api/calibration"),
             ("/js/views/settings.js", "/api/settings/backup"),
