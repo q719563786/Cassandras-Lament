@@ -8,6 +8,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Protocol
 from urllib.parse import urlsplit
 
+from .knowledge_base import ALL_KNOWLEDGE
+
 
 MAX_BUNDLE_CHARACTERS = 12_000
 MAX_EVIDENCE_SOURCES = 8
@@ -63,7 +65,10 @@ SYSTEM_INSTRUCTION = (
     "probability_low/probability_high/confidence 给 0-1 之间的数，"
     "证据等级越低区间越宽；impact_categories 从给定枚举中选。"
     "模糊到永远不会错的表述不允许。越具体越可能错，但具体才有价值——"
-    "你的洞察只有落到具体判断上才有价值。"
+    "你的洞察只有落到具体判断上才有价值。\n"
+    "\n"
+    "═══ 你的认知框架（必须用以下逻辑判断，而非通用AI视角）═══\n"
+    + ALL_KNOWLEDGE
 )
 ALLOWED_IMPACT_CATEGORIES = frozenset(
     {
