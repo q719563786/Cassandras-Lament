@@ -52,8 +52,13 @@ function safeListHtml() {
 // 预测进度 KPI：已结算 / 命中 / 失误 / 本周到期
 function progressHtml(progress) {
   if (!progress) return '';
-  const { resolved_total, hit_total, miss_total, due_this_week } = progress;
+  const { resolved_total, hit_total, miss_total, due_this_week, overdue_total } = progress;
+  const overdue = Number(overdue_total ?? 0);
+  const overdueBanner = overdue > 0
+    ? `<div class="overdue-banner"><span class="overdue-count">${overdue}</span> 条预测已到期待结算 — <a href="#/calib">去结算</a></div>`
+    : '';
   return `<section class="card u-mb-md">
+    ${overdueBanner}
     <div class="u-row">
       <div class="kpi-block"><div class="kpi-num">${String(resolved_total ?? 0)}</div><div class="kpi-label">已结算预测</div></div>
       <div class="kpi-block"><div class="kpi-num">${String(hit_total ?? 0)}</div><div class="kpi-label">历史命中</div></div>

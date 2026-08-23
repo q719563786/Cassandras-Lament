@@ -85,3 +85,28 @@
 /* ===== 状态面板 / 结果框 ===== */
 .state-panel{display:flex;flex-direction:column;align-items:center;gap:var(--space-md);padding:var(--space-2xl) var(--space-md);color:var(--color-text-secondary)}
 .result-box{border:1px solid var(--color-border-strong);border-left:3px solid var(--color-accent);padding:var(--space-md);border-radius:3px}
+
+/* ===== 行动雷达首页 ===== */
+.radar-section{margin-bottom:var(--space-md)}
+.radar-section h2{font-size:.8125rem;letter-spacing:1px;margin-bottom:var(--space-sm);display:flex;align-items:center;gap:var(--space-xs)}
+.radar-section .dot-l4{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--color-danger);flex:none}
+.radar-section .dot-l3{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--color-warning);flex:none}
+.radar-section .dot-safe{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--color-success);flex:none}
+.action-card{background:var(--color-surface);border:1px solid var(--color-border);border-left:3px solid var(--color-danger);border-radius:var(--radius);padding:var(--space-md) var(--space-md) var(--space-md) var(--space-lg);margin-bottom:var(--space-sm)}
+.action-card.l3{border-left-color:var(--color-warning)}
+.action-card.watch{border-left-color:var(--color-info)}
+.action-card .ac-title{font-size:.875rem;font-weight:600;line-height:1.5}
+.action-card .ac-meta{font-size:.6875rem;color:var(--color-text-muted);margin-top:2px;display:flex;gap:var(--space-md);flex-wrap:wrap}
+.action-card .ac-action{font-size:.8125rem;color:var(--color-text-secondary);margin-top:var(--space-xs);padding-top:var(--space-xs);border-top:1px dashed var(--color-border)}
+.action-card .ac-direction{font-size:.6875rem;font-weight:600}
+.ac-direction.up{color:var(--color-danger)}
+.ac-direction.down{color:var(--color-success)}
+.ac-direction.flat{color:var(--color-text-muted)}
+.safe-list{list-style:none;padding:0;margin:0}
+.safe-list li{padding:6px 0;font-size:.8125rem;color:var(--color-text-secondary);display:flex;align-items:center;gap:var(--space-sm)}
+.safe-list li::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--color-success);flex:none}
+.radar-empty{text-align:center;padding:var(--space-xl) var(--space-md);color:var(--color-text-muted);font-size:.8125rem}
+.radar-summary{font-size:.8125rem;color:var(--color-text-secondary);margin-bottom:var(--space-md);padding:var(--space-sm) var(--space-md);background:var(--color-surface);border-radius:var(--radius);border:1px solid var(--color-border)}
+.overdue-banner{background:var(--color-danger-tint,var(--color-surface));border:1px solid var(--color-danger);border-radius:var(--radius);padding:var(--space-sm) var(--space-md);margin-bottom:var(--space-sm);font-size:.8125rem;color:var(--color-text)}
+.overdue-banner .overdue-count{font-weight:700;color:var(--color-danger)}
+.overdue-banner a{color:var(--color-danger);font-weight:600}

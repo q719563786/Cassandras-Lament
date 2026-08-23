@@ -477,6 +477,13 @@ class ForecastService:
                 """,
                 (now_text, horizon_text),
             ).fetchall()
+            overdue_rows = connection.execute(
+                """
+                SELECT forecast_id FROM forecasts
+                WHERE status='open' AND window_end < ?
+                """,
+                (now_text,),
+            ).fetchall()
         confident = [r for r in binary_rows if float(r["probability"]) >= 0.5]
         hits = [r for r in confident if r["outcome"] == "occurred"]
         miss = [r for r in confident if r["outcome"] == "not_occurred"]
@@ -485,4 +492,42 @@ class ForecastService:
             "hit_total": len(hits),
             "miss_total": len(miss),
             "due_this_week": len(due_rows),
+            "overdue_total": len(overdue_rows),
         }
+
+    def list_overdue(self, now=None):
+        """P3: 返回已过期但未结算的预测（status='open' 且 window_end < now）。
+
+        供前端提醒用户"有N条预测到期该结算了"，驱动预测闭环。
+        """
+        now = now or datetime.now(timezone.utc)
+        now_text = _iso(now)
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT f.forecast_id, f.status, f.window_end, f.category,
+                       v.probability, v.content
+                FROM forecasts f
+                JOIN forecast_versions v ON v.forecast_id = f.forecast_id
+                JOIN (
+                    SELECT forecast_id, MAX(version) AS latest_version
+                    FROM forecast_versions GROUP BY forecast_id
+                ) latest ON latest.forecast_id = v.forecast_id
+                         AND latest.latest_version = v.version
+                WHERE f.status='open' AND f.window_end < ?
+                ORDER BY f.window_end
+                """,
+                (now_text,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            fields = parse_frontmatter(row["content"])
+            result.append({
+                "forecast_id": row["forecast_id"],
+                "window_end": row["window_end"],
+                "category": row["category"] or "general",
+                "probability": row["probability"],
+                "title": fields.get("title", row["forecast_id"]),
+                "resolution_criteria": fields.get("resolution_criteria", ""),
+            })
+        return result

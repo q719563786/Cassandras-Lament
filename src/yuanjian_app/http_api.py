@@ -220,6 +220,11 @@ def create_server(host, port, token, services):
                     self._error(503, "unavailable", "预测能力未装配")
                     return
                 self._json(services.forecasts.progress_summary())
+            elif path == "/api/forecasts/overdue":
+                if services.forecasts is None:
+                    self._error(503, "unavailable", "预测能力未装配")
+                    return
+                self._json({"overdue": services.forecasts.list_overdue()})
             elif path == "/api/interests":
                 self._json(
                     {
