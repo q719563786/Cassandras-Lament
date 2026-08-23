@@ -33,6 +33,50 @@ from .system_settings import SystemSettingsService
 from .trends import TrendService
 
 
+def _make_personal_context_loader(interests, forecasts):
+    """P2: 构建个人上下文加载器——读取利益地图与近期预测，供远程研判注入。
+
+    本地启发式研判永不调用此函数（保持"local never sees personal interests"）。
+    返回 dict 或 None；加载失败时 JudgmentQueue 会静默跳过，不阻断研判。
+    """
+    def loader(cluster_id):
+        objects = interests.list_objects()
+        id_to_name = {o["object_id"]: o["name"] for o in objects}
+        links = interests.list_links()
+        resolved_links = [
+            {
+                "source": id_to_name.get(l["source_id"], l["source_id"]),
+                "target": id_to_name.get(l["target_id"], l["target_id"]),
+                "relationship": l["relationship"],
+                "impact": l["impact_direction"],
+                "strength": l["strength"],
+            }
+            for l in links[:20]
+        ]
+        recent, _ = forecasts.list_forecasts(limit=5)
+        return {
+            "interests": {
+                "objects": [
+                    {"name": o["name"], "category": o["category"], "importance": o["importance"]}
+                    for o in objects[:20]
+                ],
+                "links": resolved_links,
+            },
+            "recent_forecasts": [
+                {
+                    "title": f["title"],
+                    "category": f["category"],
+                    "probability": f["probability"],
+                    "status": f["status"],
+                    "alert_level": f["alert_level"],
+                    "window_end": f["window_end"],
+                }
+                for f in recent
+            ],
+        }
+    return loader
+
+
 @dataclass
 class Application:
     server: object
@@ -53,6 +97,7 @@ class Application:
         session_token = secrets.token_urlsafe(32)
         interests = InterestService(database)
         interests.ensure_defaults()
+        forecasts = ForecastService(database)
         signals = SignalService(database, interests)
         knowledge = KnowledgeService(database)
         cognition = CognitionService(database)
@@ -73,8 +118,8 @@ class Application:
                 cognition.get_cluster(cluster_id)["items"],
             ),
             local_provider=local_provider,
+            personal_context_loader=_make_personal_context_loader(interests, forecasts),
         )
-        forecasts = ForecastService(database)
         impacts = ImpactService(database, interests, forecasts)
         notifications = NotificationService(database)
         controller = CognitionController(

@@ -119,13 +119,16 @@ class EvidenceBundle:
     categories: tuple[str, ...]
     items: tuple[EvidenceItem, ...]
     system_instruction: str = SYSTEM_INSTRUCTION
+    # P2: 个人利益地图与近期历史预测，仅在远程 AI 研判时注入
+    # （本地启发式研判永远不读取此字段，保持隐私边界）。
+    personal_context: dict | None = None
 
     @property
     def allowed_source_ids(self) -> frozenset[str]:
         return frozenset(item.source_id for item in self.items)
 
     def to_public_dict(self) -> dict:
-        return {
+        data = {
             "system_instruction": self.system_instruction,
             "cluster": {
                 "cluster_id": self.cluster_id,
@@ -136,6 +139,9 @@ class EvidenceBundle:
             },
             "evidence": [asdict(item) for item in self.items],
         }
+        if self.personal_context:
+            data["personal_context"] = self.personal_context
+        return data
 
 
 @dataclass(frozen=True)

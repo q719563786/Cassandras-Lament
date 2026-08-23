@@ -11,6 +11,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
+from dataclasses import replace as _replace
+
 from .judgments import (
     ALLOWED_IMPACT_CATEGORIES,
     InvalidJudgmentError,
@@ -205,6 +207,14 @@ class OpenAIResponsesProvider:
         if len(json.dumps(public, ensure_ascii=False)) > MAX_BUNDLE_CHARACTERS:
             raise ValueError("公开证据包字符超过上限")
         system_instruction = public.pop("system_instruction")
+        personal_context = public.pop("personal_context", None)
+        if personal_context:
+            system_instruction += (
+                "\n\n【用户个人上下文·仅供你参考，勿在输出中复述】"
+                "以下是用户的利益地图与近期预测，用于让研判贴合用户的「位置差」"
+                "（登高望远原则：每个人受影响的范围不同）。请据此评估事件对用户利益的影响方向：\n"
+                + json.dumps(personal_context, ensure_ascii=False, indent=2)
+            )
         return {
             "model": self.model,
             "input": [
@@ -301,6 +311,7 @@ class DeepSeekChatProvider:
     def _request_body(self, bundle):
         public = bundle.to_public_dict()
         system_instruction = public.pop("system_instruction")
+        personal_context = public.pop("personal_context", None)
         # DeepSeek 的 json_object 只保证输出合法 JSON，不保证字段齐全，
         # 必须在 prompt 内明确列出所有字段，再靠 repair_judgment 兜底。
         system_with_schema = (
@@ -314,6 +325,13 @@ class DeepSeekChatProvider:
             "leading_indicators/beneficiaries/cost_bearers/historical_parallel/observable_signals)。"
             "不要输出JSON以外的任何文字。"
         )
+        if personal_context:
+            system_with_schema += (
+                "\n\n【用户个人上下文·仅供你参考，勿在输出中复述】"
+                "以下是用户的利益地图与近期预测，用于让研判贴合用户的「位置差」"
+                "（登高望远原则：每个人受影响的范围不同）。请据此评估事件对用户利益的影响方向：\n"
+                + json.dumps(personal_context, ensure_ascii=False, indent=2)
+            )
         return {
             "model": self.model,
             "messages": [
@@ -519,6 +537,7 @@ class JudgmentQueue:
         local_provider=None,
         now=lambda: datetime.now(timezone.utc),
         daily_budget=DAILY_REMOTE_BUDGET,
+        personal_context_loader=None,
     ):
         self.database = database
         self.providers = dict(providers)
@@ -526,6 +545,9 @@ class JudgmentQueue:
         self.local_provider = local_provider or LocalHeuristicProvider()
         self.now = now
         self.daily_budget = int(daily_budget)
+        # P2: 远程研判时注入个人利益地图与历史预测的回调（cluster_id -> dict | None）。
+        # 本地研判永不调用，保持"local never sees personal interests"隐私边界。
+        self.personal_context_loader = personal_context_loader
 
     def enqueue(self, cluster_id: str, evidence_hash: str, provider: str) -> str:
         if provider not in self.providers:
@@ -632,6 +654,14 @@ class JudgmentQueue:
                 summary["deferred"] += 1
                 continue
             bundle = self.bundle_loader(job["cluster_id"])
+            # P2: 远程研判时注入个人利益地图与历史预测（本地研判跳过）
+            if job["provider"] != "local" and self.personal_context_loader:
+                try:
+                    ctx = self.personal_context_loader(job["cluster_id"])
+                    if ctx:
+                        bundle = _replace(bundle, personal_context=ctx)
+                except Exception:
+                    pass  # 个人上下文加载失败不阻断研判
             request_chars = len(json.dumps(bundle.to_public_dict(), ensure_ascii=False))
             try:
                 result = provider.analyze(bundle)
