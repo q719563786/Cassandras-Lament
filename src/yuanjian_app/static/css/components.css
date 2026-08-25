@@ -124,11 +124,11 @@
   background: var(--text-muted);
   transition: all var(--dur) var(--ease);
 }
-.toggle.active {
+.toggle[aria-checked="true"] {
   background: var(--amber);
   border-color: var(--amber);
 }
-.toggle.active::after {
+.toggle[aria-checked="true"]::after {
   left: 18px;
   background: #1A1200;
 }

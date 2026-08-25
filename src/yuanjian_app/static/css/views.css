@@ -325,6 +325,44 @@
   color: var(--text-primary);
   margin-bottom: var(--s-3);
 }
+.set-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--s-3) 0;
+  gap: var(--s-4);
+}
+.set-row + .set-row {
+  border-top: 1px solid var(--border);
+}
+.set-row .name {
+  font-size: 0.86rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin: 0;
+}
+.set-row .desc {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  margin: 2px 0 0 0;
+  line-height: 1.4;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.field label {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: var(--s-2) var(--s-5);
+}
 
 /* === 诊断/设置分组 === */
 .setting-group {
