@@ -504,27 +504,25 @@ class CognitionController:
             return None
 
     def _remote_due(self) -> bool:
-        """根据用户设置的频率判断现在是否可以启动一轮远程分析。
-        闸门打开后不限批量，一次性处理所有待远程事件（受日预算30次兜底保护）。
-        - low：每天21点后跑一次，当天跑过则不再跑
-        - medium：距上次远程 >= 6 小时（默认）
-        - high：距上次远程 >= 1 小时
+        """根据用户设置的频率判断现在是否可以启动远程分析。
+        闸门打开后，每轮（5分钟）最多处理3个远程任务，严格控制API消耗。
+        - low：每天21:00~次日02:00为夜间汇总窗口，分批处理所有待远程事件，日预算30次兜底
+        - medium：距上次远程任务完成 >= 6小时，开闸后分批处理
+        - high：距上次远程任务完成 >= 1小时，开闸后分批处理
         远程未启用时返回 False。
         """
         settings = self.ai_settings.get()
         if not settings.get("enabled"):
             return False
         frequency = settings.get("frequency")
-        # frequency为None或无效值时默认medium
         if not frequency or frequency not in ("low", "medium", "high"):
             frequency = "medium"
         local_now = self.now().astimezone()
         last = self._last_remote_attempt_at()
         if frequency == "low":
-            # 每天21点后跑一次，当天已跑过则不再跑
-            if local_now.hour < 21:
-                return False
-            if last is not None and last.astimezone().date() == local_now.date():
+            # 夜间窗口：21:00 ~ 次日02:00，窗口内持续分批处理
+            hour = local_now.hour
+            if hour < 21 and hour >= 2:
                 return False
             return True
         if frequency == "high":
@@ -576,8 +574,12 @@ class CognitionController:
             self.judgment_queue.enqueue(
                 cluster["cluster_id"], cluster["evidence_hash"], provider
             )
-        # 开闸时不限批量（上限100，日预算30次兜底保护）；关闸时只处理本地任务
-        judgments = self.judgment_queue.run_due(limit=100)
+        # 开闸时：远程任务每次最多3个（严格控API消耗），本地任务正常处理；
+        # 关闸时：只处理本地任务（downgrade已清理排队中的远程任务）
+        judgments = self.judgment_queue.run_due(
+            limit=30,
+            remote_limit=3 if remote_enabled else 0,
+        )
         mapped = 0
         notified = 0
         with self.database.connect() as connection:
