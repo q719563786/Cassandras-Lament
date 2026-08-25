@@ -503,10 +503,31 @@ class CognitionController:
         except (ValueError, TypeError, OSError):
             return None
 
+    @staticmethod
+    def _is_peak_hours(now) -> bool:
+        """判断是否为DeepSeek API高峰时段（北京时间，UTC+8）。
+        高峰：周一至周五 9:00-12:00、14:00-18:00（价格翻倍）
+        空闲：其余所有时间（周末全天、工作日凌晨/午间/夜间，价格半价）
+        """
+        import datetime as _dt
+        # 转换为北京时间（UTC+8）
+        bj_tz = _dt.timezone(_dt.timedelta(hours=8))
+        bj_now = now.astimezone(bj_tz)
+        # 周末（周六=5, 周日=6）全天非高峰
+        if bj_now.weekday() >= 5:
+            return False
+        hour = bj_now.hour
+        # 工作日高峰：9:00-12:00 和 14:00-18:00
+        if (9 <= hour < 12) or (14 <= hour < 18):
+            return True
+        return False
+
     def _remote_due(self) -> bool:
         """根据用户设置的频率判断现在是否可以启动远程分析。
         闸门打开后，每轮（5分钟）最多处理3个远程任务，严格控制API消耗。
-        - low：每天21:00~次日02:00为夜间汇总窗口，分批处理所有待远程事件，日预算30次兜底
+        强制规则：DeepSeek高峰时段（工作日9-12/14-18北京时间）禁止远程调用，
+        只在空闲时段（半价）调用，节省一半API费用。
+        - low：每天21:00~次日02:00为夜间汇总窗口（已在空闲时段内），分批处理
         - medium：距上次远程任务完成 >= 6小时，开闸后分批处理
         - high：距上次远程任务完成 >= 1小时，开闸后分批处理
         远程未启用时返回 False。
@@ -514,15 +535,21 @@ class CognitionController:
         settings = self.ai_settings.get()
         if not settings.get("enabled"):
             return False
+        # 强制：高峰时段禁止远程AI调用（半价时段才用）
+        if self._is_peak_hours(self.now()):
+            return False
         frequency = settings.get("frequency")
         if not frequency or frequency not in ("low", "medium", "high"):
             frequency = "medium"
         local_now = self.now().astimezone()
         last = self._last_remote_attempt_at()
         if frequency == "low":
-            # 夜间窗口：21:00 ~ 次日02:00，窗口内持续分批处理
-            hour = local_now.hour
-            if hour < 21 and hour >= 2:
+            # 夜间窗口：21:00 ~ 次日02:00（北京时间），窗口内持续分批处理
+            # 转换为北京时间判断窗口（local_now可能是其他时区）
+            import datetime as _dt
+            bj_tz = _dt.timezone(_dt.timedelta(hours=8))
+            bj_hour = self.now().astimezone(bj_tz).hour
+            if bj_hour < 21 and bj_hour >= 2:
                 return False
             return True
         if frequency == "high":
