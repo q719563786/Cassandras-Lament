@@ -1,4 +1,4 @@
-/* 远见 v1.2 · 基础样式 - 现代清爽风格 */
+/* 远见 v1.3 · 基础样式 —— 琥珀观测台 */
 
 *, *::before, *::after {
   box-sizing: border-box;
@@ -15,61 +15,15 @@ html {
 
 body {
   font-family: var(--font-body);
-  background: var(--color-bg-primary);
+  background: var(--color-bg-canvas);
   color: var(--color-text-primary);
   line-height: 1.6;
   min-height: 100vh;
   overflow: hidden;
+  letter-spacing: 0.01em;
 }
 
-/* 移除CRT扫描线和vignette效果 */
-
-a {
-  color: var(--color-info);
-  text-decoration: none;
-  transition: color var(--motion-fast) var(--ease-standard);
-}
-
-a:hover {
-  color: var(--color-accent-hover);
-}
-
-button {
-  font-family: inherit;
-  font-size: inherit;
-  border: none;
-  background: none;
-  cursor: pointer;
-  color: inherit;
-  transition: all var(--motion-fast) var(--ease-standard);
-}
-
-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
-}
-
-input, select, textarea {
-  font-family: inherit;
-  font-size: inherit;
-  color: inherit;
-}
-
-ul, ol {
-  list-style: none;
-}
-
-img {
-  max-width: 100%;
-  display: block;
-}
-
-::selection {
-  background: var(--color-accent-bg);
-  color: var(--color-text-primary);
-}
-
-/* SVG 图标默认样式 - 线框风格，使用currentColor */
+/* === SVG 图标全局样式 === */
 svg {
   fill: none;
   stroke: currentColor;
@@ -78,35 +32,66 @@ svg {
   stroke-linejoin: miter;
 }
 
-/* 滚动条 - 现代简洁 */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+[class^="ico-"], [class*=" ico-"] {
+  display: inline-block;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+.ico-16 { width: 16px; height: 16px; }
+.ico-20 { width: 20px; height: 20px; }
+.ico-24 { width: 24px; height: 24px; }
+
+/* === 重置 === */
+a {
+  color: var(--color-amber);
+  text-decoration: none;
+  transition: color var(--duration-fast) var(--ease-out);
+}
+a:hover { color: var(--color-amber-soft); }
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: inherit;
+}
+button:disabled { cursor: not-allowed; opacity: 0.4; }
+
+input, select, textarea {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
 }
 
-::-webkit-scrollbar-track {
-  background: transparent;
+ul, ol { list-style: none; }
+
+img { max-width: 100%; display: block; }
+
+::selection {
+  background: var(--color-amber-bg);
+  color: var(--color-amber);
 }
 
+/* === 滚动条 === */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: var(--color-border-default);
-  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.10);
+  border-radius: 3px;
 }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.18); }
 
-::-webkit-scrollbar-thumb:hover {
-  background: var(--color-border-strong);
-}
-
-/* 通用工具类 */
+/* === 通用工具类 === */
 .u-flex1 { flex: 1; }
-.u-row { display: flex; gap: var(--space-md); flex-wrap: wrap; }
-.u-mb-sm { margin-bottom: var(--space-sm); }
-.u-mb-md { margin-bottom: var(--space-md); }
-.u-mb-lg { margin-bottom: var(--space-lg); }
-.u-mt-sm { margin-top: var(--space-sm); }
-.u-mt-md { margin-top: var(--space-md); }
-.u-mt-lg { margin-top: var(--space-lg); }
-.u-max { max-width: 900px; margin: 0 auto; }
+.u-row { display: flex; gap: var(--space-4); flex-wrap: wrap; }
+.u-mb-sm { margin-bottom: var(--space-2); }
+.u-mb-md { margin-bottom: var(--space-4); }
+.u-mb-lg { margin-bottom: var(--space-6); }
+.u-mt-sm { margin-top: var(--space-2); }
+.u-mt-md { margin-top: var(--space-4); }
+.u-mt-lg { margin-top: var(--space-6); }
 .u-text-center { text-align: center; }
 .u-text-muted { color: var(--color-text-muted); }
 .u-text-dim { color: var(--color-text-dim); }

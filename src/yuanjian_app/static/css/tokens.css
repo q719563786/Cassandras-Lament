@@ -1,102 +1,113 @@
-/* 远见 v1.2 · 设计令牌 —— 现代清爽深色主题 */
+/* 远见 v1.3 · 设计令牌 —— 琥珀观测台 · 深邃夜幕 */
 
-@font-face{
-  font-family:'JetBrains Mono';
-  src:url('/fonts/JetBrainsMono-Regular.woff2') format('woff2');
-  font-weight:400;font-style:normal;font-display:swap;
-}
-@font-face{
-  font-family:'JetBrains Mono';
-  src:url('/fonts/JetBrainsMono-Bold.woff2') format('woff2');
-  font-weight:700;font-style:normal;font-display:swap;
-}
+:root {
+  /* === 夜幕色系 === */
+  --color-bg-canvas: #0B0F17;
+  --color-bg-deep: #0E1320;
+  --color-bg-surface: #141B2B;
+  --color-bg-elevated: #1A2236;
+  --color-bg-overlay: #222C44;
+  --color-bg-hover: #1E2740;
 
-:root{
-  /* 现代深色主题配色 - Slate色系，干净清爽 */
-  --color-bg-primary:#0F172A;
-  --color-bg-secondary:#1E293B;
-  --color-bg-tertiary:#334155;
-  --color-bg-elevated:#1E293B;
-  --color-bg-hover:#334155;
-  
-  --color-border-subtle:#334155;
-  --color-border-default:#475569;
-  --color-border-strong:#64748B;
-  
-  --color-text-primary:#F8FAFC;
-  --color-text-secondary:#CBD5E1;
-  --color-text-muted:#94A3B8;
-  --color-text-dim:#64748B;
-  
-  /* 功能色 - 现代柔和配色 */
-  --color-danger:#EF4444;
-  --color-danger-bg:rgba(239,68,68,0.15);
-  --color-danger-border:rgba(239,68,68,0.3);
-  
-  --color-warning:#F59E0B;
-  --color-warning-bg:rgba(245,158,11,0.15);
-  --color-warning-border:rgba(245,158,11,0.3);
-  
-  --color-success:#10B981;
-  --color-success-bg:rgba(16,185,129,0.15);
-  --color-success-border:rgba(16,185,129,0.3);
-  
-  --color-info:#3B82F6;
-  --color-info-bg:rgba(59,130,246,0.15);
-  --color-info-border:rgba(59,130,246,0.3);
-  
-  --color-accent:#6366F1;
-  --color-accent-hover:#818CF8;
-  --color-accent-bg:rgba(99,102,241,0.15);
-  
-  /* L4/L3风险等级色 */
-  --color-l4:#EF4444;
-  --color-l4-bg:rgba(239,68,68,0.12);
-  --color-l3:#F59E0B;
-  --color-l3-bg:rgba(245,158,11,0.12);
-  --color-safe:#10B981;
-  --color-safe-bg:rgba(16,185,129,0.12);
-  --color-pending:#8B5CF6;
-  --color-pending-bg:rgba(139,92,246,0.12);
-  
-  /* 信源分级色 */
-  --color-t1:#3B82F6;
-  --color-t2:#10B981;
-  --color-t3:#F59E0B;
-  --color-t4:#64748B;
-  
-  /* 字体 */
-  --font-mono:'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
-  --font-sans:-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  --font-heading:var(--font-sans);
-  --font-body:var(--font-sans);
-  
-  /* 间距 */
-  --space-xs:4px;
-  --space-sm:8px;
-  --space-md:16px;
-  --space-lg:24px;
-  --space-xl:32px;
-  --space-2xl:48px;
-  
-  /* 圆角 */
-  --radius-sm:6px;
-  --radius-md:10px;
-  --radius-lg:14px;
-  --radius-xl:18px;
-  
-  /* 动效 */
-  --motion-fast:100ms;
-  --motion-base:150ms;
-  --motion-slow:250ms;
-  --ease-standard:cubic-bezier(0.4, 0, 0.2, 1);
-  
-  /* 阴影 */
-  --shadow-sm:0 1px 2px rgba(0,0,0,0.3);
-  --shadow-md:0 4px 6px -1px rgba(0,0,0,0.3), 0 2px 4px -2px rgba(0,0,0,0.2);
-  --shadow-lg:0 10px 15px -3px rgba(0,0,0,0.3), 0 4px 6px -4px rgba(0,0,0,0.2);
-  
-  /* 侧边栏/顶栏 */
-  --sidebar-width:240px;
-  --topbar-height:64px;
+  /* === 边框 === */
+  --color-border-hairline: rgba(255, 255, 255, 0.04);
+  --color-border-subtle: rgba(255, 255, 255, 0.07);
+  --color-border-default: rgba(255, 255, 255, 0.12);
+  --color-border-strong: rgba(255, 255, 255, 0.20);
+
+  /* === 文字 === */
+  --color-text-ghost: rgba(220, 230, 245, 0.30);
+  --color-text-dim: rgba(220, 230, 245, 0.45);
+  --color-text-muted: rgba(220, 230, 245, 0.60);
+  --color-text-secondary: rgba(220, 230, 245, 0.78);
+  --color-text-primary: rgba(240, 244, 252, 0.96);
+
+  /* === 琥珀金 === */
+  --color-amber: #E8B86D;
+  --color-amber-soft: #D4A259;
+  --color-amber-deep: #B8863D;
+  --color-amber-bg: rgba(232, 184, 109, 0.10);
+  --color-amber-border: rgba(232, 184, 109, 0.30);
+  --color-amber-glow: rgba(232, 184, 109, 0.18);
+
+  /* === 功能色 === */
+  --color-crimson: #E05C6E;
+  --color-crimson-bg: rgba(224, 92, 110, 0.10);
+  --color-crimson-border: rgba(224, 92, 110, 0.25);
+
+  --color-amber-warn: #E8A050;
+  --color-amber-warn-bg: rgba(232, 160, 80, 0.10);
+  --color-amber-warn-border: rgba(232, 160, 80, 0.25);
+
+  --color-jade: #5CB88C;
+  --color-jade-bg: rgba(92, 184, 140, 0.10);
+  --color-jade-border: rgba(92, 184, 140, 0.25);
+
+  --color-sky: #5B9BD5;
+  --color-sky-bg: rgba(91, 155, 213, 0.10);
+  --color-sky-border: rgba(91, 155, 213, 0.25);
+
+  --color-violet: #9B7ED5;
+  --color-violet-bg: rgba(155, 126, 213, 0.10);
+  --color-violet-border: rgba(155, 126, 213, 0.25);
+
+  /* === 风险等级 === */
+  --color-l4: var(--color-crimson);
+  --color-l4-bg: var(--color-crimson-bg);
+  --color-l4-border: var(--color-crimson-border);
+  --color-l3: var(--color-amber-warn);
+  --color-l3-bg: var(--color-amber-warn-bg);
+  --color-l3-border: var(--color-amber-warn-border);
+  --color-safe: var(--color-jade);
+  --color-safe-bg: var(--color-jade-bg);
+  --color-pending: var(--color-violet);
+  --color-pending-bg: var(--color-violet-bg);
+
+  /* === 信源分级 === */
+  --color-t1: var(--color-sky);
+  --color-t2: var(--color-jade);
+  --color-t3: var(--color-amber-warn);
+  --color-t4: var(--color-text-dim);
+
+  /* === 字体 === */
+  --font-display: "PingFang SC", "Noto Sans SC", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-body: "PingFang SC", "Noto Sans SC", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", "Consolas", monospace;
+
+  /* === 间距 === */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 40px;
+  --space-9: 48px;
+
+  /* === 圆角 === */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-2xl: 24px;
+
+  /* === 动效 === */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --duration-slow: 320ms;
+
+  /* === 阴影 === */
+  --shadow-inner: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.45);
+  --shadow-glow-amber: 0 0 24px rgba(232, 184, 109, 0.20), 0 0 48px rgba(232, 184, 109, 0.08);
+
+  /* === 布局 === */
+  --sidebar-width: 220px;
+  --topbar-height: 60px;
 }
