@@ -20,22 +20,31 @@ function healthDot(source) {
 }
 
 function rowHtml(s) {
-  const deletable = s.user_managed ? `<button type="button" class="btn btn-sm btn-danger" data-del="${escapeHtml(s.id)}">删除</button>` : '';
+  const deletable = s.user_managed ? `<button type="button" class="btn btn-sm btn-ghost" data-del="${escapeHtml(s.id)}">删除</button>` : '';
   const tier = s.tier || 'T3';
+  const healthText = sourceHealthLabel(s);
+  const healthClass = !s.enabled ? 'muted' : (s.last_status === 'ok' ? 'ok' : 'warn');
   return `<div class="src" data-id="${escapeHtml(s.id)}">
-    <span class="sdot ${healthDot(s)}" title="${escapeHtml(sourceHealthLabel(s))}"></span>
-    <span class="name">${escapeHtml(s.name || s.url || '未命名源')}</span>
-    <span class="badge">${escapeHtml(sourceKindLabel(s.kind))}</span>
-    <span class="badge">${escapeHtml(regionLabel(s.region))}</span>
-    <span class="badge">${escapeHtml(categoryLabel(s.category))}</span>
-    <span class="badge badge-tier-${tier}">${escapeHtml(tierLabel(tier))}</span>
-    <span class="acts">
-      <button type="button" class="btn btn-sm" data-toggle="${escapeHtml(s.id)}" data-next="${s.enabled ? 'false' : 'true'}">${s.enabled ? '停用' : '启用'}</button>
-      <button type="button" class="btn btn-sm" data-refresh="${escapeHtml(s.id)}">刷新</button>
-      <button type="button" class="btn btn-sm" data-edit="${escapeHtml(s.id)}">编辑</button>
-      ${deletable}
-    </span>
-    <span class="url">${escapeHtml(s.url || '')} · ${escapeHtml(sourceHealthLabel(s))}</span>
+    <span class="src-dot ${healthDot(s)}" title="${escapeHtml(healthText)}"></span>
+    <div class="src-body">
+      <div class="src-head">
+        <span class="src-name">${escapeHtml(s.name || s.url || '未命名源')}</span>
+        <span class="src-acts">
+          <button type="button" class="btn btn-sm btn-ghost" data-toggle="${escapeHtml(s.id)}" data-next="${s.enabled ? 'false' : 'true'}">${s.enabled ? '停用' : '启用'}</button>
+          <button type="button" class="btn btn-sm btn-ghost" data-refresh="${escapeHtml(s.id)}">刷新</button>
+          <button type="button" class="btn btn-sm btn-ghost" data-edit="${escapeHtml(s.id)}">编辑</button>
+          ${deletable}
+        </span>
+      </div>
+      <div class="src-meta">
+        <span class="badge badge-neutral">${escapeHtml(sourceKindLabel(s.kind))}</span>
+        <span class="badge badge-neutral">${escapeHtml(regionLabel(s.region))}</span>
+        <span class="badge badge-neutral">${escapeHtml(categoryLabel(s.category))}</span>
+        <span class="badge badge-tier-${tier}">${escapeHtml(tierLabel(tier))}</span>
+        <span class="src-health src-health-${healthClass}">${escapeHtml(healthText)}</span>
+      </div>
+      <div class="src-url" title="${escapeHtml(s.url || '')}">${escapeHtml(s.url || '')}</div>
+    </div>
   </div>`;
 }
 
@@ -61,12 +70,12 @@ export async function render(root) {
           ${regions.map(r => `<button type="button" class="chip" data-region="${r}" aria-pressed="${r === 'all'}">${r === 'all' ? '全部区域' : regionLabel(r)}</button>`).join('')}
         </div>
         <div class="u-row u-ml-sm">
-          <button type="button" class="btn btn-sm" data-bulk="true">批量启用</button>
-          <button type="button" class="btn btn-sm" data-bulk="false">批量停用</button>
+          <button type="button" class="btn btn-sm btn-secondary" data-bulk="true">批量启用</button>
+          <button type="button" class="btn btn-sm btn-secondary" data-bulk="false">批量停用</button>
         </div>
       </div>
       <div class="u-row">
-        <label class="btn btn-sm" for="opml-file">导入 OPML</label>
+        <label class="btn btn-sm btn-secondary" for="opml-file">导入 OPML</label>
         <input id="opml-file" type="file" accept=".opml,.xml,text/xml" hidden>
         <button type="button" class="btn btn-sm btn-primary" data-new>新增源</button>
       </div>
@@ -216,15 +225,21 @@ export async function render(root) {
       ruleList.innerHTML = `<p class="u-dim">暂无关注词。</p>`;
       return;
     }
-    ruleList.innerHTML = rules.map(r => `<div class="src" data-rule="${escapeHtml(r.rule_id)}">
-      <span class="name">${escapeHtml(r.query || '')}</span>
-      <span class="badge">重要度 ${r.importance ?? 3}</span>
-      <span class="badge">${r.enabled ? '启用中' : '已停用'}</span>
-      <span class="u-dim">${escapeHtml(String(r.created_at || '').slice(0, 10))}</span>
-      <span class="acts">
-        <button type="button" class="btn btn-sm" data-rule-toggle="${escapeHtml(r.rule_id)}" data-next="${r.enabled ? 'false' : 'true'}">${r.enabled ? '停用' : '启用'}</button>
-        <button type="button" class="btn btn-sm btn-danger" data-rule-del="${escapeHtml(r.rule_id)}">删除</button>
-      </span>
+    ruleList.innerHTML = rules.map(r => `<div class="src rule-row" data-rule="${escapeHtml(r.rule_id)}">
+      <div class="src-body">
+        <div class="src-head">
+          <span class="src-name">${escapeHtml(r.query || '')}</span>
+          <span class="src-acts">
+            <button type="button" class="btn btn-sm btn-ghost" data-rule-toggle="${escapeHtml(r.rule_id)}" data-next="${r.enabled ? 'false' : 'true'}">${r.enabled ? '停用' : '启用'}</button>
+            <button type="button" class="btn btn-sm btn-ghost" data-rule-del="${escapeHtml(r.rule_id)}">删除</button>
+          </span>
+        </div>
+        <div class="src-meta">
+          <span class="badge badge-neutral">重要度 ${r.importance ?? 3}</span>
+          <span class="badge ${r.enabled ? 'badge-safe' : 'badge-neutral'}">${r.enabled ? '启用中' : '已停用'}</span>
+          <span class="src-date">${escapeHtml(String(r.created_at || '').slice(0, 10))}</span>
+        </div>
+      </div>
     </div>`).join('');
   };
   const bindRules = () => {
