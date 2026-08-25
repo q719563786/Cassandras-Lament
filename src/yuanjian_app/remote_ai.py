@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import socket
+import threading
 import urllib.error
 import urllib.request
 import uuid
@@ -190,7 +191,7 @@ class OpenAIResponsesProvider:
         token_loader,
         endpoint: str = DEFAULT_ENDPOINT,
         transport=None,
-        timeout: int = 45,
+        timeout: int = 30,
     ):
         self.model = str(model or "").strip()
         if not self.model:
@@ -298,7 +299,7 @@ class DeepSeekChatProvider:
         token_loader,
         endpoint: str = "https://api.deepseek.com/chat/completions",
         transport=None,
-        timeout: int = 60,
+        timeout: int = 30,
     ):
         self.model = str(model or "").strip()
         if not self.model:
@@ -548,6 +549,24 @@ class JudgmentQueue:
         # P2: 远程研判时注入个人利益地图与历史预测的回调（cluster_id -> dict | None）。
         # 本地研判永不调用，保持"local never sees personal interests"隐私边界。
         self.personal_context_loader = personal_context_loader
+        # 关闭标志：退出时设置，立即中断任务处理，防止继续调用API
+        self._shutdown = threading.Event()
+
+    def shutdown(self):
+        """安全关闭：设置关闭标志，清空所有待处理的远程任务。
+        退出时必须先调用此方法，确保不会有新的API请求发出。"""
+        self._shutdown.set()
+        try:
+            with self.database.connect() as connection:
+                # 清空所有排队中的远程任务（包括重试、预算等待中的）
+                connection.execute(
+                    """
+                    DELETE FROM judgment_jobs
+                    WHERE provider!='local' AND status IN ('queued','retry','queued_budget')
+                    """
+                )
+        except Exception:
+            pass
 
     def enqueue(self, cluster_id: str, evidence_hash: str, provider: str) -> str:
         if provider not in self.providers:
@@ -626,6 +645,9 @@ class JudgmentQueue:
         return stored
 
     def run_due(self, limit: int = 5) -> dict:
+        # 关闭状态下不处理任何任务
+        if self._shutdown.is_set():
+            return {"succeeded": 0, "deferred": 0, "failed": 0, "shutdown": True}
         now = self.now().astimezone(timezone.utc)
         with self.database.connect() as connection:
             rows = connection.execute(
@@ -640,10 +662,16 @@ class JudgmentQueue:
             used = self._remote_used_today(connection, now)
         summary = {"succeeded": 0, "deferred": 0, "failed": 0}
         for row in rows:
+            # 每个任务处理前检查关闭标志
+            if self._shutdown.is_set():
+                break
             job = dict(row)
             provider = self.providers.get(job["provider"])
             if provider is None:
                 continue
+            # 远程任务在发起请求前再次检查关闭标志
+            if job["provider"] != "local" and self._shutdown.is_set():
+                break
             if job["provider"] != "local" and used >= self.daily_budget:
                 tomorrow = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
                 with self.database.connect() as connection:

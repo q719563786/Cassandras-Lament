@@ -487,36 +487,39 @@ class CognitionController:
         level = str(cluster.get("evidence_level") or "E1")
         return level in ("E2", "E3", "E4")
 
-    def _last_remote_finished_at(self):
-        """查询最近一次成功的远程研判完成时间，用于频率控制。"""
+    def _last_remote_attempt_at(self):
+        """查询最近一次远程研判尝试完成时间（无论成功失败），用于冷却控制。"""
         try:
             with self.database.connect() as connection:
                 row = connection.execute(
                     """
-                    SELECT finished_at FROM judgment_jobs
-                    WHERE status='succeeded' AND provider!='local'
-                    ORDER BY finished_at DESC LIMIT 1
+                    SELECT MAX(finished_at) as last_at FROM judgment_jobs
+                    WHERE provider!='local' AND finished_at IS NOT NULL
                     """
                 ).fetchone()
-            if not row or not row["finished_at"]:
+            if not row or not row["last_at"]:
                 return None
-            return datetime.fromisoformat(str(row["finished_at"]).replace("Z", "+00:00"))
+            return datetime.fromisoformat(str(row["last_at"]).replace("Z", "+00:00"))
         except (ValueError, TypeError, OSError):
             return None
 
     def _remote_due(self) -> bool:
-        """根据用户设置的频率判断是否应该进行远程调用。
-        - low：每天本地21点后跑一次，当天跑过则不再跑
-        - medium：距上次远程 >= 6 小时
+        """根据用户设置的频率判断现在是否可以启动一轮远程分析。
+        闸门打开后不限批量，一次性处理所有待远程事件（受日预算30次兜底保护）。
+        - low：每天21点后跑一次，当天跑过则不再跑
+        - medium：距上次远程 >= 6 小时（默认）
         - high：距上次远程 >= 1 小时
-        远程未启用时返回 False（由调用方额外判断）。
+        远程未启用时返回 False。
         """
         settings = self.ai_settings.get()
         if not settings.get("enabled"):
             return False
-        frequency = settings.get("frequency", "medium")
+        frequency = settings.get("frequency")
+        # frequency为None或无效值时默认medium
+        if not frequency or frequency not in ("low", "medium", "high"):
+            frequency = "medium"
         local_now = self.now().astimezone()
-        last = self._last_remote_finished_at()
+        last = self._last_remote_attempt_at()
         if frequency == "low":
             # 每天21点后跑一次，当天已跑过则不再跑
             if local_now.hour < 21:
@@ -533,6 +536,17 @@ class CognitionController:
         elapsed = (self.now() - last).total_seconds()
         return elapsed >= interval_hours * 3600
 
+    def _downgrade_pending_remote_jobs(self):
+        """关闸时清理排队中的远程任务，让它们在本轮中以本地方式重新入队处理。
+        这样可以避免关闸期间仍有远程任务被run_due执行。"""
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                DELETE FROM judgment_jobs
+                WHERE provider!='local' AND status IN ('queued','retry','queued_budget')
+                """
+            )
+
     def _should_notify(self, row) -> bool:
         """False for judgments older than the bootstrap cutoff.
 
@@ -547,22 +561,23 @@ class CognitionController:
     def process_once(self):
         backfill = self.cognition.backfill_unclustered(limit=1000)
         remote_provider = self._provider_name()
-        # 频率控制：远程启用且到达频率间隔时才允许远程调用，否则全部走本地
+        # 判断本轮是否允许远程调用
         remote_enabled = remote_provider != "local" and self._remote_due()
+        # 关闸时清理掉排队中的远程任务，防止它们偷偷被run_due执行
+        if not remote_enabled:
+            self._downgrade_pending_remote_jobs()
         clusters = [
             item for item in self.cognition.list_clusters(limit=1000) if item["needs_judgment"]
         ]
-        # provider 透传给 summary 供诊断展示；空库（无 cluster）时回退到 remote_provider
-        # 的语义值，保持"本次循环实际会用的 provider"口径一致。
-        provider = remote_provider if not remote_enabled else "local"
         for cluster in clusters:
-            # 稿C v2 选择性调用：按事件等级决定走远程还是本地模板，
-            # 把每日预算（30）花在高决策价值的事件上，低等级走本地并标「模板推断」。
-            provider = remote_provider if (remote_enabled and self._should_use_remote(cluster)) else "local"
+            # 开闸时E2+走远程，E1走本地；关闸时全部走本地
+            use_remote = remote_enabled and self._should_use_remote(cluster)
+            provider = remote_provider if use_remote else "local"
             self.judgment_queue.enqueue(
                 cluster["cluster_id"], cluster["evidence_hash"], provider
             )
-        judgments = self.judgment_queue.run_due(limit=30)
+        # 开闸时不限批量（上限100，日预算30次兜底保护）；关闸时只处理本地任务
+        judgments = self.judgment_queue.run_due(limit=100)
         mapped = 0
         notified = 0
         with self.database.connect() as connection:

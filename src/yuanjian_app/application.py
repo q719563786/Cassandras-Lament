@@ -84,6 +84,7 @@ class Application:
     external: object
     scheduler: object
     desktop: object
+    queue: object = None
 
     @classmethod
     def create(cls, data_root, desktop=None, legacy_path=None):
@@ -198,6 +199,7 @@ class Application:
             external=external,
             scheduler=scheduler,
             desktop=desktop,
+            queue=queue,
         )
 
     @property
@@ -234,14 +236,21 @@ class Application:
         except KeyboardInterrupt:
             return 0
         finally:
+            # 关键：先立即停止任务队列，清空所有待处理远程任务，防止退出后继续调用API
+            if self.queue:
+                self.queue.shutdown()
+            # 停止调度器，不再发起新的认知扫描
+            self.scheduler.stop(timeout=3)
+            # 关闭HTTP服务器
             self.server.shutdown()
-            server_thread.join(timeout=5)
-            self.scheduler.stop()
+            server_thread.join(timeout=3)
             self.server.server_close()
         return 0
 
     def close(self):
         """Close a server that has not entered or has left its serve loop."""
+        if self.queue:
+            self.queue.shutdown()
         self.scheduler.stop()
         self.server.server_close()
 

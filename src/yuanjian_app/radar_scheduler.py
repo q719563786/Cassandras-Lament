@@ -203,7 +203,9 @@ class RadarScheduler:
                 next_external = current + self.poll_seconds
             if self.cognition is not None and current >= next_cognition:
                 self.run_cognition_once()
-                next_cognition = current + 60
+                # 认知扫描间隔改为5分钟（300秒），远程调用频率由cognition._remote_due()严格控制
+                # 避免每分钟扫描导致频繁入队和无效API调用
+                next_cognition = current + 300
             if self.cognition is not None and current >= next_trends:
                 self.run_trends_once()
                 next_trends = current + 3600
@@ -237,3 +239,4 @@ class RadarScheduler:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=timeout)
+            self._thread = None
