@@ -325,6 +325,18 @@ class Database:
                     ON feedback_events(applied_json, occurred_at);
                 CREATE INDEX IF NOT EXISTS idx_external_sources_region
                     ON external_sources(region);
+                CREATE INDEX IF NOT EXISTS idx_event_clusters_needs_judgment
+                    ON event_clusters(needs_judgment);
+                CREATE INDEX IF NOT EXISTS idx_event_clusters_status_last_seen
+                    ON event_clusters(status, last_seen_at);
+                CREATE INDEX IF NOT EXISTS idx_event_clusters_first_seen
+                    ON event_clusters(first_seen_at);
+                CREATE INDEX IF NOT EXISTS idx_judgment_jobs_status_next_attempt
+                    ON judgment_jobs(status, next_attempt_at);
+                CREATE INDEX IF NOT EXISTS idx_personal_impacts_alert_user_muted
+                    ON personal_impacts(alert_level, user_label, muted_until);
+                CREATE INDEX IF NOT EXISTS idx_notification_log_status_created
+                    ON notification_log(status, created_at);
                 CREATE TRIGGER IF NOT EXISTS forecast_versions_no_update
                 BEFORE UPDATE ON forecast_versions BEGIN
                     SELECT RAISE(ABORT, 'forecast versions are immutable');

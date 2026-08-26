@@ -36,7 +36,7 @@ class SignalService:
         why = self._why(domains, interest_ids)
         action = self._action(alert_level, candidate)
         item = {
-            "signal_id": f"S-{uuid4().hex[:12]}",
+            "signal_id": f"S-{uuid4().hex}",
             "received_at": datetime.now(timezone.utc).isoformat(),
             "occurred_at": str(occurred_at or ""),
             "source_type": str(source_type or "manual"),
@@ -74,13 +74,14 @@ class SignalService:
             )
         return item
 
-    def list_signals(self, status=None):
+    def list_signals(self, status=None, limit=500):
         sql = "SELECT * FROM signals"
         params = ()
         if status:
             sql += " WHERE status = ?"
             params = (status,)
-        sql += " ORDER BY received_at DESC, signal_id DESC"
+        sql += " ORDER BY received_at DESC, signal_id DESC LIMIT ?"
+        params = params + (max(1, min(int(limit), 5000)),)
         with self.database.connect() as connection:
             rows = connection.execute(sql, params).fetchall()
         result = []

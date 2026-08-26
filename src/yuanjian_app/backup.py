@@ -97,8 +97,6 @@ class BackupService:
 
 def read_backup_setting(database, *, default_hour=3) -> dict:
     """读取备份设置（runtime_state.settings.backup）。"""
-    import sqlite3  # noqa: F401  保持导入局部性，避免循环依赖
-
     with database.connect() as connection:
         row = connection.execute(
             "SELECT value_json FROM runtime_state WHERE state_key='settings.backup'"

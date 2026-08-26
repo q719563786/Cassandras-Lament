@@ -414,14 +414,11 @@ class DeepSeekChatProvider:
             try:
                 decoded = json.loads(extracted)
             except json.JSONDecodeError:
-                # 尝试修复常见 JSON 格式问题
+                # 仅修复 trailing commas（安全，不会破坏字符串内容）；
+                # 不做单引号全局替换——会破坏含撇号的字符串值（如 don't）。
                 try:
                     import re
-                    fixed = extracted
-                    # 修复单引号
-                    fixed = re.sub(r"(?<!\\)'", '"', fixed)
-                    # 修复 trailing commas
-                    fixed = re.sub(r",\s*([}\]])", r"\1", fixed)
+                    fixed = re.sub(r",\s*([}\]])", r"\1", extracted)
                     decoded = json.loads(fixed)
                 except (json.JSONDecodeError, Exception):
                     raise InvalidJudgmentError("DeepSeek输出不是有效的研判JSON")

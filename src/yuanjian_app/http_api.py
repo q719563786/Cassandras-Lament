@@ -591,7 +591,7 @@ def create_server(host, port, token, services):
             except (ValueError, json.JSONDecodeError) as error:
                 self._error(400, "invalid_request", str(error))
             except KeyError:
-                self._error(404, "forecast_not_found", "预测不存在")
+                self._error(404, "not_found", "对象不存在")
 
         def do_PUT(self):
             path = urlparse(self.path).path

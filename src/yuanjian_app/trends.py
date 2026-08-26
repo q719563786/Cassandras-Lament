@@ -12,6 +12,8 @@ MINIMUM_HISTORY_HOURS = 7 * 24
 MAXIMUM_BASELINE_DAYS = 30
 MINIMUM_CURRENT_SAMPLE = 5
 SURGE_RATIO = 2.0
+# 查询下限：最大基线窗口(30天) + 最大趋势窗口(30天) + 1天余量，避免全表扫描
+_LOOKBACK_DAYS = MAXIMUM_BASELINE_DAYS + max(WINDOW_HOURS) // 24 + 1
 
 
 def _iso(value: datetime) -> str:
@@ -27,14 +29,15 @@ class TrendService:
         self.database = database
 
     def _events(self, at):
+        lower = _iso(at - timedelta(days=_LOOKBACK_DAYS))
         with self.database.connect() as connection:
             rows = connection.execute(
                 """
                 SELECT first_seen_at,categories_json FROM event_clusters
-                WHERE status='active' AND first_seen_at<=?
+                WHERE status='active' AND first_seen_at<=? AND first_seen_at>=?
                 ORDER BY first_seen_at
                 """,
-                (_iso(at),),
+                (_iso(at), lower),
             ).fetchall()
         events = []
         for row in rows:

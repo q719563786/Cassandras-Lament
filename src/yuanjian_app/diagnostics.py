@@ -8,7 +8,10 @@ db_bytes / last_backup / backup_enabled / last_run_ms / runtime
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
+
+_logger = logging.getLogger(__name__)
 
 
 class DiagnosticsService:
@@ -47,7 +50,7 @@ class DiagnosticsService:
                     1 for item in sources if item.get("enabled", True)
                 )
             except Exception:
-                pass
+                _logger.warning("诊断面板：读取信源列表失败", exc_info=True)
         if self.ai_settings is not None:
             try:
                 settings = self.ai_settings.get()

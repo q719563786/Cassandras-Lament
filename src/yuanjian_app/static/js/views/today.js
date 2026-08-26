@@ -252,7 +252,7 @@ export async function render(root) {
     // 检查是否有interests和sources
     const [interestsData, sourcesData] = await Promise.all([
       api('/api/interests').catch(() => ({ objects: [] })),
-      api('/api/external-sources').catch(() => [])
+      api('/api/external/sources').catch(() => [])
     ]);
     const hasInterests = (interestsData?.objects || []).some(o => o.status === 'active');
     const hasSources = Array.isArray(sourcesData) && sourcesData.some(s => s.enabled);

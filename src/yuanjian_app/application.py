@@ -114,10 +114,9 @@ class Application:
         queue = JudgmentQueue(
             database,
             providers={"local": local_provider},
-            bundle_loader=lambda cluster_id: build_public_bundle(
-                cognition.get_cluster(cluster_id),
-                cognition.get_cluster(cluster_id)["items"],
-            ),
+            bundle_loader=lambda cluster_id: (
+                lambda cluster: build_public_bundle(cluster, cluster["items"])
+            )(cognition.get_cluster(cluster_id)),
             local_provider=local_provider,
             personal_context_loader=_make_personal_context_loader(interests, forecasts),
         )
@@ -219,7 +218,8 @@ class Application:
                     import logging
                     logging.getLogger(__name__).info("清理了 %d 条自动确认垃圾预测", purged)
             except Exception:
-                pass
+                import logging
+                logging.getLogger(__name__).warning("启动时清理垃圾预测失败", exc_info=True)
         threading.Thread(target=_purge_garbage_startup, name="YuanJianPurge", daemon=True).start()
         server_thread = threading.Thread(
             target=self.server.serve_forever,

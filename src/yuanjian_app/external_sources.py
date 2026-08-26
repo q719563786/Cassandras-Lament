@@ -231,8 +231,15 @@ def _link(element):
 
 
 def parse_feed(body, source_id, source_name, endpoint=""):
+    # 防御 XML 炸弹：限制实体展开文本总量（Python 3.10+），
+    # 避免恶意 RSS 用 billion laughs 攻击耗尽内存。
+    parser = ET.XMLParser()
     try:
-        root = ET.fromstring(body)
+        parser.entity_expansion_text_limit = 100_000
+    except AttributeError:
+        pass
+    try:
+        root = ET.fromstring(body, parser=parser)
     except ET.ParseError as error:
         raise FetchError("parse_error", f"RSS/Atom解析失败：{error}") from error
     items = []

@@ -67,7 +67,7 @@ class InterestService:
         if privacy not in {"P1", "P2", "P3"}:
             raise ValueError("隐私级别无效")
         item = {
-            "object_id": f"I-{uuid4().hex[:12]}",
+            "object_id": f"I-{uuid4().hex}",
             "name": name,
             "category": category,
             "importance": importance,
@@ -107,7 +107,7 @@ class InterestService:
             if count != 2:
                 raise ValueError("利益对象不存在")
             item = {
-                "link_id": f"L-{uuid4().hex[:12]}",
+                "link_id": f"L-{uuid4().hex}",
                 "source_id": source_id,
                 "target_id": target_id,
                 "relationship": relationship,

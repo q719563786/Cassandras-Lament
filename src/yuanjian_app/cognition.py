@@ -990,14 +990,23 @@ class CognitionController:
                     domains = []
                 if event["action"] == "false_positive":
                     for domain in domains:
+                        # 精确匹配域名：完整主机名 或 子域名后缀，避免子串误伤
+                        # （如 "gov.cn" 不应匹配 "notgov.cn"）
+                        patterns = (
+                            f"%://{domain}/%",
+                            f"%://{domain}",
+                            f"%.{domain}/%",
+                            f"%.{domain}",
+                        )
+                        placeholders = ",".join("?" * len(patterns))
                         updated = connection.execute(
-                            """
+                            f"""
                             UPDATE external_sources
                             SET reliability_weight=MAX(0.2, reliability_weight-0.05)
-                            WHERE endpoint LIKE ?
+                            WHERE (endpoint LIKE {placeholders.replace(',', ' OR endpoint LIKE ')})
                                 AND user_managed=0
                             """,
-                            (f"%{domain}%",),
+                            patterns,
                         )
                         if updated.rowcount:
                             changes["source_weight"].append(domain)
