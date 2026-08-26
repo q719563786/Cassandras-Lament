@@ -459,8 +459,8 @@ class ForecastService:
           - due_this_week: open predictions whose window ends within 7 days
         """
         now = now or datetime.now(timezone.utc)
-        now_text = _iso(now)
-        horizon_text = _iso(now + timedelta(days=7))
+        today_str = now.date().isoformat()
+        week_later_str = (now + timedelta(days=7)).date().isoformat()
         with self.database.connect() as connection:
             binary_rows = connection.execute(
                 """
@@ -475,14 +475,14 @@ class ForecastService:
                 SELECT forecast_id, window_end FROM forecasts
                 WHERE status='open' AND window_end >= ? AND window_end <= ?
                 """,
-                (now_text, horizon_text),
+                (today_str, week_later_str),
             ).fetchall()
             overdue_rows = connection.execute(
                 """
                 SELECT forecast_id FROM forecasts
                 WHERE status='open' AND window_end < ?
                 """,
-                (now_text,),
+                (today_str,),
             ).fetchall()
         confident = [r for r in binary_rows if float(r["probability"]) >= 0.5]
         hits = [r for r in confident if r["outcome"] == "occurred"]
@@ -496,12 +496,12 @@ class ForecastService:
         }
 
     def list_overdue(self, now=None):
-        """P3: 返回已过期但未结算的预测（status='open' 且 window_end < now）。
+        """P3: 返回已过期但未结算的预测（status='open' 且 window_end < 今天）。
 
         供前端提醒用户"有N条预测到期该结算了"，驱动预测闭环。
         """
         now = now or datetime.now(timezone.utc)
-        now_text = _iso(now)
+        today_str = now.date().isoformat()
         with self.database.connect() as connection:
             rows = connection.execute(
                 """
@@ -517,7 +517,7 @@ class ForecastService:
                 WHERE f.status='open' AND f.window_end < ?
                 ORDER BY f.window_end
                 """,
-                (now_text,),
+                (today_str,),
             ).fetchall()
         result = []
         for row in rows:

@@ -177,7 +177,7 @@ class ImpactService:
             "supporting_evidence": "\n".join(judgment.get("supporting_source_ids", [])),
             "opposing_evidence": "\n".join(judgment.get("uncertainties", [])),
             "falsification": "\n".join(judgment.get("down_triggers", [])),
-            "recommended_action": "继续收集执行证据，系统已自动确认并进入预测账本。",
+            "recommended_action": "请在校准面板确认概率后记录为正式预测，到期后结算复盘。",
         }
 
     def _category_penalties(self):
@@ -443,10 +443,9 @@ class ImpactService:
         candidate = self.candidate_forecast(impact_id)
         if candidate.get("confirmed_forecast_id"):
             return self.forecast_service.get_forecast(candidate["confirmed_forecast_id"])
-        forecast_id = "F-CAND-" + impact_id.removeprefix("P-")[:20].upper()
+        # 使用正常的F-前缀格式，不传入forecast_id让create_forecast自动生成
         result = self.forecast_service.create_forecast(
             {
-                "forecast_id": forecast_id,
                 "title": candidate["title"],
                 "category": self._impact_category(impact_id),
                 "resolution_criteria": candidate["resolution_criteria"],
