@@ -505,36 +505,20 @@ class CognitionController:
 
     @staticmethod
     def _is_peak_hours(now) -> bool:
-        """判断是否为DeepSeek API高峰时段（北京时间，UTC+8）。
-        高峰：周一至周五 9:00-12:00、14:00-18:00（价格翻倍）
-        空闲：其余所有时间（周末全天、工作日凌晨/午间/夜间，价格半价）
-        """
-        bj_tz = timezone(timedelta(hours=8))
-        bj_now = now.astimezone(bj_tz)
-        # 周末（周六=5, 周日=6）全天非高峰
-        if bj_now.weekday() >= 5:
-            return False
-        hour = bj_now.hour
-        # 工作日高峰：9:00-12:00 和 14:00-18:00
-        if (9 <= hour < 12) or (14 <= hour < 18):
-            return True
+        """已停用：原为 DeepSeek 高峰时段（工作日9-12/14-18北京时间）省钱限制。
+        切换到免费 API（如 Agnes AI）后无需限制，保留方法仅为向后兼容。"""
         return False
 
     def _remote_due(self) -> bool:
         """根据用户设置的频率判断现在是否可以启动远程分析。
         闸门打开后，每轮（5分钟）最多处理3个远程任务，严格控制API消耗。
-        强制规则：DeepSeek高峰时段（工作日9-12/14-18北京时间）禁止远程调用，
-        只在空闲时段（半价）调用，节省一半API费用。
-        - low：每天21:00~次日02:00为夜间汇总窗口（已在空闲时段内），分批处理
+        - low：每天21:00~次日02:00为夜间汇总窗口，分批处理
         - medium：距上次远程任务完成 >= 6小时，开闸后分批处理
         - high：距上次远程任务完成 >= 1小时，开闸后分批处理
         远程未启用时返回 False。
         """
         settings = self.ai_settings.get()
         if not settings.get("enabled"):
-            return False
-        # 强制：高峰时段禁止远程AI调用（半价时段才用）
-        if self._is_peak_hours(self.now()):
             return False
         frequency = settings.get("frequency")
         if not frequency or frequency not in ("low", "medium", "high"):

@@ -123,6 +123,9 @@ export async function render(root) {
           <input id="ai-model" name="model" type="text" placeholder="如 gpt-4o / claude-3-5-sonnet" value="${escapeHtml(String(ai?.model || ''))}"></div>
           <div class="field u-mb-md"><label for="ai-key">API 密钥</label>
           <input id="ai-key" name="token" type="password" placeholder="留空 = 不修改已存密钥"></div>
+          <div class="u-row u-mb-md">
+            <button type="button" class="btn btn-sm btn-secondary" data-ai-preset-agnes>一键填入 Agnes AI（免费）</button>
+          </div>
           <p class="u-dim u-mt-sm" data-ai-status></p>
           <div class="u-end"><button type="submit" class="btn btn-primary">保存</button></div>
         </form>
@@ -208,6 +211,15 @@ export async function render(root) {
   aiToggle?.addEventListener('click', () => {
     const next = aiToggle.getAttribute('aria-checked') !== 'true';
     aiToggle.setAttribute('aria-checked', String(next));
+  });
+
+  // Agnes AI 快捷预设：填入端点和模型，用户只需填 API 密钥
+  root.querySelector('[data-ai-preset-agnes]')?.addEventListener('click', () => {
+    const endpointInput = root.querySelector('#ai-endpoint');
+    const modelInput = root.querySelector('#ai-model');
+    if (endpointInput) endpointInput.value = 'https://apihub.agnes-ai.com/v1/chat/completions';
+    if (modelInput) modelInput.value = 'agnes-2.0-flash';
+    showToast('已填入 Agnes AI 地址和模型，请输入 API 密钥后保存');
   });
 
   // 频率选择按钮：点击切换高亮，提交时读取

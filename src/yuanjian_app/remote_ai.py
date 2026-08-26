@@ -6,6 +6,7 @@ import ipaddress
 import json
 import socket
 import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -27,7 +28,43 @@ from .judgments import (
 
 
 DEFAULT_ENDPOINT = "https://api.openai.com/v1/responses"
-DAILY_REMOTE_BUDGET = 30
+DAILY_REMOTE_BUDGET = 100  # 免费 API 日预算放宽，原 30 为付费 DeepSeek 设计
+
+# Agnes AI（免费 OpenAI 兼容接口）默认配置
+AGNES_AI_BASE_URL = "https://apihub.agnes-ai.com/v1"
+AGNES_AI_CHAT_ENDPOINT = f"{AGNES_AI_BASE_URL}/chat/completions"
+AGNES_AI_DEFAULT_MODEL = "agnes-2.0-flash"
+AGNES_AI_RPM_LIMIT = 20  # 免费版实际可执行 RPM
+
+
+class RateLimiter:
+    """滑动窗口频率限制器：确保60秒窗口内不超过 rpm 个请求。
+
+    用于 Agnes AI 等有明确 RPM 限制的免费接口，超出时阻塞等待而非丢弃。
+    线程安全，可被多个 provider 共享。
+    """
+
+    def __init__(self, rpm: int = 20):
+        self.rpm = max(1, int(rpm))
+        self._timestamps: list[float] = []
+        self._lock = threading.Lock()
+
+    def acquire(self):
+        """获取一个请求许可；若当前窗口已满，阻塞到最老请求过期。"""
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                self._timestamps = [t for t in self._timestamps if now - t < 60.0]
+                if len(self._timestamps) < self.rpm:
+                    self._timestamps.append(now)
+                    return
+                wait = 60.0 - (now - self._timestamps[0]) + 0.05
+            if wait > 0:
+                time.sleep(min(wait, 5.0))
+
+
+# 模块级共享限流器：Agnes AI 免费版 20 RPM
+_agnes_ai_limiter = RateLimiter(AGNES_AI_RPM_LIMIT)
 
 
 def _iso(value):
@@ -152,6 +189,9 @@ def _result_schema():
 
 def _default_transport(url, headers, body, timeout):
     host = urlsplit(url).hostname
+    # Agnes AI 免费版有 20 RPM 限制，发请求前先获取许可
+    if host and "agnes-ai.com" in host.casefold():
+        _agnes_ai_limiter.acquire()
     try:
         addresses = {
             result[4][0]
@@ -510,18 +550,15 @@ class AiSettingsService:
             return None
         endpoint = settings["endpoint"]
         model = settings["model"]
-        # DeepSeek 只支持 Chat Completions，不支持 Responses API；
-        # 只有当endpoint是OpenAI Responses格式(/v1/responses)时才自动修正为Chat Completions。
-        # 用户显式设置的自定义代理/端点不会被覆盖。
-        if "deepseek.com" in endpoint.casefold() and endpoint.rstrip("/").endswith("/v1/responses"):
+        # 判断是否为 Chat Completions 格式端点（/chat/completions），
+        # 包括 DeepSeek、Agnes AI 等 OpenAI 兼容接口。
+        # 这类接口不支持 OpenAI Responses API（/v1/responses），必须用 Chat 格式。
+        is_chat_endpoint = endpoint.rstrip("/").endswith("/chat/completions")
+        is_deepseek = "deepseek.com" in endpoint.casefold()
+        if is_deepseek and endpoint.rstrip("/").endswith("/v1/responses"):
             endpoint = "https://api.deepseek.com/chat/completions"
-            return DeepSeekChatProvider(
-                endpoint=endpoint,
-                model=model,
-                token_loader=self.secret_store.load,
-            )
-        if "deepseek.com" in endpoint.casefold():
-            # 用户显式设置了deepseek端点（非默认responses格式），使用Chat格式
+            is_chat_endpoint = True
+        if is_chat_endpoint or is_deepseek:
             return DeepSeekChatProvider(
                 endpoint=endpoint,
                 model=model,

@@ -176,13 +176,14 @@ class JudgmentQueueTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def queue(self, providers):
+    def queue(self, providers, daily_budget=30):
         return JudgmentQueue(
             self.database,
             providers=providers,
             bundle_loader=lambda cluster_id: bundle(),
             local_provider=LocalHeuristicProvider(),
             now=self.clock,
+            daily_budget=daily_budget,
         )
 
     def test_enqueue_deduplicates_same_cluster_evidence_and_provider(self):
