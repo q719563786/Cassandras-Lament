@@ -281,6 +281,20 @@ class ImpactService:
                         now,
                     ),
                 )
+            # P1: L4高影响候选自动确认——用概率区间中值映射到最近固定档位；
+            # L3及以下留待用户校准，避免中低影响事件被批量自动确认。
+            if alert == "L4" and not candidate.get("confirmed_forecast_id"):
+                try:
+                    midpoint = (
+                        float(candidate.get("probability_low", 0.5))
+                        + float(candidate.get("probability_high", 0.7))
+                    ) / 2
+                    nearest = _nearest_probability(midpoint)
+                    forecast = self.confirm_candidate(impact_id, nearest)
+                    candidate["confirmed_forecast_id"] = forecast["forecast_id"]
+                    candidate["confirmed_probability"] = nearest
+                except Exception:
+                    pass  # 自动确认失败不阻断映射流程，候选仍保留为待确认状态
             results.append(
                 {
                     "impact_id": impact_id,

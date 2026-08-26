@@ -175,7 +175,7 @@ class ImpactServiceTests(unittest.TestCase):
         the 《登高望远》 stakeholder/constraint/least-resistance/counter/
         leading-indicator analysis. pending_candidates must surface the
         gyw sub-structure stored in the judgment's content_json."""
-        cluster_id, judgment_id = self.add_judgment("gyw", "E3")
+        cluster_id, judgment_id = self.add_judgment("gyw", "E1")
         self.service.map_judgment(cluster_id, judgment_id)
 
         candidates = self.service.pending_candidates()

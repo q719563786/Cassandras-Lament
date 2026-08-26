@@ -245,7 +245,7 @@ class JudgmentQueueTests(unittest.TestCase):
         for index in range(31):
             queue.enqueue(f"C-{index}", f"hash-{index}", "remote")
 
-        queue.run_due(limit=40)
+        queue.run_due(limit=40, remote_limit=40)
 
         self.assertEqual(provider.calls, 30)
         with self.database.connect() as connection:
@@ -255,7 +255,7 @@ class JudgmentQueueTests(unittest.TestCase):
         self.assertEqual(deferred, 1)
 
         self.clock.value = datetime(2026, 8, 12, 0, 1, tzinfo=timezone.utc)
-        queue.run_due(limit=40)
+        queue.run_due(limit=40, remote_limit=40)
         self.assertEqual(provider.calls, 31)
 
 

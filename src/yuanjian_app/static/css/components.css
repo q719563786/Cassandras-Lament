@@ -80,6 +80,11 @@
 .badge-amber { background: var(--amber-bg); color: var(--amber); }
 .badge-neutral { background: rgba(255,255,255,0.05); color: var(--text-muted); }
 
+/* 研判来源徽标（sourceBadge 三态） */
+.judgment-remote { background: var(--amber-bg); color: var(--amber); }
+.judgment-template { background: var(--blue-bg); color: var(--blue); }
+.judgment-muted { background: rgba(255,255,255,0.04); color: var(--text-muted); }
+
 /* === KPI 数字 === */
 .kpi-row {
   display: flex;

@@ -314,6 +314,7 @@ class FakeElement {{
   querySelectorAll() {{ return []; }}
   getElementsByTagName() {{ return []; }}
   click() {{ return null; }}
+  remove() {{ return null; }}
 }}
 class FakeLocation {{
   constructor() {{ this.href = 'http://localhost/'; this.search = ''; this.hash = '#/today'; }}
@@ -460,6 +461,7 @@ class FakeElement {{
   }}
   getElementsByTagName() {{ return []; }}
   click() {{ }}
+  remove() {{ }}
 }}
 class FakeLocation {{
   constructor(h) {{ this._hash = h || '#/today'; }}

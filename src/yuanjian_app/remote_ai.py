@@ -658,7 +658,7 @@ class JudgmentQueue:
         # 关闭状态下不处理任何任务
         if self._shutdown.is_set():
             return {"succeeded": 0, "deferred": 0, "failed": 0, "shutdown": True}
-        MAX_REMOTE_RETRIES = 2  # 远程任务最多重试2次，超过降级本地
+        MAX_REMOTE_RETRIES = 4  # 远程任务最多重试3次（指数退避15/30/60分钟），超过降级本地
         now = self.now().astimezone(timezone.utc)
         with self.database.connect() as connection:
             rows = connection.execute(
@@ -726,52 +726,23 @@ class JudgmentQueue:
                     )
                 summary["succeeded"] += 1
             except InvalidJudgmentError:
-                # API已调用但返回格式不对，同样消耗token
+                # 格式错误不是瞬态错误，重试无意义——立即降级本地处理，不重试
                 attempts = int(job["attempts"]) + 1
                 if is_remote:
                     used += 1
                     remote_done += 1
-                    if attempts < MAX_REMOTE_RETRIES:
-                        # 还有重试机会：指数退避后重试，不做本地fallback
-                        delay = min(120, 15 * (2 ** (attempts - 1)))
-                        next_attempt = _iso(now + timedelta(minutes=delay))
-                        with self.database.connect() as connection:
-                            connection.execute(
-                                """
-                                UPDATE judgment_jobs SET status='retry',attempts=?,request_chars=?,
-                                    next_attempt_at=?,last_error='invalid_output' WHERE job_id=?
-                                """,
-                                (attempts, request_chars, next_attempt, job["job_id"]),
-                            )
-                        summary["failed"] += 1
-                        continue
-                    # 超过重试次数：降级为本地处理
-                    fallback = self.local_provider.analyze(bundle)
-                    with self.database.connect() as connection:
-                        self._persist_judgment(connection, job, "local", fallback, now)
-                        connection.execute(
-                            """
-                            UPDATE judgment_jobs SET status='invalid_output_fallback_local',attempts=?,
-                                request_chars=?,finished_at=?,last_error='invalid_output_fallback'
-                            WHERE job_id=?
-                            """,
-                            (attempts, request_chars, _iso(now), job["job_id"]),
-                        )
-                    summary["failed"] += 1
-                else:
-                    # 本地provider理论上不应该抛此异常，防御性兜底
-                    fallback = self.local_provider.analyze(bundle)
-                    with self.database.connect() as connection:
-                        self._persist_judgment(connection, job, "local", fallback, now)
-                        connection.execute(
-                            """
-                            UPDATE judgment_jobs SET status='invalid_output',attempts=?,
-                                request_chars=?,finished_at=?,last_error='invalid_output'
-                            WHERE job_id=?
-                            """,
-                            (attempts, request_chars, _iso(now), job["job_id"]),
-                        )
-                    summary["failed"] += 1
+                fallback = self.local_provider.analyze(bundle)
+                with self.database.connect() as connection:
+                    self._persist_judgment(connection, job, "local", fallback, now)
+                    connection.execute(
+                        """
+                        UPDATE judgment_jobs SET status='invalid_output',attempts=?,
+                            request_chars=?,finished_at=?,last_error='invalid_output'
+                        WHERE job_id=?
+                        """,
+                        (attempts, request_chars, _iso(now), job["job_id"]),
+                    )
+                summary["failed"] += 1
             except RemoteProviderError as error:
                 # API调用失败（网络/认证等），token可能已消耗也可能没有
                 attempts = int(job["attempts"]) + 1
@@ -788,14 +759,15 @@ class JudgmentQueue:
                             """,
                             (attempts, request_chars, _iso(now), error.kind, job["job_id"]),
                         )
-                        # 同时暂停所有其他排队中的远程任务，防止继续浪费预算计数
+                        # 同时暂停同一 provider 下其他排队中的任务，
+                        # 避免不同 provider 之间互相影响（如 auth provider 出错不应暂停 rate/invalid provider）
                         connection.execute(
                             """
                             UPDATE judgment_jobs SET status='paused_auth',last_error='auth_paused'
-                            WHERE provider!='local' AND status IN ('queued','retry','queued_budget')
+                            WHERE provider=? AND status IN ('queued','retry','queued_budget')
                               AND job_id!=?
                             """,
-                            (job["job_id"],),
+                            (job["provider"], job["job_id"]),
                         )
                     summary["failed"] += 1
                 elif is_remote and attempts < MAX_REMOTE_RETRIES:
