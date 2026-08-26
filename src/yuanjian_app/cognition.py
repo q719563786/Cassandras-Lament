@@ -509,9 +509,7 @@ class CognitionController:
         高峰：周一至周五 9:00-12:00、14:00-18:00（价格翻倍）
         空闲：其余所有时间（周末全天、工作日凌晨/午间/夜间，价格半价）
         """
-        import datetime as _dt
-        # 转换为北京时间（UTC+8）
-        bj_tz = _dt.timezone(_dt.timedelta(hours=8))
+        bj_tz = timezone(timedelta(hours=8))
         bj_now = now.astimezone(bj_tz)
         # 周末（周六=5, 周日=6）全天非高峰
         if bj_now.weekday() >= 5:
@@ -545,9 +543,7 @@ class CognitionController:
         last = self._last_remote_attempt_at()
         if frequency == "low":
             # 夜间窗口：21:00 ~ 次日02:00（北京时间），窗口内持续分批处理
-            # 转换为北京时间判断窗口（local_now可能是其他时区）
-            import datetime as _dt
-            bj_tz = _dt.timezone(_dt.timedelta(hours=8))
+            bj_tz = timezone(timedelta(hours=8))
             bj_hour = self.now().astimezone(bj_tz).hour
             if bj_hour < 21 and bj_hour >= 2:
                 return False
