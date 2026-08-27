@@ -115,6 +115,16 @@ def create_server(host, port, token, services):
         def log_message(self, format, *args):
             return None
 
+        def handle_one_request(self):
+            """捕获所有HTTP方法的未预期异常，返回干净的500，避免堆栈跟踪泄漏。"""
+            try:
+                super().handle_one_request()
+            except Exception:
+                try:
+                    self._error(500, "internal_error", "服务内部错误，请稍后重试")
+                except Exception:
+                    pass
+
         def _json(self, payload, status=200):
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)

@@ -189,9 +189,6 @@ def _result_schema():
 
 def _default_transport(url, headers, body, timeout):
     host = urlsplit(url).hostname
-    # Agnes AI 免费版有 20 RPM 限制，发请求前先获取许可
-    if host and "agnes-ai.com" in host.casefold():
-        _agnes_ai_limiter.acquire()
     try:
         addresses = {
             result[4][0]
@@ -201,6 +198,9 @@ def _default_transport(url, headers, body, timeout):
         raise RemoteProviderError("network") from error
     if not addresses or any(not ipaddress.ip_address(value).is_global for value in addresses):
         raise RemoteProviderError("unsafe_endpoint")
+    # Agnes AI 免费版有 20 RPM 限制，DNS/SSRF校验通过后再获取许可，避免无效端点浪费配额
+    if host and "agnes-ai.com" in host.casefold():
+        _agnes_ai_limiter.acquire()
     request = urllib.request.Request(
         url,
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
