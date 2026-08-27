@@ -1,6 +1,8 @@
 import ipaddress
 import json
+import re
 import socket
+import ssl
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -115,7 +117,24 @@ def fetch_bytes(
         kind = "rate_limited" if error.code == 429 else "http_error"
         raise FetchError(kind, f"外部源返回HTTP {error.code}") from error
     except (urllib.error.URLError, OSError) as error:
-        raise FetchError("unreachable", f"外部源不可达：{error}") from error
+        # urllib 把 SSL 错误包装在 URLError.reason 中；政府网站常见证书问题，降级为不验证
+        reason = getattr(error, "reason", error)
+        if isinstance(reason, (ssl.SSLError, ssl.SSLCertVerificationError)):
+            try:
+                unverified_ctx = ssl.create_default_context()
+                unverified_ctx.check_hostname = False
+                unverified_ctx.verify_mode = ssl.CERT_NONE
+                with opener(request, timeout=timeout, context=unverified_ctx) as response:
+                    body = response.read(max_bytes + 1)
+            except (TimeoutError, socket.timeout) as inner:
+                raise FetchError("timeout", "外部源请求超时") from inner
+            except urllib.error.HTTPError as inner:
+                kind = "rate_limited" if inner.code == 429 else "http_error"
+                raise FetchError(kind, f"外部源返回HTTP {inner.code}") from inner
+            except (urllib.error.URLError, OSError) as inner:
+                raise FetchError("unreachable", f"外部源不可达：{inner}") from inner
+        else:
+            raise FetchError("unreachable", f"外部源不可达：{error}") from error
     if len(body) > max_bytes:
         raise FetchError("too_large", f"响应超过{max_bytes}字节上限")
     return body
@@ -230,6 +249,14 @@ def _link(element):
     return ""
 
 
+def _sanitize_xml_bytes(body):
+    """清理 RSS/Atom 中常见的非法 XML：移除控制字符、转义未转义的 &。"""
+    text = body.decode("utf-8", errors="replace")
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+    text = re.sub(r"&(?!(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)", "&amp;", text)
+    return text.encode("utf-8")
+
+
 def parse_feed(body, source_id, source_name, endpoint=""):
     # 防御 XML 炸弹：限制实体展开文本总量（Python 3.10+），
     # 避免恶意 RSS 用 billion laughs 攻击耗尽内存。
@@ -240,8 +267,13 @@ def parse_feed(body, source_id, source_name, endpoint=""):
         pass
     try:
         root = ET.fromstring(body, parser=parser)
-    except ET.ParseError as error:
-        raise FetchError("parse_error", f"RSS/Atom解析失败：{error}") from error
+    except ET.ParseError:
+        # 部分政府网站 RSS 含非法字符或未转义 &，容错清理后重试
+        cleaned = _sanitize_xml_bytes(body)
+        try:
+            root = ET.fromstring(cleaned, parser=parser)
+        except ET.ParseError as error:
+            raise FetchError("parse_error", f"RSS/Atom解析失败：{error}") from error
     items = []
     for element in root.iter():
         kind = element.tag.rsplit("}", 1)[-1]
@@ -333,18 +365,71 @@ def _decode_document(body):
     return body.decode("utf-8", errors="replace")
 
 
+# html_list 噪声过滤：排除导航/页脚/栏目页等非文章链接
+_NAV_TITLE_PATTERNS = re.compile(
+    r"^(首页|网站首页|关于我们|联系方式|联系我们|网站地图|友情链接|版权所有|备案号|"
+    r"粤ICP|京ICP|沪ICP|浙ICP|苏ICP|鲁ICP|川ICP|豫ICP|鄂ICP|湘ICP|闽ICP|"
+    r"政务公开|政务服务|互动交流|信息公开|数据开放|无障碍|长者版|简体|繁体|English|"
+    r"登录|注册|个人中心|退出|帮助中心|常见问题|意见反馈|在线访谈|调查征集|"
+    r"广东省.*厅|广东省.*局|广东省.*委|广东省.*办|广东省.*中心|"
+    r"河源市.*局|河源市.*委|河源市.*办|河源市.*中心|"
+    r"市政府|市委|市人大|市政协|市纪委|组织部|宣传部|统战部|政法委|"
+    r"省政府|省委|省人大|省政协|省纪委|"
+    r"更多|更多>>|更多+|查看更多|more|More)$",
+    re.IGNORECASE,
+)
+# 文章详情页 URL 特征：包含日期路径、文章ID、或常见文章关键词
+_ARTICLE_URL_PATTERNS = re.compile(
+    r"(/\d{4}/\d{2,4}/|/\d{6,}/|/\d{8,}/|/article/|/content/|/detail/|/info/|/notice/|"
+    r"/\d+\.html?|/[a-z]+/\d+\.html?|/[a-z]+/\d+$|/ztzl/|/t\d{8}_)",
+    re.IGNORECASE,
+)
+# 栏目/索引页 URL 特征：这些通常不是文章详情页
+_SECTION_URL_PATTERNS = re.compile(
+    r"(/index\.html?|/index$|/$|/list\.html?|/default\.html?|/default$|"
+    r"/zwgk/|/ywdt/|/xxgk/|/gkml/|/jgzn/|/ldxx/|/zcfg/|/tzgg/|"
+    r"/news/|/gov/|/about/|/contact/|/sitemap/|/search/|/login/|/register/)",
+    re.IGNORECASE,
+)
+
+
+def _is_article_link(url, title):
+    """判断链接是否像文章详情页，过滤导航/栏目/页脚噪声。"""
+    if len(title) < 8:
+        return False
+    if _NAV_TITLE_PATTERNS.match(title.strip()):
+        return False
+    # 标题含日期或数字编号，通常是新闻标题
+    if re.search(r"\d{4}年|\d{1,2}月|\d{1,2}日|第\d+期|〔\d{4}〕|\[\d{4}\]", title):
+        return True
+    # URL 匹配文章特征
+    if _ARTICLE_URL_PATTERNS.search(url):
+        return True
+    # URL 匹配栏目特征则排除
+    if _SECTION_URL_PATTERNS.search(url):
+        return False
+    # 其余：标题足够长（>=12字）且不是纯部门名，保留
+    return len(title) >= 12
+
+
 def parse_html_list(body, source_id, source_name, endpoint):
     parser = _LinkParser()
     parser.feed(_decode_document(body))
     items = []
+    seen_urls = set()
     for href, title in parser.links:
-        if len(title) < 6 or href.startswith(("#", "javascript:", "mailto:")):
+        if not title or href.startswith(("#", "javascript:", "mailto:", "tel:")):
             continue
         url = urljoin(endpoint, href)
+        if url in seen_urls:
+            continue
         try:
             validate_public_url(url)
         except ValueError:
             continue
+        if not _is_article_link(url, title):
+            continue
+        seen_urls.add(url)
         items.append(
             ExternalItem(
                 source_id=source_id,
