@@ -587,7 +587,7 @@ class CognitionController:
         # 关闸时：只处理本地任务（downgrade已清理排队中的远程任务）
         judgments = self.judgment_queue.run_due(
             limit=30,
-            remote_limit=3 if remote_enabled else 0,
+            remote_limit=10 if remote_enabled else 0,
         )
         mapped = 0
         notified = 0
