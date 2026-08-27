@@ -282,19 +282,20 @@ export async function render(root) {
     </section>`;
   }
 
-  // L3 准备观察区
+  // L3 准备观察区（可滚动，显示更多事项）
   if (l3.length > 0 || state === 'watch') {
+    const cards = l3.length ? l3.map(i => actionCardHtml(i, false)).join('') : '<div class="radar-empty">暂无需要继续观察的事项。</div>';
     sections += `<section class="radar-section">
-      <h2><span class="dot-l3"></span> L3 · 准备观察</h2>
-      ${l3.length ? l3.map(i => actionCardHtml(i, false)).join('') : '<div class="radar-empty">暂无需要继续观察的事项。</div>'}
+      <h2><span class="dot-l3"></span> L3 · 准备观察 <span class="radar-count">${l3.length}</span></h2>
+      <div class="radar-scroll">${cards}</div>
     </section>`;
   }
 
-  // 待确认预测提示
+  // 待确认预测提示（全自动模式下通常为空，保留仅作调试可见）
   if (pendingCandidates.length > 0) {
-    sections += `<section class="radar-section">
-      <h2><span class="dot-pending"></span> 待确认预测（${pendingCandidates.length}）</h2>
-      <div class="radar-hint">有 ${pendingCandidates.length} 条候选预测等待你确认概率，确认后进入预测账本开始校准。<a href="#/calib">去校准面板 →</a></div>
+    sections += `<section class="radar-section radar-section-muted">
+      <h2><span class="dot-pending"></span> 待自动确认（${pendingCandidates.length}）</h2>
+      <div class="radar-hint">系统将在下一轮认知运行时自动确认这些预测，无需手动操作。</div>
     </section>`;
   }
 

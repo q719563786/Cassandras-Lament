@@ -408,6 +408,35 @@
 .prob-bar {
   width: 60px;
   height: 24px;
+}
+
+/* === 今日远见：可滚动风险列表 === */
+.radar-scroll {
+  max-height: 480px;
+  overflow-y: auto;
+  padding-right: var(--s-2);
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.radar-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.radar-scroll::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+.radar-count {
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+  padding: 2px 8px;
+  border-radius: 10px;
+  margin-left: var(--s-2);
+}
+.radar-section-muted {
+  opacity: 0.6;
+}
   background: var(--bg-elevated);
   border-radius: var(--r-sm);
   display: flex;

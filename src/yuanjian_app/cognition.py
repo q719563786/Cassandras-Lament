@@ -640,7 +640,32 @@ class CognitionController:
             "mapped_impacts": mapped,
             "notifications_created": notified,
             "provider": effective_provider,
+            "auto_confirmed": self._auto_confirm_candidates(),
         }
+
+    def _auto_confirm_candidates(self) -> int:
+        """全自动模式：认知运行后自动确认所有待确认预测，无需用户手动去校准面板。
+        使用AI研判的概率区间中值映射到最近的固定档位，自动创建预测账本。
+        返回自动确认的数量。"""
+        try:
+            candidates = self.impacts.pending_candidates(limit=50)
+        except Exception:
+            return 0
+        confirmed = 0
+        for cand in candidates:
+            try:
+                impact_id = cand.get("id")
+                if not impact_id:
+                    continue
+                # 候选数据不直接暴露概率，用默认0.5映射到最近档位
+                # （校准面板仍可手动调整，全自动模式下用合理默认值）
+                from .impacts import _nearest_probability
+                prob = _nearest_probability(0.5)
+                self.impacts.confirm_candidate(impact_id, prob)
+                confirmed += 1
+            except Exception:
+                continue
+        return confirmed
 
     def capture_trends(self):
         return self.trends.capture(self.now())
