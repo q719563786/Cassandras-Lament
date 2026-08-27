@@ -568,6 +568,8 @@ class CognitionController:
         remote_provider = self._provider_name()
         # 判断本轮是否允许远程调用
         remote_enabled = remote_provider != "local" and self._remote_due()
+        # 本轮实际使用的 provider 名称（用于结果上报，非逐cluster）
+        effective_provider = remote_provider if remote_enabled else "local"
         # 关闸时清理掉排队中的远程任务，防止它们偷偷被run_due执行
         if not remote_enabled:
             self._downgrade_pending_remote_jobs()
@@ -637,7 +639,7 @@ class CognitionController:
             "judgments": judgments,
             "mapped_impacts": mapped,
             "notifications_created": notified,
-            "provider": provider,
+            "provider": effective_provider,
         }
 
     def capture_trends(self):

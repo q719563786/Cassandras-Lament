@@ -380,6 +380,7 @@ class DeepSeekChatProvider:
                 {"role": "user", "content": json.dumps(public, ensure_ascii=False)},
             ],
             "response_format": {"type": "json_object"},
+            "max_tokens": 4000,
             "stream": False,
         }
 
@@ -762,22 +763,23 @@ class JudgmentQueue:
                         (request_chars, _iso(now), job["job_id"]),
                     )
                 summary["succeeded"] += 1
-            except InvalidJudgmentError:
+            except InvalidJudgmentError as exc:
                 # 格式错误不是瞬态错误，重试无意义——立即降级本地处理，不重试
                 attempts = int(job["attempts"]) + 1
                 if is_remote:
                     used += 1
                     remote_done += 1
                 fallback = self.local_provider.analyze(bundle)
+                err_detail = str(exc)[:200]
                 with self.database.connect() as connection:
                     self._persist_judgment(connection, job, "local", fallback, now)
                     connection.execute(
                         """
                         UPDATE judgment_jobs SET status='invalid_output',attempts=?,
-                            request_chars=?,finished_at=?,last_error='invalid_output'
+                            request_chars=?,finished_at=?,last_error=?
                         WHERE job_id=?
                         """,
-                        (attempts, request_chars, _iso(now), job["job_id"]),
+                        (attempts, request_chars, _iso(now), f"invalid_output: {err_detail}", job["job_id"]),
                     )
                 summary["failed"] += 1
             except RemoteProviderError as error:
