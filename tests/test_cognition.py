@@ -314,8 +314,8 @@ class RiskDashboardTests(unittest.TestCase):
 
         self.assertEqual(dashboard["state"], "action")
         self.assertEqual(dashboard["counts"], {"action": 3, "watch": 3, "verifying": 0})
-        self.assertEqual(len(dashboard["items"]), 3)
-        self.assertEqual([item["cluster_id"] for item in dashboard["items"]], ["C-6", "C-4", "C-3"])
+        self.assertEqual(len(dashboard["items"]), 6)
+        self.assertEqual([item["cluster_id"] for item in dashboard["items"]], ["C-6", "C-4", "C-3", "C-5", "C-7", "C-2"])
         self.assertTrue(all(item["alert_level"] in {"L3", "L4"} for item in dashboard["items"]))
         self.assertTrue(all("原始新闻标题" not in item["title"] for item in dashboard["items"]))
         first = dashboard["items"][0]

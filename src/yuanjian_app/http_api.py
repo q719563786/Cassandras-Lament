@@ -293,7 +293,7 @@ def create_server(host, port, token, services):
                 )
                 self._json(
                     services.cognition_controller.risk_dashboard(
-                        source_states, limit=5
+                        source_states, limit=50
                     )
                 )
             elif path == "/api/cognition/clusters":

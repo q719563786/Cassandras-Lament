@@ -758,8 +758,8 @@ class CognitionController:
         return "更长期"
 
     def risk_dashboard(self, source_states=None, limit=3):
-        """Project internal judgments into a small personal decision workload."""
-        limit = max(1, min(int(limit), 3))
+        """Project internal judgments into a personal decision workload."""
+        limit = max(1, min(int(limit), 50))
         now = self.now().astimezone(timezone.utc)
         now_text = _iso(now)
         with self.database.connect() as connection:
