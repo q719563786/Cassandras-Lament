@@ -3,6 +3,44 @@
 import { api, escapeHtml } from '../api.js';
 import { tellBoxHtml, bindTellBox } from './tell.js';
 
+// 按事件(cluster_id)去重：同一事件匹配多个利益时合并为一张卡片，显示多个利益标签
+function deduplicateByCluster(items) {
+  const map = new Map();
+  for (const item of items) {
+    const cid = item.cluster_id;
+    if (!map.has(cid)) {
+      map.set(cid, { ...item, interest_names: [item.interest_name] });
+    } else {
+      const existing = map.get(cid);
+      if (!existing.interest_names.includes(item.interest_name)) {
+        existing.interest_names.push(item.interest_name);
+      }
+      // 保留更高优先级的 mode/alert_level
+      if (item.mode === 'action' && existing.mode !== 'action') existing.mode = 'action';
+      if (item.alert_level === 'L4' && existing.alert_level !== 'L4') existing.alert_level = 'L4';
+      // 保留更高的 impact_score
+      if (item.impact_score > existing.impact_score) existing.impact_score = item.impact_score;
+    }
+  }
+  return Array.from(map.values());
+}
+
+// 格式化事件时间为相对时间或日期
+function formatEventTime(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    const now = new Date();
+    const diffMs = now - d;
+    const diffH = Math.floor(diffMs / 3600000);
+    if (diffH < 1) return '刚刚';
+    if (diffH < 24) return `${diffH}小时前`;
+    const diffD = Math.floor(diffH / 24);
+    if (diffD < 7) return `${diffD}天前`;
+    return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+  } catch { return ''; }
+}
+
 const PROBABILITY_OPTIONS = [
   { value: 0.05, label: '5% · 几乎不可能' },
   { value: 0.20, label: '20% · 不太可能' },
@@ -28,13 +66,23 @@ function closestProbability(low, high) {
 
 // 行动卡（L4立即行动 / L3准备观察通用）
 function actionCardHtml(item, isL4) {
-  const title = escapeHtml(item.title || item.interest_name || '');
+  // 去重后的卡片有 interest_names 数组，未去重的有单个 interest_name
+  const interestNames = item.interest_names || [item.interest_name];
+  const interestTags = interestNames.filter(Boolean).map(n =>
+    `<span class="ac-interest-tag">${escapeHtml(n)}</span>`
+  ).join('');
+  // 标题去掉利益前缀，用 reason/fact_summary 作为主体
+  const title = escapeHtml(item.reason || item.title || '');
   const window = escapeHtml(item.time_window || '');
   const action = escapeHtml(item.action || item.advice || '');
   const direction = item.direction || '没有明显变化';
   const dirClass = directionClass(direction);
   const riskLabel = escapeHtml(item.risk_label || '');
   const confirmed = item.candidate_confirmed;
+  const source = escapeHtml(item.source || '');
+  const eventTime = formatEventTime(item.event_time);
+  const sourceLine = (source || eventTime) ?
+    `<div class="ac-meta">${source ? `📡 ${source}` : ''}${source && eventTime ? ' · ' : ''}${eventTime ? `🕐 ${eventTime}` : ''}</div>` : '';
 
   // 未确认候选预测时显示"记录预测"按钮
   const predictBtn = !confirmed ? `
@@ -51,8 +99,10 @@ function actionCardHtml(item, isL4) {
         <span class="ac-window">窗口：${window}</span>
         <span class="ac-direction ${dirClass}">${escapeHtml(direction)}</span>
       </div>
+      ${interestTags ? `<div class="ac-interests">${interestTags}</div>` : ''}
       <div class="ac-title">${title}</div>
       ${action ? `<div class="ac-action">${action}</div>` : ''}
+      ${sourceLine}
     </div>
     <div class="ac-actions">
       ${predictBtn}
@@ -240,7 +290,9 @@ export async function render(root) {
   ]);
 
   // 检查是否需要新手引导：没有任何impact项 + 没有pending候选
-  const items = Array.isArray(dashboard?.items) ? dashboard.items : [];
+  const rawItems = Array.isArray(dashboard?.items) ? dashboard.items : [];
+  // 按事件去重：同一事件匹配多个利益时合并为一张卡片
+  const items = deduplicateByCluster(rawItems);
   const pendingCandidates = Array.isArray(candidates?.candidates) ? candidates.candidates : [];
   const needsOnboarding = items.length === 0 && pendingCandidates.length === 0 && dashboard?.state !== 'coverage_gap';
 

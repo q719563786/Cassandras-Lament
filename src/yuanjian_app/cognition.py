@@ -769,7 +769,11 @@ class CognitionController:
             rows = connection.execute(
                 """
                 SELECT p.*,i.name AS interest_name,i.category AS interest_category,
-                       j.content_json,c.last_seen_at
+                       j.content_json,c.last_seen_at,c.first_seen_at,c.title AS cluster_title,
+                       (SELECT ei.source_name FROM event_cluster_items eci
+                        JOIN external_items ei ON ei.item_id=eci.item_id
+                        WHERE eci.cluster_id=c.cluster_id AND eci.is_primary=1
+                        LIMIT 1) AS primary_source
                 FROM personal_impacts p
                 JOIN event_clusters c ON c.cluster_id=p.cluster_id
                 JOIN judgments j ON j.judgment_id=p.judgment_id
@@ -849,6 +853,9 @@ class CognitionController:
                     "candidate_prob_low": candidate.get("probability_low", 0.3),
                     "candidate_prob_high": candidate.get("probability_high", 0.7),
                     "candidate_title": candidate.get("title", ""),
+                    "event_time": row["first_seen_at"] or row["last_seen_at"] or "",
+                    "source": plain_text(row["primary_source"] or "", 60),
+                    "cluster_title": plain_text(row["cluster_title"] or "", 120),
                 }
             )
 
