@@ -8,7 +8,7 @@ export function tellBoxHtml(scope = 'tell') {
   return `<div class="tell">
     <div class="field">
       <label for="${prefix}tell-input">发生了什么事实 / 你做了什么（不需要先分析）</label>
-      <textarea id="${prefix}tell-input" rows="3" placeholder="例如：今天接到通知，河源水务项目下月招标。"></textarea>
+      <textarea id="${prefix}tell-input" rows="3" placeholder="例如：今天接到通知，河源水务项目下月招标。（Ctrl+Enter 快捷提交）"></textarea>
     </div>
     <div class="u-end u-mt-sm">
       <button type="button" class="btn btn-primary btn-sm" data-tell-submit>记录并研判</button>
@@ -23,14 +23,15 @@ export function bindTellBox(box) {
   const button = box.querySelector('[data-tell-submit]');
   const result = box.querySelector('.tell-result');
   if (!input || !button || !result) return;
-  button.addEventListener('click', () => {
+
+  async function submit() {
     const text = input.value.trim();
     if (!text) {
       showToast('先写点什么再记录', 'err');
       input.focus();
       return;
     }
-    withBusy(button, '正在研判…', async () => {
+    await withBusy(button, '正在研判…', async () => {
       try {
         // 契约沿旧版：POST /api/events {text} → {signal:{alert_level, recommended_action}}
         const response = await api('/api/events', {
@@ -50,6 +51,15 @@ export function bindTellBox(box) {
         showToast(`记录失败：${error.message}`, 'err');
       }
     });
+  }
+
+  button.addEventListener('click', submit);
+  // Ctrl+Enter / Cmd+Enter 快捷提交
+  input.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      submit();
+    }
   });
 }
 
