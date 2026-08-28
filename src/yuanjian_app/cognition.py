@@ -772,8 +772,8 @@ class CognitionController:
                        j.content_json,c.last_seen_at,c.first_seen_at,c.title AS cluster_title,
                        (SELECT ei.source_name FROM event_cluster_items eci
                         JOIN external_items ei ON ei.item_id=eci.item_id
-                        WHERE eci.cluster_id=c.cluster_id AND eci.is_primary=1
-                        LIMIT 1) AS primary_source
+                        WHERE eci.cluster_id=c.cluster_id
+                        ORDER BY eci.added_at ASC LIMIT 1) AS primary_source
                 FROM personal_impacts p
                 JOIN event_clusters c ON c.cluster_id=p.cluster_id
                 JOIN judgments j ON j.judgment_id=p.judgment_id
