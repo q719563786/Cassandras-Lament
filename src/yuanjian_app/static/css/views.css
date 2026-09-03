@@ -539,3 +539,114 @@
   background: var(--bg-canvas);
   margin-bottom: var(--s-3);
 }
+
+
+/* ============================================================
+   L4 立即行动卡 —— 行动指令是绝对主体，与 L3 观察卡明确区分
+   L3：事件标题为主、建议为辅（观察）
+   L4：行动指令大字高亮为主、事件只是灰色背景注脚（执行）
+   ============================================================ */
+.l4-directive-card {
+  background: linear-gradient(180deg, rgba(212,91,106,0.12), rgba(212,91,106,0.035));
+  border: 1px solid rgba(212,91,106,0.30);
+  padding: var(--s-4) var(--s-5);
+}
+.action-card.l4-directive-card::before {
+  width: 4px;
+  top: 10px;
+  bottom: 10px;
+  background: var(--l4);
+  box-shadow: 0 0 12px rgba(212,91,106,0.55);
+}
+.l4-directive-card:hover {
+  background: linear-gradient(180deg, rgba(212,91,106,0.17), rgba(212,91,106,0.06));
+  border-color: rgba(212,91,106,0.45);
+}
+.l4-top {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  margin-bottom: var(--s-3);
+}
+.l4-bolt {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #fff;
+  background: var(--l4);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  padding: 3px 11px;
+  border-radius: var(--r-sm);
+  box-shadow: 0 2px 10px rgba(212,91,106,0.35);
+}
+.l4-window {
+  color: var(--l4);
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+/* 行动指令：卡片主体，大字、加粗、高亮，一眼看到该做什么 */
+.l4-directive-text {
+  font-size: 15.5px;
+  line-height: 1.75;
+  font-weight: 600;
+  color: #F4F6FA;
+  letter-spacing: 0.2px;
+  margin-bottom: var(--s-3);
+}
+/* 事件背景：灰色小字注脚，明确是"为什么"，不是主体 */
+.l4-bg {
+  display: flex;
+  gap: var(--s-2);
+  align-items: baseline;
+  font-size: 12.5px;
+  line-height: 1.6;
+  padding: 7px 10px;
+  background: rgba(0,0,0,0.20);
+  border-radius: var(--r-sm);
+  border-left: 2px solid var(--border-medium);
+}
+.l4-bg-label {
+  flex: none;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  border: 1px solid var(--border);
+  padding: 0 6px;
+  border-radius: 4px;
+  transform: translateY(-1px);
+}
+.l4-bg-text { color: var(--text-muted); }
+.l4-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  margin-top: var(--s-3);
+  flex-wrap: wrap;
+}
+.l4-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+.l4-tag {
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  padding: 1px 8px;
+  border-radius: var(--r-sm);
+}
+.l4-meta {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  margin-left: auto;
+}
+.l4-actions {
+  margin-top: var(--s-3);
+  padding-top: var(--s-3);
+  border-top: 1px dashed var(--border);
+}
+.l4-btn-done {
+  border-color: var(--l4) !important;
+  color: var(--l4) !important;
+  font-weight: 600;
+}
+.l4-btn-done:hover { background: var(--l4-bg); }

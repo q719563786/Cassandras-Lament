@@ -113,6 +113,46 @@ function actionCardHtml(item, isL4) {
   </div>`;
 }
 
+// L4 立即行动卡：行动指令是绝对主体（大字高亮），事件只是灰色背景注脚
+function l4CardHtml(item) {
+  const interestNames = item.interest_names || [item.interest_name];
+  const interestTags = interestNames.filter(Boolean).map(n =>
+    `<span class="l4-tag">${escapeHtml(n)}</span>`
+  ).join('');
+  // 行动指令（后端 _l4_directive 生成），是卡片主体
+  const directive = escapeHtml(item.action || item.advice || '');
+  // 事件背景：用压缩后的事实，只做注脚
+  const bg = escapeHtml(item.short_fact || item.reason || item.cluster_title || '');
+  const window = escapeHtml(item.time_window || '');
+  const source = escapeHtml(item.source || '');
+  const eventTime = formatEventTime(item.event_time);
+  const metaLine = (source || eventTime) ?
+    `${source ? `📡 ${source}` : ''}${source && eventTime ? ' · ' : ''}${eventTime ? `🕐 ${eventTime}` : ''}` : '';
+
+  return `<div class="action-card l4 l4-directive-card" data-cluster="${item.cluster_id}" data-impact="${item.impact_id}">
+    <div class="l4-main" data-action="open-detail">
+      <div class="l4-top">
+        <span class="l4-bolt">⚡ 立即行动</span>
+        ${window ? `<span class="l4-window">窗口 · ${window}</span>` : ''}
+      </div>
+      <div class="l4-directive-text">${directive}</div>
+      <div class="l4-bg">
+        <span class="l4-bg-label">事件背景</span>
+        <span class="l4-bg-text">${bg}</span>
+      </div>
+      <div class="l4-foot">
+        <span class="l4-tags">${interestTags}</span>
+        ${metaLine ? `<span class="l4-meta">${metaLine}</span>` : ''}
+      </div>
+    </div>
+    <div class="ac-actions l4-actions">
+      <button class="ac-btn l4-btn-done" data-action="dismiss" title="已处理，不再提醒">✓ 我知道了</button>
+      <button class="ac-btn" data-action="mute" title="静音7天">🔇 静音7天</button>
+      <button class="ac-btn ac-btn-warn" data-action="false_positive" title="这是误报">⚠ 误报</button>
+    </div>
+  </div>`;
+}
+
 // 概率选择弹窗
 function probabilityPickerHtml(impactId, low, high) {
   const suggested = closestProbability(low, high);
@@ -330,7 +370,7 @@ export async function render(root) {
   if (l4.length > 0 || state === 'action') {
     sections += `<section class="radar-section">
       <h2><span class="dot-l4"></span> L4 · 立即行动</h2>
-      ${l4.length ? l4.map(i => actionCardHtml(i, true)).join('') : '<div class="radar-empty">今天没有 L4 等级的立即行动项。</div>'}
+      ${l4.length ? l4.map(i => l4CardHtml(i)).join('') : '<div class="radar-empty">今天没有 L4 等级的立即行动项。</div>'}
     </section>`;
   }
 

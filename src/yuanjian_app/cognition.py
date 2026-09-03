@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlsplit
@@ -64,6 +65,115 @@ def _personal_advice(category: str, recommended_action: str) -> str:
     if category == "safety":
         return "先远离可能的危险并核对官方通知；紧急情况联系当地应急部门或报警。"
     return "先核实正式来源和适用期限，暂缓不可逆决定，并按时间窗口复查。"
+
+
+def _short_fact(fact: str, limit: int = 46) -> str:
+    """把事件事实压缩成一句可当背景的短语：去来源括号、去冗余、保留关键数字。"""
+    text = plain_text(fact or "", 200)
+    # 去掉开头的【...】来源/电头
+    text = re.sub(r"^【[^】]*】", "", text).strip()
+    text = re.sub(r"^[^，。：]{0,18}电[，,]", "", text).strip()
+    # 只取第一个分句，避免整段新闻稿
+    for sep in ("。", "；", ";"):
+        if sep in text:
+            head = text.split(sep)[0].strip()
+            if len(head) >= 8:
+                text = head
+                break
+    if len(text) > limit:
+        text = text[:limit].rstrip("，,、（( ") + "…"
+    return text
+
+
+# L4 立即行动：每个利益类别的"直接动作"剧本——动词开头、可执行、带时间窗口与再评估触发条件
+_L4_PLAYBOOK = {
+    "cashflow": (
+        "本周先把必须支付的金额和日期列出来、留足对应现金，非必要支出一律推到窗口后；"
+        "需要周转只用现有授信和免息期，不碰年化更高的短期借款。"
+    ),
+    "assets": (
+        "7天内不对相关资产做加仓、赎回、提前还贷等不可逆操作，先记下当前价位和仓位、设好止损线，"
+        "等信号明确或窗口结束再动手。"
+    ),
+    "policy": (
+        "7天内查清你或所在单位是否在适用范围，符合条件就按正式文件要求备齐材料、赶在窗口期内申报登记，"
+        "错过要等下一批；一切以正式文件为准。"
+    ),
+    "health": (
+        "7天内避开受影响区域和高风险活动，核对医保和商业险的报案、理赔时限并留好票据；"
+        "身体一旦异常立即就医，紧急情况联系当地应急部门。"
+    ),
+    "safety": (
+        "立即远离可能受影响的区域，按官方通知调整出行和安排，备好应急联系方式；"
+        "情况升级时优先人身安全、再处理财产。"
+    ),
+    "work": (
+        "7天内确认此事是否影响你的岗位、排班、报销或收入，保留书面记录，暂不签不可逆承诺；"
+        "主动找直属负责人确认一次，别等通知被动。"
+    ),
+    "employment": (
+        "7天内确认此事是否影响你的岗位、排班、报销或收入，保留书面记录，暂不签不可逆承诺；"
+        "主动找直属负责人确认一次，别等通知被动。"
+    ),
+    "family": (
+        "今天就和家人同步这件事，定好7天内的分工和不能拖的事项，先办最要紧的，"
+        "并约定一个备用方案和紧急联系人。"
+    ),
+    "opportunity": (
+        "7天内判断这是不是你的机会窗口，符合方向就立刻做一个最小动作（报名、对接、投递），"
+        "给自己设截止日、同时保留退出余地，别只观望。"
+    ),
+    "finance": (
+        "本周先锁定刚性支出、保留现金，相关理财或借贷决定推迟到信号明确后，"
+        "不追高、不临时加杠杆。"
+    ),
+    "liability": (
+        "7天内核对相关负债的利率和到期日，避免在信号不明时新增或提前偿还，"
+        "先保证按时履约、维护征信。"
+    ),
+    "income": (
+        "7天内确认收入到账和结算节奏是否变化，预留缓冲，涉及承诺先看正式文件再答复。"
+    ),
+    "expense": (
+        "本周压缩非必要开支，大额、不可逆的消费推迟到窗口结束、情况明确后再决定。"
+    ),
+    "protection": (
+        "7天内核对保单保障范围和报案理赔时限，备齐材料，风险临近时优先避险并及时报案。"
+    ),
+}
+
+
+def _l4_directive(fact, category, window, up_triggers, down_triggers, interest_name=""):
+    """L4 立即行动：输出一句直接、可执行的行动指令（不是事件复述、不是套话）。"""
+    cat = str(category or "general").casefold()
+    play = _L4_PLAYBOOK.get(cat)
+    if not play:
+        # 类别别名兜底
+        for key, text in _L4_PLAYBOOK.items():
+            if key in cat or cat in key:
+                play = text
+                break
+    play = play or "7天内先做可撤回的准备动作，暂缓不可逆决定，等信号明确再出手。"
+
+    # 再评估触发条件：优先用"风险上升"信号，告诉用户看到什么就立刻行动/收手
+    def _clean_t(t):
+        t = plain_text(t, 40).strip()
+        for pre in ("出现", "发生", "看到"):
+            if t.startswith(pre):
+                t = t[len(pre):].strip()
+        return t.rstrip("。.，,")
+
+    trigger = ""
+    if up_triggers:
+        t = _clean_t(up_triggers[0])
+        if t:
+            trigger = f"看到「{t}」就立刻执行并重新评估。"
+    elif down_triggers:
+        t = _clean_t(down_triggers[0])
+        if t:
+            trigger = f"若看到「{t}」说明风险缓解，可解除待命。"
+
+    return play + trigger
 
 
 class CognitionService:
@@ -812,9 +922,17 @@ class CognitionController:
             fact_summary = plain_text(
                 judgment.get("fact_summary") or "外部变化可能产生影响", 220
             )
-            action = _personal_advice(
-                interest_category, candidate.get("recommended_action")
-            )
+            if row["alert_level"] == "L4":
+                # L4 立即行动：结合事件生成一句直接可执行的行动指令
+                action = _l4_directive(
+                    fact_summary, interest_category, time_window, up, down, interest_name
+                )
+            else:
+                # L3 准备观察：沿用观察类建议
+                action = _personal_advice(
+                    interest_category, candidate.get("recommended_action")
+                )
+            short_fact = _short_fact(fact_summary)
             risk_label = (
                 "高风险"
                 if row["alert_level"] == "L4"
@@ -836,6 +954,7 @@ class CognitionController:
                     "action": action,
                     "advice": action,
                     "reason": fact_summary,
+                    "short_fact": short_fact,
                     "direction": direction,
                     "decision_by": plain_text(candidate.get("window_end"), 32) or "按时间窗口复查",
                     "updated_at": row["updated_at"],
