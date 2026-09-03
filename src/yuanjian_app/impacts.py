@@ -110,7 +110,7 @@ def _alert_level(score):
         return "L1"
     if score < 0.55:
         return "L2"
-    if score < 0.80:
+    if score < 0.68:
         return "L3"
     return "L4"
 
@@ -233,8 +233,6 @@ class ImpactService:
                 6,
             )
             alert = _alert_level(score)
-            if cluster["evidence_level"] == "E1" and alert == "L4":
-                alert = "L3"
             with self.database.connect() as connection:
                 existing = connection.execute(
                     """
