@@ -54,7 +54,27 @@ def _make_personal_context_loader(interests, forecasts):
             for l in links[:20]
         ]
         recent, _ = forecasts.list_forecasts(limit=5)
+        # 用户主动记录的个人近况（"告诉远见"输入），这是最直接的个人画像，必须让AI看到
+        self_reported = []
+        try:
+            with interests.database.connect() as _conn:
+                _rows = _conn.execute(
+                    """
+                    SELECT summary, why_it_matters, received_at FROM signals
+                    WHERE source_type='manual'
+                      AND IFNULL(status,'new')!='dismissed'
+                    ORDER BY received_at DESC LIMIT 12
+                    """
+                ).fetchall()
+            for _r in _rows:
+                entry = {"recorded_at": str(_r["received_at"])[:19], "situation": _r["summary"]}
+                if _r["why_it_matters"]:
+                    entry["relevance"] = _r["why_it_matters"]
+                self_reported.append(entry)
+        except Exception:
+            self_reported = []
         return {
+            "用户个人近况（用户本人主动记录，判断相关性时优先参考）": self_reported,
             "interests": {
                 "objects": [
                     {"name": o["name"], "category": o["category"], "importance": o["importance"]}

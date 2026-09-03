@@ -166,6 +166,9 @@ class JudgmentResult:
     # arrays of objects, historical_parallel may be None, observable_signals
     # is an array of strings. Kept as dict (untyped) on purpose.
     gyw: dict = field(default_factory=dict)
+    # 结合用户个人上下文给出的"对用户本人的相关性结论 + 行动方向"。
+    # 远程 AI 结合个人画像生成；本地兜底为通用保守表述（前端会按 provider 区分）。
+    personal_action: str = ""
 
     def to_dict(self) -> dict:
         value = asdict(self)
@@ -290,6 +293,8 @@ _RESULT_FIELDS = frozenset(
         # Stored as a nested dict so the top-level schema stays clean and
         # existing consumers (risk_dashboard, calibration) are untouched.
         "gyw",
+        # 对用户本人的相关性结论与行动方向（一句话，直接对用户说）
+        "personal_action",
     }
 )
 _LIST_FIELDS = (_RESULT_FIELDS - {
@@ -298,6 +303,7 @@ _LIST_FIELDS = (_RESULT_FIELDS - {
     "probability_high",
     "confidence",
     "gyw",
+    "personal_action",
 })
 
 # Required keys inside the gyw sub-structure (v2: 9 keys).
@@ -414,6 +420,10 @@ def validate_judgment(result: dict, allowed_source_ids: set[str]) -> JudgmentRes
         raise InvalidJudgmentError("研判引用了证据包之外的来源")
     if not set(result["impact_categories"]).issubset(ALLOWED_IMPACT_CATEGORIES):
         raise InvalidJudgmentError("研判包含未知影响类别")
+    pa = result.get("personal_action")
+    if not isinstance(pa, str) or not pa.strip():
+        raise InvalidJudgmentError("personal_action 必须是非空字符串")
+    personal_action = " ".join(pa.split())[:400]
     return JudgmentResult(
         fact_summary=result["fact_summary"].strip(),
         actors=tuple(result["actors"]),
@@ -429,6 +439,7 @@ def validate_judgment(result: dict, allowed_source_ids: set[str]) -> JudgmentRes
         down_triggers=tuple(result["down_triggers"]),
         impact_categories=tuple(result["impact_categories"]),
         gyw=normalized_gyw,
+        personal_action=personal_action,
     )
 
 
@@ -458,13 +469,16 @@ def repair_judgment(raw: dict, allowed_source_ids: set[str]) -> JudgmentResult |
         "down_triggers": ["权威来源否认或关键数字被修正"],
         "impact_categories": ["general"],
         "gyw": {},
+        "personal_action": "结合你的个人情况评估影响路径，暂按保守策略处理，等待更多信息。",
     }
     repaired: dict = {}
     for key, default in top_defaults.items():
         value = raw.get(key, default)
-        if key == "fact_summary":
+        if key in ("fact_summary", "personal_action"):
             if not isinstance(value, str) or not value.strip():
                 value = default
+            else:
+                value = " ".join(str(value).split())[:400]
         elif key in _LIST_FIELDS:
             if not isinstance(value, list):
                 value = list(default)
@@ -582,6 +596,8 @@ def repair_judgment(raw: dict, allowed_source_ids: set[str]) -> JudgmentResult |
             "up_triggers": [str(t) for t in (repaired.get("up_triggers") or []) if isinstance(t, str) and t.strip()][:3] or ["官方确认"],
             "down_triggers": [str(t) for t in (repaired.get("down_triggers") or []) if isinstance(t, str) and t.strip()][:3] or ["官方否认"],
             "impact_categories": [c for c in (repaired.get("impact_categories") or []) if c in ALLOWED_IMPACT_CATEGORIES] or ["general"],
+            "personal_action": (str(repaired.get("personal_action") or "").strip()[:400]
+                                or "结合你的个人情况评估影响路径，暂按保守策略处理。"),
             "gyw": {
                 "stakeholders": str((repaired.get("gyw") or {}).get("stakeholders") or "利益相关方分析待补充")[:1000],
                 "constraints": str((repaired.get("gyw") or {}).get("constraints") or "约束条件分析待补充")[:1000],
@@ -596,7 +612,36 @@ def repair_judgment(raw: dict, allowed_source_ids: set[str]) -> JudgmentResult |
         }
         if fallback["probability_low"] > fallback["probability_high"]:
             fallback["probability_low"], fallback["probability_high"] = fallback["probability_high"], fallback["probability_low"]
-        return fallback
+        # 关键修复：必须返回 JudgmentResult 而非裸 dict——队列持久化时要调 .to_dict()，
+        # 返回 dict 会让整个 run_due 工作循环抛 AttributeError 中断。
+        try:
+            return validate_judgment(fallback, allowed_source_ids)
+        except InvalidJudgmentError:
+            # 理论不可达（fallback 已严格按 schema 构造）；再兜一层绝对最小合法研判
+            minimal = {
+                "fact_summary": safe_fact[:2000] or "远程AI研判已生成",
+                "actors": [], "causal_chain": ["事件发生", "影响逐步传导"],
+                "uncertainties": ["公开信息仍需后续确认"],
+                "horizons": ["未来30天"],
+                "probability_low": 0.3, "probability_high": 0.7, "confidence": 0.5,
+                "supporting_source_ids": [], "counter_source_ids": [],
+                "up_triggers": ["出现正式文件或新增独立来源"],
+                "down_triggers": ["权威来源否认或关键数字被修正"],
+                "impact_categories": ["general"],
+                "personal_action": str(fallback.get("personal_action") or
+                                       "结合你的个人情况评估影响路径，暂按保守策略处理。")[:400],
+                "gyw": {
+                    "stakeholders": "利益相关方分析待补充",
+                    "constraints": "约束条件分析待补充",
+                    "least_resistance_path": "最小阻力路径待补充",
+                    "counter_evidence": "反对证据待补充",
+                    "leading_indicators": "领先指标待补充",
+                    "beneficiaries": [], "cost_bearers": [],
+                    "historical_parallel": None,
+                    "observable_signals": ["后续官方公告", "执行进展通报"],
+                },
+            }
+            return validate_judgment(minimal, allowed_source_ids)
 
 
 class LocalHeuristicProvider:
@@ -1180,6 +1225,7 @@ class LocalHeuristicProvider:
             "up_triggers": ["出现正式文件或新增独立来源确认", "执行层采取实质性行动"],
             "down_triggers": ["权威来源否认、延期或关键数字被修正", "执行层公开抵制或政策转向"],
             "impact_categories": list(bundle.categories),
+            "personal_action": "本地离线模板未掌握你的具体情况，按此类事件的通用保守策略处理，待远程AI结合你的画像复核。",
             "gyw": {
                 "stakeholders": stakeholders,
                 "constraints": constraints,

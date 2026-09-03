@@ -96,8 +96,8 @@ _L4_PLAYBOOK = {
         "等信号明确或窗口结束再动手。"
     ),
     "policy": (
-        "7天内查清你或所在单位是否在适用范围，符合条件就按正式文件要求备齐材料、赶在窗口期内申报登记，"
-        "错过要等下一批；一切以正式文件为准。"
+        "这类政策是否影响你，取决于你单位或所在行业的落地细则，系统默认你当前无需任何操作；"
+        "只有当本单位下发正式申报、登记或执行通知时，再在窗口期内备齐材料办理，错过需等下一批。"
     ),
     "health": (
         "7天内避开受影响区域和高风险活动，核对医保和商业险的报案、理赔时限并留好票据；"
@@ -108,20 +108,20 @@ _L4_PLAYBOOK = {
         "情况升级时优先人身安全、再处理财产。"
     ),
     "work": (
-        "7天内确认此事是否影响你的岗位、排班、报销或收入，保留书面记录，暂不签不可逆承诺；"
-        "主动找直属负责人确认一次，别等通知被动。"
+        "系统判断此事暂不直接改变你的岗位和工资，先保留相关书面记录、不签任何不可逆承诺；"
+        "若本周内直属负责人或正式通知提到排班、报销、收入调整，再据此行动。"
     ),
     "employment": (
-        "7天内确认此事是否影响你的岗位、排班、报销或收入，保留书面记录，暂不签不可逆承诺；"
-        "主动找直属负责人确认一次，别等通知被动。"
+        "系统判断此事暂不直接改变你的岗位和工资，先保留相关书面记录、不签任何不可逆承诺；"
+        "若本周内直属负责人或正式通知提到排班、报销、收入调整，再据此行动。"
     ),
     "family": (
         "今天就和家人同步这件事，定好7天内的分工和不能拖的事项，先办最要紧的，"
         "并约定一个备用方案和紧急联系人。"
     ),
     "opportunity": (
-        "7天内判断这是不是你的机会窗口，符合方向就立刻做一个最小动作（报名、对接、投递），"
-        "给自己设截止日、同时保留退出余地，别只观望。"
+        "系统判断这是一个潜在机会而非风险，若与你的方向相符，本周就做一个最小动作（报名、对接、投递）"
+        "并给自己设截止日，同时保留退出余地；方向不符则直接忽略，不占用精力。"
     ),
     "finance": (
         "本周先锁定刚性支出、保留现金，相关理财或借贷决定推迟到信号明确后，"
@@ -588,14 +588,12 @@ class CognitionController:
         return "local"
 
     def _should_use_remote(self, cluster) -> bool:
-        """稿D 放宽远程闸：把有限的远程调用集中到有决策价值的事件上。
-        - E2/E3/E4（中高等级证据）：必远程
-        - E1（低等级证据）：本地模板兜底，省预算、UI 标「模板推断」
-        原稿C v2 要求 E2 且独立域名>=3 才远程，过于严格导致大部分事件走模板；
-        放宽后所有中高等级事件均走远程，远程质量由 SYSTEM_INSTRUCTION 约束。
-        当远程未启用时 _provider_name 返回 local，本闸结果会被覆盖，天然兼容。"""
-        level = str(cluster.get("evidence_level") or "E1")
-        return level in ("E2", "E3", "E4")
+        """远程资格闸：Agnes 为免费接口，调用量由频率闸(每小时一轮)+每轮上限
+        +日预算统一节流，因此不再按证据级 E1/E2 设卡——旧逻辑把 90% 的 E1 事件
+        全部挡在门外，而本地兜底按设计不看个人信息，导致用户看到的 L4 永远是
+        与本人无关的套话。现在开闸期间所有待研判事件都有资格走远程，由队列按
+        个人影响等级(L4>L3)优先调度。远程未启用时结果会被上层覆盖，天然兼容。"""
+        return True
 
     def _last_remote_attempt_at(self):
         """查询最近一次远程研判尝试完成时间（无论成功失败），用于冷却控制。"""
@@ -662,6 +660,54 @@ class CognitionController:
                 """
             )
 
+    def _enqueue_remote_upgrades(self, remote_provider: str, max_n: int) -> int:
+        """开闸时主动把"最新研判仍是本地模板"的活跃事件送去远程AI升级。
+
+        背景：事件首次出现时若远程闸关闭，会立刻拿到一条本地研判并把
+        needs_judgment 清零，之后即使开闸也不会再被远程复核。用户看到的 L4 因此
+        长期停留在"不掌握个人情况的本地套话"。本方法每轮挑出当前个人影响最高、
+        且该证据版本还没尝试过远程的事件补入远程队列（L4>L3>其他），由 run_due
+        的远程优先逻辑实际调用。每个证据版本最多升级一次，避免空转。
+        """
+        if not remote_provider or remote_provider == "local" or max_n <= 0:
+            return 0
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT c.cluster_id, c.evidence_hash
+                FROM event_clusters c
+                JOIN judgments j ON j.judgment_id = c.latest_judgment_id
+                WHERE c.status='active'
+                  AND (j.provider='local'
+                       OR IFNULL(j.content_json,'') NOT LIKE '%"personal_action"%')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM judgment_jobs q
+                      WHERE q.cluster_id=c.cluster_id
+                        AND q.provider!='local'
+                        AND q.evidence_hash=c.evidence_hash
+                        AND q.status IN ('queued','retry','queued_budget')
+                  )
+                ORDER BY
+                  (SELECT MAX(CASE WHEN p.alert_level='L4' THEN 2
+                                   WHEN p.alert_level='L3' THEN 1 ELSE 0 END)
+                   FROM personal_impacts p WHERE p.cluster_id=c.cluster_id) DESC,
+                  c.updated_at DESC
+                LIMIT ?
+                """,
+                (max_n,),
+            ).fetchall()
+        count = 0
+        for row in rows:
+            try:
+                # 本地研判走新建；旧远程缺字段则重置原作业，统一由 requeue 处理
+                self.judgment_queue.requeue_for_upgrade(
+                    row["cluster_id"], row["evidence_hash"], remote_provider
+                )
+                count += 1
+            except Exception:
+                continue
+        return count
+
     def _should_notify(self, row) -> bool:
         """False for judgments older than the bootstrap cutoff.
 
@@ -687,33 +733,57 @@ class CognitionController:
             item for item in self.cognition.list_clusters(limit=1000) if item["needs_judgment"]
         ]
         for cluster in clusters:
-            # 开闸时E2+走远程，E1走本地；关闸时全部走本地
+            # 开闸时待研判事件走远程（资格已放宽，由队列按影响优先+节流）；关闸走本地
             use_remote = remote_enabled and self._should_use_remote(cluster)
             provider = remote_provider if use_remote else "local"
             self.judgment_queue.enqueue(
                 cluster["cluster_id"], cluster["evidence_hash"], provider
             )
-        # 开闸时：远程任务每次最多3个（严格控API消耗），本地任务正常处理；
-        # 关闸时：只处理本地任务（downgrade已清理排队中的远程任务）
+        # 开闸时：把已有本地模板研判的高影响事件补送远程AI，结合个人画像升级结论
+        remote_slots = 10 if remote_enabled else 0
+        if remote_enabled:
+            self._enqueue_remote_upgrades(remote_provider, remote_slots)
+        # 远程优先处理（不被本地任务挤出），本地任务补齐其余名额；关闸只处理本地
         judgments = self.judgment_queue.run_due(
             limit=30,
-            remote_limit=10 if remote_enabled else 0,
+            remote_limit=remote_slots,
         )
         mapped = 0
         notified = 0
+        # 增量映射：只处理上次水位线之后产生的研判。旧逻辑每轮都把数万条历史
+        # 最新研判全部重映射一遍，一轮耗时十余分钟，远超 5 分钟调度周期，造成多轮
+        # 重叠积压、界面像不更新。首次无水位线时全量引导一次，之后只映射新增/升级。
+        watermark = self._read_map_watermark()
         with self.database.connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT j.judgment_id,j.cluster_id,j.created_at AS j_created_at,
-                       c.evidence_hash
-                FROM judgments j
-                JOIN event_clusters c ON c.latest_judgment_id=j.judgment_id
-                ORDER BY j.created_at
-                """
-            ).fetchall()
+            if watermark:
+                rows = connection.execute(
+                    """
+                    SELECT j.judgment_id,j.cluster_id,j.created_at AS j_created_at,
+                           c.evidence_hash
+                    FROM judgments j
+                    JOIN event_clusters c ON c.latest_judgment_id=j.judgment_id
+                    WHERE j.created_at > ?
+                    ORDER BY j.created_at
+                    """,
+                    (watermark,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT j.judgment_id,j.cluster_id,j.created_at AS j_created_at,
+                           c.evidence_hash
+                    FROM judgments j
+                    JOIN event_clusters c ON c.latest_judgment_id=j.judgment_id
+                    ORDER BY j.created_at
+                    """
+                ).fetchall()
+        max_created = watermark or ""
         for row in rows:
             results = self.impacts.map_judgment(row["cluster_id"], row["judgment_id"])
             mapped += len(results)
+            row_created = str(row["j_created_at"] or "")
+            if row_created > max_created:
+                max_created = row_created
             # Silently upgrade pre-cutoff judgments on the bootstrap run
             # (mapping is unconditional) so the first cycle never dumps a
             # cascade of historical notifications into the inbox.
@@ -740,6 +810,9 @@ class CognitionController:
                     impact["reason"],
                 )
                 notified += int(notification["status"] == "created")
+        # 映射完成后推进水位线（ISO-UTC 字符串可直接字典序比较）
+        if max_created and max_created != (watermark or ""):
+            self._write_map_watermark(max_created)
         # After the first pass, drop the cutoff so future cycles notify
         # normally — only the bootstrap run is muted.
         self._notify_since = self.now()
@@ -752,6 +825,38 @@ class CognitionController:
             "provider": effective_provider,
             "auto_confirmed": self._auto_confirm_candidates(),
         }
+
+    def _read_map_watermark(self):
+        try:
+            with self.database.connect() as connection:
+                row = connection.execute(
+                    "SELECT value_json FROM runtime_state WHERE state_key='cognition.map_watermark'"
+                ).fetchone()
+            if row and row["value_json"]:
+                payload = json.loads(row["value_json"])
+                value = str(payload.get("since") or "")
+                return value or None
+        except Exception:
+            return None
+        return None
+
+    def _write_map_watermark(self, since: str) -> None:
+        try:
+            with self.database.connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO runtime_state(state_key,value_json,updated_at)
+                    VALUES('cognition.map_watermark',?,?)
+                    ON CONFLICT(state_key) DO UPDATE SET
+                        value_json=excluded.value_json,updated_at=excluded.updated_at
+                    """,
+                    (json.dumps({"since": since}, ensure_ascii=False), self._iso_now()),
+                )
+        except Exception:
+            pass
+
+    def _iso_now(self) -> str:
+        return self.now().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
     def _auto_confirm_candidates(self) -> int:
         """全自动模式：认知运行后自动确认所有待确认预测，无需用户手动去校准面板。
@@ -870,7 +975,8 @@ class CognitionController:
             rows = connection.execute(
                 """
                 SELECT p.*,i.name AS interest_name,i.category AS interest_category,
-                       j.content_json,c.last_seen_at,c.first_seen_at,c.title AS cluster_title,
+                       j.content_json,j.provider AS judgment_provider,
+                       c.last_seen_at,c.first_seen_at,c.title AS cluster_title,
                        (SELECT ei.source_name FROM event_cluster_items eci
                         JOIN external_items ei ON ei.item_id=eci.item_id
                         WHERE eci.cluster_id=c.cluster_id
@@ -884,7 +990,11 @@ class CognitionController:
                   AND p.alert_level IN ('L3','L4')
                   AND p.user_label NOT IN ('false_positive','dismissed')
                   AND (p.muted_until IS NULL OR p.muted_until<=?)
-                ORDER BY p.updated_at DESC
+                ORDER BY
+                  CASE p.alert_level WHEN 'L4' THEN 0 WHEN 'L3' THEN 1 ELSE 2 END,
+                  (j.provider!='local') DESC,
+                  p.impact_score DESC,
+                  p.updated_at DESC
                 """,
                 (now_text,),
             ).fetchall()
@@ -922,14 +1032,23 @@ class CognitionController:
             fact_summary = plain_text(
                 judgment.get("fact_summary") or "外部变化可能产生影响", 220
             )
+            # 远程AI(Agnes)结合用户个人画像生成的"对本人的结论+行动"，优先采用；
+            # 本地兜底研判不掌握个人情况，才回退到类别剧本/观察建议。
+            ai_personal = plain_text(judgment.get("personal_action") or "", 400)
+            is_ai_judgment = str(row["judgment_provider"] or "local") != "local"
+            ai_conclusion = ai_personal if (is_ai_judgment and ai_personal) else ""
             if row["alert_level"] == "L4":
-                # L4 立即行动：结合事件生成一句直接可执行的行动指令
-                action = _l4_directive(
-                    fact_summary, interest_category, time_window, up, down, interest_name
-                )
+                if ai_conclusion:
+                    # Agnes 已替用户判断相关性并给出方向，直接展示
+                    action = ai_conclusion
+                else:
+                    # 本地兜底：结合事件生成一句直接可执行的行动指令
+                    action = _l4_directive(
+                        fact_summary, interest_category, time_window, up, down, interest_name
+                    )
             else:
-                # L3 准备观察：沿用观察类建议
-                action = _personal_advice(
+                # L3：优先用AI个人结论，否则沿用观察类建议
+                action = ai_conclusion or _personal_advice(
                     interest_category, candidate.get("recommended_action")
                 )
             short_fact = _short_fact(fact_summary)
@@ -966,13 +1085,21 @@ class CognitionController:
                     "event_time": row["first_seen_at"] or row["last_seen_at"] or "",
                     "source": plain_text(row["primary_source"] or "", 60),
                     "cluster_title": plain_text(row["cluster_title"] or "", 120),
+                    "judgment_provider": str(row["judgment_provider"] or "local"),
+                    "ai_conclusion": bool(ai_conclusion),
                 }
             )
 
         items.sort(
             key=lambda item: (
-                0 if item["mode"] == "action" else 1,
+                # 先按等级：L4立即行动在最前
                 0 if item["alert_level"] == "L4" else 1,
+                # 同等级内：带个人结论的AI研判 > 旧版无个人结论远程研判 > 本地通用模板，
+                # 保证首页最前面永远是"结合你的情况判过"的结论，而不是时间更近的通用模板
+                0 if item.get("ai_conclusion") else (
+                    1 if item.get("judgment_provider") != "local" else 2),
+                # 再按时间紧迫性（7天内需行动 优先于 继续观察）、分值、更新时间
+                0 if item["mode"] == "action" else 1,
                 -item["impact_score"],
                 item["updated_at"],
             )

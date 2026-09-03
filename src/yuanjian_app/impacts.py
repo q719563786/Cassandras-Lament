@@ -115,6 +115,34 @@ def _alert_level(score):
     return "L4"
 
 
+# AI 在 personal_action 中明确判定"与该用户无关"的强信号。命中即说明事件虽有
+# 公共层面重要性，但对用户本人无传导路径，应自动降级、不占L3/L4行动板——这是
+# "系统自己过滤，不把判断推给用户"的关键一环。
+_IRRELEVANT_PATTERNS = (
+    r"与(你|您)(基本)?无(直接)?(关系|关联|交集)",
+    r"与(你|您).{0,12}无关",
+    r"(基本|大致|总体)无关",
+    r"不(涉及|触及|作用于|影响)(你|您)",
+    r"与(你|您)没有(直接)?(关系|关联|交集)",
+    r"无需(为此|操作|行动|调整)",
+)
+_RELEVANT_PATTERN = r"(直接相关|与你直接相关|直接作用于|实质影响你)"
+
+
+def _personal_relevance(judgment) -> float:
+    """返回个人相关性系数：AI明确判无关→0.45（压到L2以下），否则1.0。"""
+    text = str(judgment.get("personal_action") or "")
+    if not text:
+        return 1.0
+    # 先看是否明确直接相关（优先，避免被"无关"字样误伤）
+    if re.search(_RELEVANT_PATTERN, text):
+        return 1.0
+    for pattern in _IRRELEVANT_PATTERNS:
+        if re.search(pattern, text):
+            return 0.45
+    return 1.0
+
+
 def _urgency(horizons):
     text = " ".join(map(str, horizons))
     if any(word in text for word in ("立即", "今日", "7天", "一周")):
@@ -224,14 +252,17 @@ class ImpactService:
                 "exposure": exposure,
                 "urgency": urgency,
             }
-            score = round(
+            base_score = (
                 evidence * 0.25
                 + confidence * 0.20
                 + importance * 0.25
                 + exposure * 0.20
-                + urgency * 0.10,
-                6,
+                + urgency * 0.10
             )
+            # 结合AI对"用户本人相关性"的结论做升降级：判无关则压到行动板之下
+            relevance = _personal_relevance(judgment)
+            components["personal_relevance"] = relevance
+            score = round(max(0.0, min(base_score * relevance, 1.0)), 6)
             alert = _alert_level(score)
             with self.database.connect() as connection:
                 existing = connection.execute(

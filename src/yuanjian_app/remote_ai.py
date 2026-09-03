@@ -231,7 +231,7 @@ class OpenAIResponsesProvider:
         token_loader,
         endpoint: str = DEFAULT_ENDPOINT,
         transport=None,
-        timeout: int = 30,
+        timeout: int = 60,
     ):
         self.model = str(model or "").strip()
         if not self.model:
@@ -339,7 +339,7 @@ class DeepSeekChatProvider:
         token_loader,
         endpoint: str = "https://api.deepseek.com/chat/completions",
         transport=None,
-        timeout: int = 30,
+        timeout: int = 60,
     ):
         self.model = str(model or "").strip()
         if not self.model:
@@ -362,16 +362,30 @@ class DeepSeekChatProvider:
             "horizons(string[])、probability_low(number 0-1)、probability_high(number 0-1)、"
             "confidence(number 0-1)、supporting_source_ids(string[])、counter_source_ids(string[])、"
             "up_triggers(string[])、down_triggers(string[])、impact_categories(string[])、"
+            "personal_action(string，必填，80-300字)、"
             "gyw(object，含 stakeholders/constraints/least_resistance_path/counter_evidence/"
             "leading_indicators/beneficiaries/cost_bearers/historical_parallel/observable_signals)。"
             "不要输出JSON以外的任何文字。"
         )
         if personal_context:
             system_with_schema += (
-                "\n\n【用户个人上下文·仅供你参考，勿在输出中复述】"
-                "以下是用户的利益地图与近期预测，用于让研判贴合用户的「位置差」"
-                "（登高望远原则：每个人受影响的范围不同）。请据此评估事件对用户利益的影响方向：\n"
+                "\n\n【用户个人上下文·你必须据此替用户做判断，勿在输出中复述原文】"
+                "下面是用户的利益地图、近期预测和用户主动记录的个人近况。"
+                "请你站在用户的立场，先判断这件事与该用户是否真的相关、通过什么具体路径影响他，"
+                "再把结论写进 personal_action 字段：\n"
                 + json.dumps(personal_context, ensure_ascii=False, indent=2)
+                + "\n\npersonal_action 写作要求（这是给用户看的核心结论，最重要）："
+                "①直接替用户下判断，禁止出现'请你自行核实/查清是否在适用范围/建议你关注'这类把判断推回给用户的话；"
+                "②先给明确结论——这件事对该用户是'直接相关/间接相关/基本无关'中的哪一种、为什么；"
+                "③再给一个动词开头、该用户现在就能执行的具体动作和时间窗口；"
+                "④若判断与用户基本无关，要明确写'与你无直接关系，无需操作'并用一句话说明原因，不要硬凑建议；"
+                "⑤结合用户近况（如收入、工作、所在地）说话，不要放之四海皆准的套话；"
+                "⑥一句话到一段话，不超过300字。"
+            )
+        else:
+            system_with_schema += (
+                "\n\npersonal_action 字段要求：给出该事件的应对方向与一个可执行动作；"
+                "信息不足以判断与具体个人关系时，说明这是通用层面影响、暂不需要个人操作。"
             )
         return {
             "model": self.model,
@@ -637,6 +651,35 @@ class JudgmentQueue:
             ).fetchone()
         return row["job_id"]
 
+    def requeue_for_upgrade(self, cluster_id: str, evidence_hash: str, provider: str) -> str:
+        """需要用最新提示词/schema 重新远程研判时复用作业行：
+        同一 (cluster,evidence_hash,provider) 已存在终态作业（succeeded/invalid_output/
+        failed/paused_auth）时把它重置回 queued；已在排队则直接返回；不存在则新建。
+        解决 enqueue 的唯一约束导致"旧版本远程研判永远无法被新schema重判"的问题。"""
+        if provider not in self.providers:
+            raise KeyError(provider)
+        now_text = _iso(self.now())
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT job_id,status FROM judgment_jobs
+                WHERE cluster_id=? AND evidence_hash=? AND provider=?
+                """,
+                (cluster_id, evidence_hash, provider),
+            ).fetchone()
+            if row is None:
+                return self.enqueue(cluster_id, evidence_hash, provider)
+            if row["status"] in ("queued", "retry", "queued_budget"):
+                return row["job_id"]
+            connection.execute(
+                """
+                UPDATE judgment_jobs SET status='queued',attempts=0,request_chars=0,
+                    next_attempt_at=?,last_error='',finished_at=NULL WHERE job_id=?
+                """,
+                (now_text, row["job_id"]),
+            )
+            return row["job_id"]
+
     def _remote_used_today(self, connection, now):
         """统计今日所有实际发起过API请求的远程任务（无论成功/失败/格式错误），
         因为只要请求发出就消耗了token。"""
@@ -699,15 +742,36 @@ class JudgmentQueue:
         MAX_REMOTE_RETRIES = 4  # 远程任务最多重试3次（指数退避15/30/60分钟），超过降级本地
         now = self.now().astimezone(timezone.utc)
         with self.database.connect() as connection:
-            rows = connection.execute(
-                """
+            due_sql = (
+                "status IN ('queued','retry','queued_budget')"
+                " AND (next_attempt_at IS NULL OR next_attempt_at<=?)"
+            )
+            # 修复：远程任务优先选取，避免被上千条本地任务按 created_at 排序挤出
+            # limit 窗口（旧逻辑一次性 LIMIT 30 混合排序，远程任务几乎永远轮不到）。
+            # 远程内部再按"当前个人影响等级"优先：L4 > L3 > 其他，让用户看得到的
+            # 高影响事件最先获得 AI 结合个人画像的研判。
+            remote_rows = connection.execute(
+                f"""
+                SELECT j.* FROM judgment_jobs j
+                WHERE {due_sql} AND j.provider!='local'
+                ORDER BY
+                  (SELECT MAX(CASE WHEN p.alert_level='L4' THEN 2
+                                   WHEN p.alert_level='L3' THEN 1 ELSE 0 END)
+                   FROM personal_impacts p WHERE p.cluster_id=j.cluster_id) DESC,
+                  j.created_at, j.job_id
+                LIMIT ?
+                """,
+                (_iso(now), max(1, int(remote_limit))),
+            ).fetchall()
+            local_rows = connection.execute(
+                f"""
                 SELECT * FROM judgment_jobs
-                WHERE status IN ('queued','retry','queued_budget')
-                  AND (next_attempt_at IS NULL OR next_attempt_at<=?)
+                WHERE {due_sql} AND provider='local'
                 ORDER BY created_at,job_id LIMIT ?
                 """,
                 (_iso(now), max(1, min(int(limit), 100))),
             ).fetchall()
+            rows = list(remote_rows) + list(local_rows)
             used = self._remote_used_today(connection, now)
         summary = {"succeeded": 0, "deferred": 0, "failed": 0}
         remote_done = 0
