@@ -485,3 +485,35 @@ class ImpactService:
                 (json.dumps(candidate, ensure_ascii=False, sort_keys=True), _iso(self.now()), impact_id),
             )
         return result
+
+
+    def auto_confirm_all(self) -> dict:
+        """全自动确认所有未确认的L3/L4候选预测，无需用户手动操作。"""
+        confirmed = 0
+        skipped = 0
+        errors = []
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT impact_id, candidate_json, alert_level
+                FROM personal_impacts
+                WHERE candidate_json IS NOT NULL AND candidate_json != ''
+                  AND alert_level IN ('L3','L4')
+                  AND user_label NOT IN ('false_positive','dismissed')
+                """
+            ).fetchall()
+        for row in rows:
+            try:
+                candidate = json.loads(row["candidate_json"] or "{}")
+                if candidate.get("confirmed_forecast_id"):
+                    skipped += 1
+                    continue
+                low = float(candidate.get("probability_low", 0.3))
+                high = float(candidate.get("probability_high", 0.7))
+                probability = _nearest_probability((low + high) / 2)
+                self.confirm_candidate(row["impact_id"], probability)
+                confirmed += 1
+            except Exception as exc:
+                errors.append(f"{row['impact_id']}: {exc}")
+                skipped += 1
+        return {"confirmed": confirmed, "skipped": skipped, "errors": errors[:10], "total": len(rows)}

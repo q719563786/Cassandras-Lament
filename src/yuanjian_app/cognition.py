@@ -49,7 +49,7 @@ def _categories(title: str, summary: str) -> list[str]:
 
 def _personal_advice(category: str, recommended_action: str) -> str:
     action = plain_text(recommended_action, 240)
-    internal_terms = ("正式预测账本", "收集执行证据", "人工确认")
+    internal_terms = ("正式预测账本", "收集执行证据", "人工确认", "校准面板", "正式预测", "记录为正式")
     if action and not any(term in action for term in internal_terms):
         return action
     category = str(category or "general").casefold()
@@ -645,27 +645,13 @@ class CognitionController:
 
     def _auto_confirm_candidates(self) -> int:
         """全自动模式：认知运行后自动确认所有待确认预测，无需用户手动去校准面板。
-        使用AI研判的概率区间中值映射到最近的固定档位，自动创建预测账本。
+        使用每个候选的实际概率区间中值，自动创建预测账本。
         返回自动确认的数量。"""
         try:
-            candidates = self.impacts.pending_candidates(limit=50)
+            result = self.impacts.auto_confirm_all()
+            return result.get("confirmed", 0)
         except Exception:
             return 0
-        confirmed = 0
-        for cand in candidates:
-            try:
-                impact_id = cand.get("id")
-                if not impact_id:
-                    continue
-                # 候选数据不直接暴露概率，用默认0.5映射到最近档位
-                # （校准面板仍可手动调整，全自动模式下用合理默认值）
-                from .impacts import _nearest_probability
-                prob = _nearest_probability(0.5)
-                self.impacts.confirm_candidate(impact_id, prob)
-                confirmed += 1
-            except Exception:
-                continue
-        return confirmed
 
     def capture_trends(self):
         return self.trends.capture(self.now())
@@ -759,6 +745,11 @@ class CognitionController:
 
     def risk_dashboard(self, source_states=None, limit=3):
         """Project internal judgments into a personal decision workload."""
+        # 全自动模式：加载首页前自动确认所有待确认候选，无需用户手动操作
+        try:
+            self.impacts.auto_confirm_all()
+        except Exception:
+            pass
         limit = max(1, min(int(limit), 50))
         now = self.now().astimezone(timezone.utc)
         now_text = _iso(now)
@@ -882,10 +873,10 @@ class CognitionController:
         # the user think the app produced "no 预知策略 at all".
         if action_count:
             state = "action"
-            summary = f"今天有 {action_count} 件事需要处理，先保护最重要的个人利益。"
+            summary = f"系统已自动分析 {action_count} 条近期相关信息，以下是需要你关注的事项（已自动确认研判结果）。"
         elif watch_count:
             state = "watch"
-            summary = f"有 {watch_count} 件事需要继续观察，目前不必仓促行动。"
+            summary = f"系统持续监控中，{watch_count} 条事项在观察期内，目前不必仓促行动。"
         elif coverage_gap:
             state = "coverage_gap"
             summary = "公开信息监控覆盖不足，系统正在重试，暂不能判断目前平稳。"
