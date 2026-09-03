@@ -261,7 +261,7 @@ function bindCardActions(root) {
       try {
         await api(`/api/cognition/candidates/${impactId}/confirm`, {
           method: 'POST',
-          body: { probability: prob }
+          body: JSON.stringify({ probability: prob })
         });
         btn.closest('.modal-backdrop')?.remove();
         // 刷新当前视图
@@ -283,7 +283,7 @@ function bindCardActions(root) {
       const payload = action === 'mute' ? { hours: 168 } : {};
       await api(`/api/cognition/clusters/${clusterId}/feedback`, {
         method: 'POST',
-        body: { action, ...payload }
+        body: JSON.stringify({ action, ...payload })
       });
       // 操作成功，移除卡片
       card?.classList.add('ac-done');

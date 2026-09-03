@@ -8,8 +8,17 @@ const TOKEN = params.get('token') || '';
 
 // 统一请求：裸 JSON 响应（非 code/data 包裹）+ X-YuanJian-Token 头 + {error:{message}} 错误格式
 export async function api(path, options = {}) {
+  // 兜底：若调用方传入裸对象作为 body，自动序列化为 JSON，
+  // 避免 fetch 把对象 toString 成 "[object Object]" 导致后端 json 解析失败。
+  let body = options.body;
+  if (body !== null && typeof body === 'object' &&
+      !(body instanceof FormData) && !(body instanceof Blob) &&
+      !(body instanceof ArrayBuffer) && typeof body.getReader !== 'function') {
+    body = JSON.stringify(body);
+  }
   const response = await fetch(path, {
     ...options,
+    body,
     headers: {
       'Content-Type': 'application/json',
       'X-YuanJian-Token': TOKEN,
