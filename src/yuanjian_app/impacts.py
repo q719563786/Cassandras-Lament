@@ -110,7 +110,7 @@ def _alert_level(score):
         return "L1"
     if score < 0.55:
         return "L2"
-    if score < 0.68:
+    if score < 0.67:
         return "L3"
     return "L4"
 
