@@ -279,19 +279,32 @@ function bindCardActions(root) {
     btn.disabled = true;
     const originalText = btn.textContent;
     btn.textContent = '处理中…';
-    try {
+    const sendFeedback = () => {
       const payload = action === 'mute' ? { hours: 168 } : {};
-      await api(`/api/cognition/clusters/${clusterId}/feedback`, {
+      return api(`/api/cognition/clusters/${clusterId}/feedback`, {
         method: 'POST',
         body: JSON.stringify({ action, ...payload })
       });
+    };
+    // 后台写库繁忙时可能出现瞬时连接失败(Failed to fetch)，自动静默重试一次
+    const isNetworkErr = (e) => !e || e.name === 'TypeError' ||
+      /failed to fetch|network|load failed/i.test(String(e?.message || ''));
+    try {
+      try {
+        await sendFeedback();
+      } catch (e1) {
+        if (!isNetworkErr(e1)) throw e1;
+        btn.textContent = '重试中…';
+        await new Promise((r) => setTimeout(r, 700));
+        await sendFeedback();
+      }
       // 操作成功，移除卡片
       card?.classList.add('ac-done');
       setTimeout(() => card?.remove(), 300);
     } catch (err) {
       btn.disabled = false;
       btn.textContent = originalText;
-      alert('操作失败：' + (err.message || '未知错误'));
+      alert('操作失败：' + (err.message || '未知错误') + '（后台可能正忙，稍后再点一次即可）');
     }
   });
 

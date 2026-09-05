@@ -668,4 +668,13 @@ def create_server(host, port, token, services):
                 return
             self._error(404, "not_found", "接口不存在")
 
-    return ThreadingHTTPServer((host, port), Handler)
+    class _YuanJianServer(ThreadingHTTPServer):
+        # 后台调度写库突发时，多个请求线程可能短暂等待SQLite锁；
+        # 把默认仅5的连接积压队列提高到128，让用户点击排队等待而非被直接RST
+        # （RST在前端表现为 TypeError: Failed to fetch）。
+        request_queue_size = 128
+        daemon_threads = True       # 请求处理线程不阻塞进程退出
+        block_on_close = False
+        allow_reuse_address = True
+
+    return _YuanJianServer((host, port), Handler)

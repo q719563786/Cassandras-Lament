@@ -405,9 +405,15 @@ class Database:
     @contextmanager
     def connect(self):
         """Yield a transaction and always close the Windows file handle."""
-        connection = sqlite3.connect(self.path, timeout=10.0)
+        connection = sqlite3.connect(self.path, timeout=20.0)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout=10000")
+        # 后台写库突发时，界面写操作最多等20秒拿锁而不是10秒后抛 database is locked；
+        # WAL 模式下 synchronous=NORMAL 是安全的且提交更快，能显著缩短持锁窗口。
+        connection.execute("PRAGMA busy_timeout=20000")
+        try:
+            connection.execute("PRAGMA synchronous=NORMAL")
+        except Exception:
+            pass
         try:
             yield connection
             connection.commit()
