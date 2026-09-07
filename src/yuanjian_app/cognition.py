@@ -1104,6 +1104,29 @@ class CognitionController:
                 item["updated_at"],
             )
         )
+        # 同一外部事件可能同时命中多个利益对象（如"健康安全+政策权益"、
+        # "现金流+资产负债"），此前会为每个类别各出一张卡，造成首页重复推送。
+        # 这里按事件(cluster_id)折叠成一张卡，合并受影响的利益标签；排序已是
+        # 最优在前，故保留首张，反馈按 cluster_id 一次性作用于全部类别。
+        _merged = {}
+        _order = []
+        for _it in items:
+            _cid = _it["cluster_id"]
+            if _cid not in _merged:
+                _it["_names"] = [_it["interest_name"]]
+                _merged[_cid] = _it
+                _order.append(_cid)
+            elif _it["interest_name"] not in _merged[_cid]["_names"]:
+                _merged[_cid]["_names"].append(_it["interest_name"])
+        items = []
+        for _cid in _order:
+            _it = _merged[_cid]
+            _names = list(dict.fromkeys(_it.pop("_names")))
+            _it["interest_name"] = "、".join(_names)
+            _it["title"] = f'{_it["interest_name"]}：{_it["reason"]}'
+            items.append(_it)
+        action_count = sum(1 for _it in items if _it["mode"] == "action")
+        watch_count = sum(1 for _it in items if _it["mode"] == "watch")
         sources = list(source_states or ())
         enabled = [source for source in sources if source.get("enabled", True)]
         healthy = [

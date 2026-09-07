@@ -6,7 +6,29 @@ import { pageRange } from './ui_core.js';
 const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
 
+// 网络层失败判定：TypeError "Failed to fetch"（切网/开关代理的几秒离线窗口、
+// 网络栈重置）属于可重试；HTTP 4xx/5xx 是服务器明确答复，不重试。
+function isNetworkError(err) {
+  return err?.name === 'TypeError' ||
+    /failed to fetch|networkerror|network request failed|load failed/i.test(String(err?.message || ''));
+}
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+// navigator.onLine===false 时（切Wi-Fi/拨号/VPN握手），Chromium 连 127.0.0.1
+// 也会直接失败；等待 online 事件或最多 maxMs 后继续。
+function waitOnline(maxMs = 8000) {
+  return new Promise((resolve) => {
+    if (typeof navigator === 'undefined' || navigator.onLine !== false) return resolve();
+    let done = false;
+    const finish = () => { if (!done) { done = true; cleanup(); resolve(); } };
+    const timer = setTimeout(finish, maxMs);
+    window.addEventListener('online', finish, { once: true });
+    function cleanup() { clearTimeout(timer); window.removeEventListener('online', finish); }
+  });
+}
+
 // 统一请求：裸 JSON 响应（非 code/data 包裹）+ X-YuanJian-Token 头 + {error:{message}} 错误格式
+// 网络层瞬时失败自动退避重试（500ms/1200ms/2500ms），覆盖切网、VPN 握手等几秒窗口；
+// 本应用的写操作（确认/静音/误报）都是幂等的，安全可重试。
 export async function api(path, options = {}) {
   // 兜底：若调用方传入裸对象作为 body，自动序列化为 JSON，
   // 避免 fetch 把对象 toString 成 "[object Object]" 导致后端 json 解析失败。
@@ -16,23 +38,35 @@ export async function api(path, options = {}) {
       !(body instanceof ArrayBuffer) && typeof body.getReader !== 'function') {
     body = JSON.stringify(body);
   }
-  const response = await fetch(path, {
-    ...options,
-    body,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-YuanJian-Token': TOKEN,
-      ...(options.headers || {})
+  const backoff = [500, 1200, 2500];
+  let lastError = null;
+  for (let attempt = 0; attempt <= backoff.length; attempt++) {
+    await waitOnline();
+    try {
+      const response = await fetch(path, {
+        ...options,
+        body,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-YuanJian-Token': TOKEN,
+          ...(options.headers || {})
+        }
+      });
+      const text = await response.text();
+      let payload = null;
+      try { payload = text ? JSON.parse(text) : null; } catch (_) { payload = null; }
+      if (!response.ok) {
+        const message = payload?.error?.message || `请求失败（${response.status}）`;
+        throw new Error(message); // HTTP 明确答复：name=Error，不会被下面当网络错误重试
+      }
+      return payload;
+    } catch (err) {
+      lastError = err;
+      if (!isNetworkError(err) || attempt === backoff.length) throw err;
+      await delay(backoff[attempt]);
     }
-  });
-  const text = await response.text();
-  let payload = null;
-  try { payload = text ? JSON.parse(text) : null; } catch (_) { payload = null; }
-  if (!response.ok) {
-    const message = payload?.error?.message || `请求失败（${response.status}）`;
-    throw new Error(message);
   }
-  return payload;
+  throw lastError;
 }
 
 export function escapeHtml(value) {
