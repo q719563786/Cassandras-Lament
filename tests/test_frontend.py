@@ -546,6 +546,21 @@ class RouterIntegrationTests(unittest.TestCase):
         )
         self.assertIn("ROUTER_OK", result.stdout, result.stderr)
 
+    def test_api_module_scrubs_the_session_token_from_the_address(self):
+        """会话令牌读到之后必须立刻从地址栏抹掉。
+
+        令牌由 pywebview 以 ?token= 注入。如果留在地址里，它会进入窗口地址、
+        浏览历史与任何截图，因此读到手后必须立即 replaceState 清掉。
+        """
+        api_source = (STATIC / "js" / "api.js").read_text(encoding="utf-8")
+
+        self.assertIn("params.get('token')", api_source)
+        self.assertIn("params.delete('token')", api_source)
+        self.assertIn("history.replaceState", api_source)
+        # 令牌只能走请求头，不能再出现在任何 URL 拼接里。
+        self.assertIn("'X-YuanJian-Token'", api_source)
+        self.assertNotIn("?token=", api_source)
+
 
 if __name__ == "__main__":
     unittest.main()

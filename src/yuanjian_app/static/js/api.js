@@ -2,9 +2,16 @@
 import { yjIcon } from './icons.js';
 import { pageRange } from './ui_core.js';
 
-// 会话令牌：沿旧模式从 URL query 取（pywebview 打开时注入 ?token=）
+// 会话令牌：pywebview 打开时以查询参数注入。读到后立刻把地址栏里的令牌抹掉，
+// 避免它留在窗口地址与浏览历史上（截图、地址复制都可能带出去）；
+// 之后所有请求一律走 X-YuanJian-Token 头，不再依赖 URL。
 const params = new URLSearchParams(location.search);
 const TOKEN = params.get('token') || '';
+if (TOKEN && typeof history !== 'undefined' && history.replaceState) {
+  params.delete('token');
+  const remaining = params.toString();
+  history.replaceState(null, '', location.pathname + (remaining ? `?${remaining}` : '') + location.hash);
+}
 
 // 网络层失败判定：TypeError "Failed to fetch"（切网/开关代理的几秒离线窗口、
 // 网络栈重置）属于可重试；HTTP 4xx/5xx 是服务器明确答复，不重试。

@@ -1,3 +1,4 @@
+import hmac
 import json
 import sys
 import threading
@@ -18,6 +19,25 @@ def resolve_static_root(module_file, bundle_root=None):
 
 
 STATIC_ROOT = resolve_static_root(Path(__file__), getattr(sys, "_MEIPASS", None))
+
+
+# 所有响应统一附带的安全头。
+# Referrer-Policy 尤其重要：会话令牌通过 URL query 交给前端（pywebview 注入
+# ?token=），任何形式的 referrer 外泄都等于直接泄漏令牌。
+# frame-ancestors / base-uri / object-src / form-action 用来补全 CSP 的默认缺口
+# ——只写 default-src 时，这几项并不会被完整覆盖。
+SECURITY_HEADERS = (
+    (
+        "Content-Security-Policy",
+        "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; "
+        "img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'self'; "
+        "form-action 'none'; frame-ancestors 'none'",
+    ),
+    ("X-Content-Type-Options", "nosniff"),
+    ("Referrer-Policy", "no-referrer"),
+    ("Cross-Origin-Opener-Policy", "same-origin"),
+    ("Cross-Origin-Resource-Policy", "same-origin"),
+)
 
 
 # 静态资源白名单注册表：URL 路径 -> (磁盘相对路径, MIME 类型)。
@@ -125,12 +145,17 @@ def create_server(host, port, token, services):
                 except Exception:
                     pass
 
+        def _send_security_headers(self):
+            for name, value in SECURITY_HEADERS:
+                self.send_header(name, value)
+
         def _json(self, payload, status=200):
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self._send_security_headers()
             self.end_headers()
             self.wfile.write(body)
 
@@ -138,7 +163,10 @@ def create_server(host, port, token, services):
             self._json({"error": {"code": code, "message": message}}, status)
 
         def _authorized(self):
-            return self.headers.get("X-YuanJian-Token") == token
+            # 定时安全比较：逐字节 == 会在首个不同字节提前返回，理论上可用于
+            # 逐位试探令牌。本机场景下几乎不可利用，但改一行没有成本。
+            provided = self.headers.get("X-YuanJian-Token") or ""
+            return hmac.compare_digest(provided, token)
 
         def _discard_small_request_body(self):
             try:
@@ -195,7 +223,7 @@ def create_server(host, port, token, services):
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-cache")
-            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'")
+            self._send_security_headers()
             self.end_headers()
             self.wfile.write(body)
 

@@ -908,6 +908,67 @@ class HttpApiTests(unittest.TestCase):
         notification_error.exception.close()
         self.assertEqual(notification_payload["error"], {"code": "notification_not_found", "message": "提醒不存在"})
 
+    def test_security_headers_cover_pages_and_api_responses(self):
+        """静态页面与 JSON 接口都必须带全安全头。
+
+        此前只有静态资源设了 CSP，且 CSP 只写了 default-src 系列；
+        Referrer-Policy 尤其关键 —— 会话令牌通过 URL query 交付，
+        referrer 一旦外泄就等于泄漏令牌。
+        """
+        from yuanjian_app.http_api import SECURITY_HEADERS
+
+        expected = {
+            "Content-Security-Policy": (
+                "default-src 'self'; script-src 'self'; style-src 'self'; "
+                "connect-src 'self'; img-src 'self' data:; font-src 'self'; "
+                "object-src 'none'; base-uri 'self'; form-action 'none'; "
+                "frame-ancestors 'none'"
+            ),
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+            "Cross-Origin-Opener-Policy": "same-origin",
+            "Cross-Origin-Resource-Policy": "same-origin",
+        }
+        self.assertEqual(dict(SECURITY_HEADERS), expected)
+
+        page = urllib.request.urlopen(self.base_url + "/", timeout=2)
+        try:
+            for name, value in expected.items():
+                self.assertEqual(page.headers.get(name), value, f"页面缺少 {name}")
+        finally:
+            page.close()
+
+        api_request = urllib.request.Request(
+            self.base_url + "/api/forecasts",
+            headers={"X-YuanJian-Token": "test-token"},
+        )
+        api = urllib.request.urlopen(api_request, timeout=2)
+        try:
+            for name, value in expected.items():
+                self.assertEqual(api.headers.get(name), value, f"接口缺少 {name}")
+            self.assertEqual(api.headers.get("Cache-Control"), "no-store")
+        finally:
+            api.close()
+
+    def test_unauthorized_response_also_carries_security_headers(self):
+        """错误路径同样不能漏头 —— 403 也是浏览器会渲染的响应。"""
+        request = urllib.request.Request(self.base_url + "/api/forecasts")
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=2)
+        error = raised.exception
+        self.assertEqual(error.code, 403)
+        self.assertEqual(error.headers.get("Referrer-Policy"), "no-referrer")
+        self.assertEqual(error.headers.get("X-Content-Type-Options"), "nosniff")
+        error.close()
+
+    def test_token_comparison_uses_constant_time_helper(self):
+        """定时安全比较：源码里必须是 hmac.compare_digest，而不是裸 ==。"""
+        source = (Path(__file__).resolve().parents[1] / "src" / "yuanjian_app" / "http_api.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("hmac.compare_digest(provided, token)", source)
+        self.assertNotIn('self.headers.get("X-YuanJian-Token") == token', source)
+
 
 if __name__ == "__main__":
     unittest.main()
