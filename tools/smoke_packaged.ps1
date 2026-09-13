@@ -73,6 +73,10 @@ try {
     if ($moduleResponse.StatusCode -ne 200) {
         throw "Packaged module view was not served"
     }
+    $version = Invoke-RestMethod -Method Get -TimeoutSec 2 -Uri "http://127.0.0.1:$($runtime.port)/api/app/version" -Headers $headers
+    if (-not $version.version) {
+        throw "Packaged version endpoint did not report a version"
+    }
     if ($homeResponse.Content.Contains("https://")) {
         throw "Packaged home page contains a remote resource"
     }
@@ -100,6 +104,7 @@ try {
         RemoteScripts = $false
         DefaultView = $defaultView
         ModuleEntry = $moduleEntry
+        Version = $version.version
         LocalFallback = $cognition.provider
         SecondInstanceExitCode = $second.ExitCode
         Shutdown = $shutdown.status
