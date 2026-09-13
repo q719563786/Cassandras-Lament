@@ -285,6 +285,12 @@ class ImpactService:
             components["personal_relevance"] = relevance
             score = round(max(0.0, min(base_score * relevance, 1.0)), 6)
             alert = _alert_level(score)
+            # E1 是单一来源线索，未经互证。README 与 PRIVACY.md 对外承诺
+            # 「E1 无论多重要都不得超过 L3」，此处是该承诺的强制点：只有 E2 及以上
+            # （同域转载不算互证）才允许进入 L4 立即行动。证据等级缺失或无法识别时
+            # 与 EVIDENCE_WEIGHTS 的兜底权重一致，按 E1 处理，宁可保守。
+            if alert == "L4" and evidence <= EVIDENCE_WEIGHTS["E1"]:
+                alert = "L3"
             with self.database.connect() as connection:
                 existing = connection.execute(
                     """

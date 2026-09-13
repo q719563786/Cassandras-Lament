@@ -108,7 +108,7 @@ class ImpactServiceTests(unittest.TestCase):
         self.assertEqual(high["alert_level"], "L4")
         self.assertEqual(
             set(high["components"]),
-            {"evidence", "confidence", "importance", "exposure", "urgency"},
+            {"evidence", "confidence", "importance", "exposure", "urgency", "personal_relevance"},
         )
         self.assertAlmostEqual(high["components"]["evidence"], 0.75)
 

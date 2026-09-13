@@ -108,18 +108,16 @@ python tools\privacy_scan.py
 
 ## 已知问题
 
-在提交 `cb5cc03` 上执行完整测试套件，结果为 `Ran 207 tests`，`failures=3`，`errors=3`。以下用例当前不通过，尚未修复：
+完整测试套件当前为 `Ran 207 tests`，`failures=1`，`errors=3`。以下 4 个用例不通过，原因均为**测试未跟上产品代码**，不涉及产品缺陷：
 
 - `test_application.ApplicationTests.test_background_launch_starts_desktop_hidden`（error）
 - `test_application.ApplicationTests.test_normal_launch_uses_desktop_window`（error）
-  - 测试替身 `RecordingScheduler.stop()` 未接受 `timeout` 参数，而 `application.py` 已按 `stop(timeout=3)` 调用。
+  - 测试替身 `RecordingScheduler.stop()` 未接受 `timeout` 参数，而 `application.py` 已按 `stop(timeout=3)` 调用，需要在替身上补齐签名。
 - `test_contracts.GywV2ContractTests.test_historical_parallel_normalization_writes_back`（error）
-  - `validate_judgment()` 判定「研判字段不完整或包含未知字段」，历史空串归一化用例被拒绝。
+  - `validate_judgment()` 要求结果字段集合**完全等于** `_RESULT_FIELDS`；该集合后来加入了 `personal_action`，用例固件 `_base_result()` 未同步。
 - `test_cognition.RiskDashboardTests.test_dashboard_returns_three_action_first_plain_language_items`（failure）
   - 断言文案仍为「保留现金」，实际输出已改为「留足对应现金」。
-- `test_impacts.ImpactServiceTests.test_e1_is_capped_at_l3_while_strong_e3_can_reach_l4`（failure）
-  - **该失败涉及安全边界**：本文件与 `PRIVACY.md` 均声明「E1 无论多重要都不得超过 L3」，但当前实现让 `low` 项取到了 `L4`。
-- `test_impacts.ImpactServiceTests.test_pending_candidates_surfaces_gyw_framework_from_judgment`（failure）
-  - 待确认候选列表为空，与「候选预测必须人工选择固定概率后才能进入账本」的流程不一致。
+
+已修复（2026-09-13）：`test_impacts` 的两个用例曾同时不通过。根因是 E1 事件可以突破 L3 到达 L4，而 `map_judgment()` 对 L4 候选会自动确认——等于单一来源线索未经人工选择概率就写入不可变预测账本，并同时从待确认列表消失，违反本文档「候选预测必须人工确认」的流程。现已在 `impacts.py` 强制 E1 不得超过 L3。
 
 在上述用例修复并通过之前，不应把当前提交视为已验证版本。
