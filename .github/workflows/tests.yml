@@ -1,0 +1,43 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    # 项目只支持 Windows（WebView2 桌面窗口 + PowerShell 构建脚本），
+    # 因此测试跑在 windows-latest 上，而不是 ubuntu。
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # 先跑测试：测试套件不依赖运行时依赖（导入是惰性的），
+      # 所以即使依赖清单有问题，真实的测试结果仍然能先呈现出来。
+      - name: Run the full test suite
+        env:
+          PYTHONPATH: src
+          PYTHONWARNINGS: error::ResourceWarning
+        run: python -m unittest discover -s tests -v
+
+      # 再验证依赖清单本身可安装 —— 这是"从源码运行"路径的守门人。
+      - name: Install pinned dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-build.txt
+
+      # 发布闸门由 CI 强制执行，不再依赖提交者自觉。
+      - name: Privacy gate on the committed publication tree
+        run: python tools/privacy_scan.py --committed

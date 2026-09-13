@@ -1,0 +1,4 @@
+# 打包依赖 —— 在运行时依赖之上加 PyInstaller。
+-r requirements.txt
+
+pyinstaller==6.21.0

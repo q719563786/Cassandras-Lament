@@ -1,0 +1,25 @@
+# 行尾统一：不再依赖各台机器上的 core.autocrlf 设置。
+# 仓库内文本一律按 LF 存储，Windows 专用脚本在检出时保持 CRLF。
+#
+# 之所以显式写死，是因为此前同一目录下的文件行尾不一致
+#（static/js/app.js 是 LF，static/js/views/today.js 是 CRLF），
+# 会让"整个文件被标记为改动"这类假 diff 反复出现。
+
+* text=auto eol=lf
+
+# Windows 批处理对 LF 敏感（尤其是带标签与 goto 的脚本），必须 CRLF。
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制资源不做行尾转换。
+*.woff2 binary
+*.woff binary
+*.ttf binary
+*.otf binary
+*.png binary
+*.jpg binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.pyd binary
