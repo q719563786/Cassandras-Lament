@@ -2,6 +2,39 @@
 
 远见是一个只在 Windows 本机运行的外部认知雷达。它持续读取公开信息，把同一事件的多篇报道合并，区分单源线索与多源证据，生成结构化判断，再在本机映射到个人利益和候选预测。
 
+## 运行环境
+
+- 操作系统：Windows 10 或 Windows 11（x64）。
+- 界面运行时：**Microsoft Edge WebView2 Runtime 必须已安装**。Windows 11 和已更新的 Windows 10 通常自带；缺失或损坏时程序会明确报错，不会静默退回默认浏览器。
+- 源码运行需要 Python 3.13 或更高版本（打包基线为 3.14）。
+- 第三方依赖（打包脚本会自动安装，版本固定）：
+  - `pyinstaller==6.21.0`
+  - `pywebview==6.2.1`
+  - `pystray==0.19.5`
+  - `Pillow==12.3.0`
+- 无需联网即可使用本地研判、利益映射和预测账本；外部 AI 是可选增强项，默认关闭。
+- 运行数据统一存放在 `%LOCALAPPDATA%\YuanJian`，不在源码目录或安装目录内。
+
+## 使用方式
+
+详细操作步骤见 [`使用说明.md`](使用说明.md)。三种启动方式：
+
+**一、使用已打包的程序（推荐给普通使用）**
+
+双击 `YuanJian.exe`。这是 onedir 打包，`YuanJian.exe` 和同级的 `_internal` 目录必须放在一起，不能只拷 exe。
+
+**二、从源码运行（开发调试）**
+
+```powershell
+pip install pywebview==6.2.1 pystray==0.19.5 Pillow==12.3.0
+$env:PYTHONPATH='src'
+python -m yuanjian_app.application
+```
+
+**三、免安装绿色包**
+
+[`launcher/启动远见.cmd`](launcher/启动远见.cmd) 以 `pythonw` 无控制台窗口启动，要求目录结构为 `<包根>\app\src`，并把 `PYTHONPATH` 指向它。
+
 ## 核心能力
 
 - 三组主导航：行动首页、告诉远见和设置。个人输入一步可达，原始新闻不占据一级入口。
@@ -39,17 +72,54 @@
 
 软件不会自动借贷、投资、发送外部消息，或替用户作医疗、法律决定。采集不绕过 TLS、登录、付费墙或反爬。
 
-## 测试与构建
+## 构建、测试与自检
+
+**打包**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File build\build_windows.ps1
+```
+
+脚本会自行创建 `.venv-build` 虚拟环境并安装上表列出的固定版本依赖，然后按 [`build/yuanjian.spec`](build/yuanjian.spec) 打包，入口为 [`build/windows_entry.py`](build/windows_entry.py)。产物输出到 `dist\YuanJian\`（onedir，约 42 MB，`YuanJian.exe` 约 6.4 MB）。
+
+**打包烟测**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\smoke_packaged.ps1 -ExePath 'dist\YuanJian\YuanJian.exe'
+```
+
+**单元测试**
 
 ```powershell
 $env:PYTHONPATH='src'
 $env:PYTHONWARNINGS='error::ResourceWarning'
 python -m unittest discover -s tests -v
-powershell -ExecutionPolicy Bypass -File build\build_windows.ps1
 ```
 
-打包烟测：
+测试要求 `ResourceWarning` 视为错误。当前仓库已知存在少量失败用例，见「已知问题」。
+
+**发布前隐私自检**
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools\smoke_packaged.ps1 -ExePath 'dist\YuanJian\YuanJian.exe'
+python tools\privacy_scan.py
 ```
+
+在提交或打包前运行，确认没有数据库、日志、备份、密钥或本机绝对路径进入公开交付物。规则见 [`PRIVACY.md`](PRIVACY.md)。
+
+## 已知问题
+
+在提交 `cb5cc03` 上执行完整测试套件，结果为 `Ran 207 tests`，`failures=3`，`errors=3`。以下用例当前不通过，尚未修复：
+
+- `test_application.ApplicationTests.test_background_launch_starts_desktop_hidden`（error）
+- `test_application.ApplicationTests.test_normal_launch_uses_desktop_window`（error）
+  - 测试替身 `RecordingScheduler.stop()` 未接受 `timeout` 参数，而 `application.py` 已按 `stop(timeout=3)` 调用。
+- `test_contracts.GywV2ContractTests.test_historical_parallel_normalization_writes_back`（error）
+  - `validate_judgment()` 判定「研判字段不完整或包含未知字段」，历史空串归一化用例被拒绝。
+- `test_cognition.RiskDashboardTests.test_dashboard_returns_three_action_first_plain_language_items`（failure）
+  - 断言文案仍为「保留现金」，实际输出已改为「留足对应现金」。
+- `test_impacts.ImpactServiceTests.test_e1_is_capped_at_l3_while_strong_e3_can_reach_l4`（failure）
+  - **该失败涉及安全边界**：本文件与 `PRIVACY.md` 均声明「E1 无论多重要都不得超过 L3」，但当前实现让 `low` 项取到了 `L4`。
+- `test_impacts.ImpactServiceTests.test_pending_candidates_surfaces_gyw_framework_from_judgment`（failure）
+  - 待确认候选列表为空，与「候选预测必须人工选择固定概率后才能进入账本」的流程不一致。
+
+在上述用例修复并通过之前，不应把当前提交视为已验证版本。
