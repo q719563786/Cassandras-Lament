@@ -1,3 +1,5 @@
+import logging
+import logging.handlers
 import os
 import secrets
 import sys
@@ -303,6 +305,39 @@ def _show_desktop_error(message):
         print(message, file=sys.stderr)
 
 
+def configure_logging(logs_dir, level=logging.INFO):
+    """把日志落到数据目录下的 logs/，并返回所用的 handler。
+
+    打包后的程序是 `console=False`，没有控制台；此前 `logging` 调用没有配置
+    任何 handler，等于写进虚空。应用内的诊断中心与 runtime_state 能覆盖业务
+    层错误，但进程启动失败、GUI 层异常这些没有现场。
+
+    用 RotatingFileHandler 限制体积：这是长期常驻的程序，日志不能无限增长。
+    日志目录位于 %LOCALAPPDATA%\\YuanJian 之下，不进仓库也不外发。
+    """
+    logs_dir = Path(logs_dir)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    handler = logging.handlers.RotatingFileHandler(
+        str(logs_dir / "yuanjian.log"),
+        maxBytes=1_000_000,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    )
+    root = logging.getLogger()
+    root.setLevel(level)
+    # 重复调用不应叠加 handler（测试与重入都会走到这里），旧的要关掉，
+    # 否则会漏文件句柄。
+    for existing in list(root.handlers):
+        if isinstance(existing, logging.handlers.RotatingFileHandler):
+            root.removeHandler(existing)
+            existing.close()
+    root.addHandler(handler)
+    return handler
+
+
 def run_application(argv=None):
     """Resolve private paths and run the local application."""
     arguments = list(sys.argv[1:] if argv is None else argv)
@@ -312,6 +347,8 @@ def run_application(argv=None):
         environment["YUANJIAN_DATA_DIR"] = data_dir
     paths = AppPaths.from_environment(environment)
     paths.ensure_directories()
+    configure_logging(paths.root / "logs")
+    logging.getLogger(__name__).info("远见启动，数据目录 %s", paths.root)
     legacy = environment.get("YUANJIAN_LEGACY_DB")
     background = is_background_mode(arguments, environment)
     headless = is_headless_mode(environment)
@@ -333,6 +370,7 @@ def run_application(argv=None):
         )
         return application.run(hidden=background, headless=headless)
     except DesktopUnavailable:
+        logging.getLogger(__name__).error("桌面窗口不可用（WebView2 缺失或损坏）", exc_info=True)
         _show_desktop_error(
             "远见无法启动桌面窗口，请安装或修复 Microsoft Edge WebView2 Runtime"
         )

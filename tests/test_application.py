@@ -1,9 +1,12 @@
+import logging
+import logging.handlers
 import tempfile
 import unittest
 from pathlib import Path
 
 from yuanjian_app.application import (
     Application,
+    configure_logging,
     data_dir_from_arguments,
     is_background_mode,
     is_headless_mode,
@@ -96,6 +99,52 @@ class ApplicationTests(unittest.TestCase):
             app.run(hidden=True)
 
             self.assertTrue(desktop.run_calls[0]["hidden"])
+
+
+class LoggingConfigurationTests(unittest.TestCase):
+    """打包后 console=False，日志必须落到文件里才留得下现场。"""
+
+    def close_rotating_handlers(self):
+        root = logging.getLogger()
+        for handler in list(root.handlers):
+            if isinstance(handler, logging.handlers.RotatingFileHandler):
+                root.removeHandler(handler)
+                handler.close()
+
+    def test_logging_writes_to_a_rotating_file_under_the_data_dir(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs = Path(temp_dir) / "logs"
+            try:
+                handler = configure_logging(logs)
+                logging.getLogger("yuanjian_app.test").warning("轮转日志验证 %s", "ok")
+                handler.flush()
+
+                self.assertIsInstance(handler, logging.handlers.RotatingFileHandler)
+                written = (logs / "yuanjian.log").read_text(encoding="utf-8")
+                self.assertIn("轮转日志验证 ok", written)
+                self.assertIn("WARNING", written)
+            finally:
+                # 必须在临时目录被删除之前关掉句柄，否则 Windows 上会因文件
+                # 仍被占用而删除失败。
+                self.close_rotating_handlers()
+
+    def test_repeated_configuration_does_not_stack_handlers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            logs = Path(temp_dir) / "logs"
+            try:
+                first = configure_logging(logs)
+                configure_logging(logs)
+
+                rotating = [
+                    handler
+                    for handler in logging.getLogger().handlers
+                    if isinstance(handler, logging.handlers.RotatingFileHandler)
+                ]
+                self.assertEqual(len(rotating), 1, "重复配置叠加了 handler")
+                # 被替换掉的旧 handler 必须已经关闭，否则每次重入都漏一个句柄。
+                self.assertIsNone(first.stream)
+            finally:
+                self.close_rotating_handlers()
 
 
 if __name__ == "__main__":
