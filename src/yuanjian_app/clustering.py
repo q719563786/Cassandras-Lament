@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 
 
 _CJK_RUN = re.compile(r"[\u3400-\u9fff]+")
@@ -50,12 +51,20 @@ class MergeDecision:
     reason: str
 
 
+@lru_cache(maxsize=8192)
 def _normalized_numbers(text: str) -> frozenset[str]:
     return frozenset(match.group(0).replace("年", "-").replace("月", "-").rstrip("日") for match in _NUMBER.finditer(text))
 
 
+@lru_cache(maxsize=8192)
 def text_features(text: str) -> frozenset[str]:
-    """Return stable tokens without sending or persisting the original text."""
+    """Return stable tokens without sending or persisting the original text.
+
+    这个函数是纯函数，且是聚类里最贵的一步（三套正则）。它的调用模式天然重复：
+    `should_merge()` 每比较一对就要算两次（`similarity` 一次、`_shared_subject_features`
+    一次），而每个新条目又会把全部活跃簇重算一遍——同一个簇的标题+摘要会被反复
+    分词。加缓存后跨条目、跨配对都只算一次。返回 frozenset 不可变，缓存安全。
+    """
     if not text or not text.strip():
         return frozenset()
 

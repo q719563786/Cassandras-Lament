@@ -293,8 +293,12 @@ class CognitionService:
                 cluster_id = existing["cluster_id"]
             else:
                 best = None
+                # 只用得到这四列。SELECT * 会把 categories_json / evidence_hash
+                # 等大字段一起拉进内存，而活跃簇数量随 72 小时窗口增长，
+                # 这里每处理一个条目都要跑一次，值得收窄。
                 candidates = connection.execute(
-                    "SELECT * FROM event_clusters WHERE status='active' ORDER BY last_seen_at DESC"
+                    "SELECT cluster_id,title,summary,last_seen_at FROM event_clusters "
+                    "WHERE status='active' ORDER BY last_seen_at DESC"
                 ).fetchall()
                 current = ClusterText(item["title"], item["summary"], observed_at)
                 for candidate in candidates:

@@ -63,6 +63,45 @@ class ClusteringTests(unittest.TestCase):
         self.assertFalse(decision.merge)
         self.assertEqual(decision.reason, "outside_time_window")
 
+    def test_text_features_are_cached_across_repeated_comparisons(self):
+        """同一段文本在聚类里会被反复比对，特征提取必须命中缓存。
+
+        调用模式天然重复：`should_merge()` 每比较一对就算两次
+        （`similarity` 一次、`_shared_subject_features` 一次），而每个新条目
+        又要把全部活跃簇重算一遍。缓存前，同一个簇的标题+摘要会被反复分词。
+        """
+        unique = "缓存命中验证专用文本-9102"
+        text_features.cache_clear()
+
+        first = text_features(unique)
+        misses_after_first = text_features.cache_info().misses
+
+        second = text_features(unique)
+
+        # 相同输入返回同一个对象，且第二次没有产生新的 miss。
+        self.assertIs(first, second)
+        self.assertEqual(text_features.cache_info().misses, misses_after_first)
+
+        # 空文本走同一条缓存路径，也不能每次都重新计算。
+        text_features("")
+        empty_misses = text_features.cache_info().misses
+        text_features("")
+        self.assertEqual(text_features.cache_info().misses, empty_misses)
+
+    def test_should_merge_reuses_cached_features_for_both_sides(self):
+        """一对比较里的四次特征提取只应产生两个缓存项（左右各一个）。"""
+        observed_at = datetime(2026, 8, 11, 8, tzinfo=timezone.utc)
+        left = ClusterText("广东医保报销比例升至70%", "政策实施", observed_at)
+        right = ClusterText("广东医保报销比例升至70%", "政策已实施", observed_at + timedelta(hours=2))
+
+        text_features.cache_clear()
+        should_merge(left, right)
+        after_first = text_features.cache_info().misses
+
+        should_merge(left, right)
+
+        self.assertEqual(text_features.cache_info().misses, after_first)
+
 
 if __name__ == "__main__":
     unittest.main()

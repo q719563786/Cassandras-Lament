@@ -1,9 +1,25 @@
 import json
+import re
 import threading
 import time
 from datetime import datetime, timezone
 
 from .operations import CognitionOperation
+from .text_cleaning import plain_text
+
+
+_WINDOWS_PATH = re.compile(r"[A-Za-z]:[\\/][^\s'\"<>|,;]+")
+_POSIX_HOME_PATH = re.compile(r"/(?:Users|home)/[^\s'\"<>|,;]+")
+
+
+def _redact_paths(text: str) -> str:
+    """落库前把消息里的本机路径换成占位符。
+
+    异常消息经常自带完整路径（`FileNotFoundError` 就会把文件名整个带上）。
+    状态表只留在本机，但排障需要知道的是"哪一类失败"，不是"文件在哪儿"，
+    没有理由把路径写进去。
+    """
+    return _POSIX_HOME_PATH.sub("<path>", _WINDOWS_PATH.sub("<path>", text))
 
 
 def _iso(value):
@@ -86,6 +102,12 @@ class RadarScheduler:
                 "started_at": started_at,
                 "finished_at": _iso(self.now()),
                 "error_type": type(error).__name__,
+                # 只记异常类型等于没有现场：不知道是哪个值、哪一步失败。
+                # 消息经 plain_text 清洗截断、再用 _redact_paths 抹掉本机路径，
+                # 兼顾可诊断与不留路径。
+                "error_message": _redact_paths(
+                    plain_text(str(error), max_length=300)
+                ),
             }
             self._record(name, payload)
             return payload
@@ -196,27 +218,34 @@ class RadarScheduler:
         next_trends = 0.0
         next_learning = 0.0
         next_daily = 0.0
+
+        def following(interval):
+            # 下次到期从「任务真正结束的时刻」起算，而不是从本轮循环开始时的
+            # 时间戳起算。否则任务一旦跑得比间隔还久，deadline 会落在过去，
+            # 循环会立刻连续补跑同一任务，把一次超时放大成一阵冲击。
+            return time.monotonic() + interval
+
         while not self._stop.is_set():
             current = time.monotonic()
             if current >= next_external:
                 self.run_external_once()
-                next_external = current + self.poll_seconds
+                next_external = following(self.poll_seconds)
             if self.cognition is not None and current >= next_cognition:
                 self.run_cognition_once()
-                # 认知扫描间隔改为5分钟（300秒），远程调用频率由cognition._remote_due()严格控制
+                # 认知扫描间隔为5分钟（300秒），远程调用频率由 cognition._remote_due() 严格控制
                 # 避免每分钟扫描导致频繁入队和无效API调用
-                next_cognition = current + 300
+                next_cognition = following(300)
             if self.cognition is not None and current >= next_trends:
                 self.run_trends_once()
-                next_trends = current + 3600
+                next_trends = following(3600)
             if current >= next_learning:
                 self.run_learning_once()
-                next_learning = current + 6 * 3600
+                next_learning = following(6 * 3600)
             if current >= next_daily:
                 # 备份/清理只做"到期与否"检查，真正执行由墙钟判断（R6）。
                 self.run_backup_once()
                 self.run_retention_once()
-                next_daily = current + 300
+                next_daily = following(300)
             waits = [next_external - time.monotonic()]
             if self.cognition is not None:
                 waits.extend(
