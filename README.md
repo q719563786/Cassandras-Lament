@@ -96,7 +96,8 @@ $env:PYTHONWARNINGS='error::ResourceWarning'
 python -m unittest discover -s tests -v
 ```
 
-测试要求 `ResourceWarning` 视为错误。当前 207 个测试全部通过。
+测试要求 `ResourceWarning` 视为错误。当前 207 个测试全部通过。当前版本的验证记录见
+[`docs/releases/YuanJian-v1.0-verification.md`](docs/releases/YuanJian-v1.0-verification.md)。
 
 **发布前隐私自检**
 
