@@ -33,6 +33,7 @@ from .runtime import RuntimeClient, RuntimeDiscovery, SingleInstance
 from .startup import StartupTask
 from .system_settings import SystemSettingsService
 from .trends import TrendService
+from .update_check import UpdateCheckService
 
 
 def _make_personal_context_loader(interests, forecasts):
@@ -205,6 +206,7 @@ class Application:
                 retention_service=retention_service,
                 mobile_export=mobile_export,
                 scheduler=scheduler,
+                update_check=UpdateCheckService(),
             ),
         )
         if desktop is None:

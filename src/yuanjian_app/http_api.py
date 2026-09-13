@@ -7,8 +7,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from . import __version__
 from .forecasts import ForecastConflictError
 from .operations import OperationBusy
+from .update_check import RELEASES_PAGE
 
 
 def resolve_static_root(module_file, bundle_root=None):
@@ -122,6 +124,7 @@ class Services:
     retention_service: object = None
     mobile_export: object = None
     scheduler: object = None
+    update_check: object = None
 
 
 def create_server(host, port, token, services):
@@ -246,6 +249,9 @@ def create_server(host, port, token, services):
                 self._serve_static(self.path, path)
                 return
             if not self._require_api_access():
+                return
+            if path == "/api/app/version":
+                self._json({"version": __version__, "releases_url": RELEASES_PAGE})
                 return
             if path == "/api/forecasts":
                 try:
@@ -435,6 +441,14 @@ def create_server(host, port, token, services):
                 return
             try:
                 payload = self._read_json()
+                if path == "/api/update-check":
+                    # 只在用户点按「检查更新」时走到这里。整个程序唯一会主动
+                    # 外发的请求，且只取公开发布信息，不带本机任何数据。
+                    if services.update_check is None:
+                        self._error(503, "unavailable", "更新检查未装配")
+                    else:
+                        self._json(services.update_check.check(__version__))
+                    return
                 if path == "/api/events":
                     text = str(payload.get("text", "")).strip()
                     if not text:

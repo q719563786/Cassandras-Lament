@@ -1,4 +1,4 @@
-// 远见 v1.1 · 设置 —— 备份/保留/学习开关持久化 + 移动摘要导出 + 外部 AI 表单
+// 远见 v1.0 · 设置 —— 备份/保留/学习开关持久化 + 移动摘要导出 + 外部 AI 表单
 import { api, escapeHtml, showToast } from '../api.js';
 
 // 通用 toggle 行：GET 容错（端点未就绪显示未知）+ PUT 持久化
@@ -169,6 +169,18 @@ export async function render(root) {
         <div class="set-row"><p class="name">告诉远见</p><button type="button" class="btn btn-sm" data-go-tell>手动录入新情况</button></div>
       </div>
     </section>
+
+    <section class="set-sec">
+      <h2>关于</h2>
+      <div class="card">
+        <div class="set-row">
+          <div><p class="name">当前版本</p><p class="desc" data-app-version>读取中…</p></div>
+          <button type="button" class="btn btn-sm" data-check-update>检查更新</button>
+        </div>
+        <p class="u-dim u-mt-sm">检查更新会访问一次 GitHub 获取公开发布信息，只读取版本号，不上传本机任何数据。</p>
+        <p class="u-dim u-mt-sm" data-update-status></p>
+      </div>
+    </section>
   </div>`;
 
   // 三组开关各自绑定到对应端点（key 过滤，互不串扰）
@@ -298,4 +310,42 @@ export async function render(root) {
   root.querySelector('[data-go-tell]')?.addEventListener('click', () => { location.hash = '#/tell'; });
   root.querySelector('[data-go-today]')?.addEventListener('click', () => { location.hash = '#/today'; });
   root.querySelector('[data-go-calib]')?.addEventListener('click', () => { location.hash = '#/calib'; });
+
+  // 关于：版本号读自本机接口，不发任何网络请求。
+  const versionText = root.querySelector('[data-app-version]');
+  const updateStatus = root.querySelector('[data-update-status]');
+  api('/api/app/version')
+    .then((info) => {
+      if (versionText) versionText.textContent = `远见 v${info?.version || '未知'}`;
+    })
+    .catch(() => {
+      if (versionText) versionText.textContent = '版本信息读取失败（不影响使用）';
+    });
+
+  // 检查更新：全程序唯一会主动外发的操作，只能由用户点击触发，不轮询、不自动下载。
+  const updateButton = root.querySelector('[data-check-update]');
+  updateButton?.addEventListener('click', async () => {
+    updateButton.disabled = true;
+    if (updateStatus) updateStatus.textContent = '正在查询…';
+    try {
+      const result = await api('/api/update-check', {method: 'POST'});
+      if (!updateStatus) return;
+      if (result?.status !== 'ok') {
+        updateStatus.textContent = result?.status === 'no_release'
+          ? '还没有发布过可供比较的版本。'
+          : '暂时查询不到（可能是网络不通），稍后再试。';
+        return;
+      }
+      if (result.has_update) {
+        updateStatus.innerHTML = `有新版本 ${escapeHtml(String(result.latest))}，`
+          + `<a href="${escapeHtml(String(result.releases_url))}" target="_blank" rel="noopener">前往下载</a>`;
+        return;
+      }
+      updateStatus.textContent = `已是最新版本（${escapeHtml(String(result.latest))}）。`;
+    } catch (e) {
+      if (updateStatus) updateStatus.textContent = `查询失败：${e.message}`;
+    } finally {
+      updateButton.disabled = false;
+    }
+  });
 }

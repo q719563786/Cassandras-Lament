@@ -969,6 +969,56 @@ class HttpApiTests(unittest.TestCase):
         self.assertIn("hmac.compare_digest(provided, token)", source)
         self.assertNotIn('self.headers.get("X-YuanJian-Token") == token', source)
 
+    def test_app_version_endpoint_reports_the_package_version(self):
+        from yuanjian_app import __version__
+
+        unauthorized = urllib.request.Request(self.base_url + "/api/app/version")
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(unauthorized, timeout=2)
+        self.assertEqual(raised.exception.code, 403)
+        raised.exception.close()
+
+        request = urllib.request.Request(
+            self.base_url + "/api/app/version",
+            headers={"X-YuanJian-Token": "test-token"},
+        )
+        response = urllib.request.urlopen(request, timeout=2)
+        try:
+            payload = json.loads(response.read().decode("utf-8"))
+        finally:
+            response.close()
+
+        self.assertEqual(payload["version"], __version__)
+        self.assertIn("q719563786/Foresight", payload["releases_url"])
+
+    def test_update_check_is_unavailable_until_wired(self):
+        """未装配更新检查时必须明确 503，而不是静默返回假结果。"""
+        request = urllib.request.Request(
+            self.base_url + "/api/update-check",
+            data=b"{}",
+            headers={
+                "Content-Type": "application/json",
+                "X-YuanJian-Token": "test-token",
+            },
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=2)
+        self.assertEqual(raised.exception.code, 503)
+        raised.exception.close()
+
+    def test_update_check_requires_token(self):
+        request = urllib.request.Request(
+            self.base_url + "/api/update-check",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=2)
+        self.assertEqual(raised.exception.code, 403)
+        raised.exception.close()
+
 
 if __name__ == "__main__":
     unittest.main()
