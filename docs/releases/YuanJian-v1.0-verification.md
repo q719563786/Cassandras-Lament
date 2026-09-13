@@ -18,7 +18,7 @@ rather than being inferred from the automated results.
 
 - Full suite: **237 tests passed in 39.458 seconds** with `ResourceWarning` treated as
   an error (`unittest discover -s tests`).
-- Privacy scan of the exact committed publication tree (116 files, via
+- Privacy scan of the exact committed publication tree (118 files, via
   `tools/privacy_scan.py --committed`): `safe=True blocked=0 findings=0`.
 - Packaged smoke against the v1.0 build, all checks passed:
   - single listener bound to `127.0.0.1` (no non-loopback listener)
