@@ -26,7 +26,7 @@ class RecordingScheduler:
     def start(self):
         self.running = True
 
-    def stop(self):
+    def stop(self, timeout=5):
         self.running = False
 
 

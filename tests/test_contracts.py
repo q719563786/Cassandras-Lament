@@ -112,6 +112,7 @@ class GywV2ContractTests(unittest.TestCase):
             "supporting_source_ids": ["s1"], "counter_source_ids": [],
             "up_triggers": ["u"], "down_triggers": ["d"],
             "impact_categories": ["finance"], "gyw": gyw,
+            "personal_action": "先核实金额与到账时间，再决定是否动用现金缓冲。",
         }
 
     def _base_gyw(self, **overrides):

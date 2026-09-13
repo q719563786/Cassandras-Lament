@@ -321,7 +321,7 @@ class RiskDashboardTests(unittest.TestCase):
         first = dashboard["items"][0]
         self.assertEqual(first["interest_category"], "cashflow")
         self.assertEqual(first["risk_label"], "高风险")
-        self.assertIn("保留现金", first["advice"])
+        self.assertIn("留足对应现金", first["advice"])
         self.assertNotIn("预测账本", first["advice"])
         self.assertEqual(first["reason"], "第6项外部变化可能压缩可用资金")
         self.assertEqual(dashboard["items"][2]["risk_label"], "中风险")
