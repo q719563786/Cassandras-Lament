@@ -561,6 +561,23 @@ class RouterIntegrationTests(unittest.TestCase):
         self.assertIn("'X-YuanJian-Token'", api_source)
         self.assertNotIn("?token=", api_source)
 
+    def test_retention_settings_submit_both_windows(self):
+        """数据保留的两档天数必须一起提交，避免互相覆盖。
+
+        结论明细保留期与原始条目保留期是两个独立设置；只提交其中一个时，
+        服务端会保留另一个的现值。界面必须把两个都带上，否则界面上看到的
+        和实际存的不一致。
+        """
+        settings = (STATIC / "js" / "views" / "settings.js").read_text(encoding="utf-8")
+
+        self.assertIn("retention-cluster-days", settings)
+        self.assertIn("cluster_days", settings)
+        # 两个输入框都要有 change 处理
+        self.assertIn("'#retention-days'", settings)
+        self.assertIn("'#retention-cluster-days'", settings)
+        # 说明文字要讲清楚"结论永不删除"，避免用户以为清理会删掉研判
+        self.assertIn("事件簇与研判永久保留", settings)
+
 
 if __name__ == "__main__":
     unittest.main()

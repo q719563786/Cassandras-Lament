@@ -143,13 +143,25 @@ class RetentionTests(unittest.TestCase):
             self.database, {"enabled": False, "days": 30},
             now=datetime(2026, 8, 1, tzinfo=timezone.utc),
         )
+        # cluster_days 是结论明细的保留期，与原始条目的 days 分开；
+        # 未显式写入时给默认值 180（比 60 天宽得多，保住近期结论）。
         self.assertEqual(
-            read_retention_setting(self.database), {"enabled": False, "days": 30}
+            read_retention_setting(self.database),
+            {"enabled": False, "days": 30, "cluster_days": 180},
         )
         with self.assertRaises(ValueError):
             write_retention_setting(self.database, {"days": 3})
         with self.assertRaises(ValueError):
             write_retention_setting(self.database, {"days": 9999})
+        with self.assertRaises(ValueError):
+            write_retention_setting(self.database, {"cluster_days": 5})
+        with self.assertRaises(ValueError):
+            write_retention_setting(self.database, {"cluster_days": 5000})
+
+        write_retention_setting(self.database, {"cluster_days": 365})
+        self.assertEqual(read_retention_setting(self.database)["cluster_days"], 365)
+        # 改结论保留期不应动到原始条目的保留期
+        self.assertEqual(read_retention_setting(self.database)["days"], 30)
 
 
 class SettingsAndDiagnosticsTests(unittest.TestCase):

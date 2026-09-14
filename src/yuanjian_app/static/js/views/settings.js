@@ -73,11 +73,16 @@ export async function render(root) {
     <section class="set-sec">
       <h2>数据保留</h2>
       <div class="card">
-        ${toggleRow({key: 'retention', name: '自动清理过期原始条目', desc: '超过保留天数的原始抓取条目将被删除，趋势快照按降采样保留', on: Boolean(retention?.enabled)})}
+        ${toggleRow({key: 'retention', name: '自动清理过期数据', desc: '超过保留天数的原始抓取条目会被删除', on: Boolean(retention?.enabled)})}
         <div class="set-row">
-          <div><p class="name">保留天数</p><p class="desc">${retention ? `当前 ${retention.days ?? 60} 天` : '读取中…未知'}</p></div>
+          <div><p class="name">原始条目保留天数</p><p class="desc">${retention ? `当前 ${retention.days ?? 60} 天` : '读取中…未知'}</p></div>
           <div class="field"><label for="retention-days" class="sr-only">天数</label>
           <input id="retention-days" type="number" min="7" max="365" value="${escapeHtml(String(retention?.days ?? 60))}" ${retention ? '' : 'disabled'}></div>
+        </div>
+        <div class="set-row">
+          <div><p class="name">结论明细保留天数</p><p class="desc">${retention ? `当前 ${retention.cluster_days ?? 180} 天` : '读取中…未知'} · 只清利益影响、通知、实体等明细；事件簇与研判永久保留</p></div>
+          <div class="field"><label for="retention-cluster-days" class="sr-only">结论明细天数</label>
+          <input id="retention-cluster-days" type="number" min="30" max="730" value="${escapeHtml(String(retention?.cluster_days ?? 180))}" ${retention ? '' : 'disabled'}></div>
         </div>
       </div>
     </section>
@@ -193,12 +198,33 @@ export async function render(root) {
   });
   root.querySelector('[data-backup-now]')?.addEventListener('click', () => showToast('备份将在下一个目标时段执行'));
 
-  // 保留天数 + 开关持久化
-  bindToggle(root, '/api/settings/retention', 'retention', (next, r) => ({days: Number(r.querySelector('#retention-days')?.value || 60)}));
+  // 保留天数 + 开关持久化（两个天数一起提交，避免互相覆盖）
+  const retentionPayload = (days, clusterDays) => ({
+    enabled: Boolean(retention?.enabled),
+    days: Number(days),
+    cluster_days: Number(clusterDays),
+  });
+  bindToggle(root, '/api/settings/retention', 'retention', (next, r) => retentionPayload(
+    r.querySelector('#retention-days')?.value || 60,
+    r.querySelector('#retention-cluster-days')?.value || 180,
+  ));
   root.querySelector('#retention-days')?.addEventListener('change', async (event) => {
     try {
-      await putSetting('/api/settings/retention', {enabled: Boolean(retention?.enabled), days: Number(event.target.value)});
-      showToast('保留天数已保存');
+      await putSetting('/api/settings/retention', retentionPayload(
+        event.target.value,
+        root.querySelector('#retention-cluster-days')?.value || 180,
+      ));
+      showToast('原始条目保留天数已保存');
+    } catch (e) { showToast(`保存失败：${e.message}`, 'err'); }
+  });
+
+  root.querySelector('#retention-cluster-days')?.addEventListener('change', async (event) => {
+    try {
+      await putSetting('/api/settings/retention', retentionPayload(
+        root.querySelector('#retention-days')?.value || 60,
+        event.target.value,
+      ));
+      showToast('结论明细保留天数已保存');
     } catch (e) { showToast(`保存失败：${e.message}`, 'err'); }
   });
 
