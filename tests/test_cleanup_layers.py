@@ -1,4 +1,4 @@
-"""C/D/E 层清理 + 阈值触发 + 6 小时间隔 + 硬不变量的对抗性测试。
+"""A/B/C/D/E 层清理 + 阈值触发 + 6 小时间隔 + 硬不变量的对抗性测试。
 
 规格来源：`build-artifacts/CONTRACT-cdef.md` §4（返回值与约束）、§5（硬不变量）。
 本文件**不采信任何自述**，只按契约断言真实行为。
@@ -158,6 +158,44 @@ class CleanupBase(unittest.TestCase):
             "fetched_at,source_id,source_name,content_hash,first_seen_at,last_seen_at)"
             " VALUES (?,?,?,'','',?,?,'s','h',?,?)",
             (item_id, "https://example.com/" + item_id, item_id, stamp, "src-1", stamp, stamp),
+        )
+
+    def add_item_dated(self, connection, item_id, published_raw, first_seen_at):
+        """`published_at` 与 `first_seen_at` 分开指定 —— A 层判据优先级的测试基础。
+
+        ``published_raw`` 是**原样写上**的字符串（可以是 None、空串、RFC822），
+        不走任何归一化；``first_seen_at`` 才是时间戳。真实库那 77,231 行 NULL 与
+        537 行 RFC822 就是这么来的。
+        """
+        stamp = _stamp(first_seen_at)
+        connection.execute(
+            "INSERT INTO external_items(item_id,canonical_url,title,summary,published_at,"
+            "fetched_at,source_id,source_name,content_hash,first_seen_at,last_seen_at)"
+            " VALUES (?,?,?,'',?,?,?,'s','h',?,?)",
+            (
+                item_id,
+                "https://example.com/" + item_id,
+                item_id,
+                published_raw,
+                stamp,
+                "src-1",
+                stamp,
+                stamp,
+            ),
+        )
+
+    def add_item_source(self, connection, item_id, source_id="src-1"):
+        connection.execute(
+            "INSERT INTO external_item_sources(item_id,source_id,url,first_seen_at)"
+            " VALUES (?,?,?,?)",
+            (item_id, source_id, "https://example.com/" + item_id, _stamp(NOW)),
+        )
+
+    def add_item_match(self, connection, item_id, rule_id="R-1"):
+        connection.execute(
+            "INSERT INTO external_matches(item_id,rule_id,score,reasons_json,alert_level)"
+            " VALUES (?,?,0.5,'[]','L1')",
+            (item_id, rule_id),
         )
 
     def seed_immutable(self, connection):
@@ -793,6 +831,239 @@ class SnapshotLayerTests(CleanupBase):
                 SNAPSHOT_KEEP_DAYS,
                 "720h 同时出现在保留表和保护名单里，语义会冲突",
             )
+
+
+class LayerAPublishedAtTests(CleanupBase):
+    """A 层判据：``COALESCE(CASE WHEN published_at LIKE '____-__-__T%' THEN published_at END, first_seen_at) < ?``
+
+    这一层的全部要害是**优先级顺序**：只要 ``published_at`` 是可比较的 ISO 值，
+    它就说了算，``first_seen_at`` 不许插手 —— 反过来写会误删「刚发布、但条目很
+    早就入库」的数据。所以前两条用例是核心，兜底路径是次要的。
+
+    真实库的形状分布（我在 893.7 MB 真库副本上独立清点过）：96,613 行里
+    77,231 行 ``published_at IS NULL``、537 行 RFC822、18,845 行 ISO 带 T、
+    0 行空串。NULL 与 RFC822 在旧判据 ``published_at < ?`` 下**恒为假**，
+    这正是本次要修的漏删。
+    """
+
+    STALE = timedelta(days=DEFAULT_DAYS + 30)
+    FRESH = timedelta(days=1)
+    RFC822 = "Thu, 06 Aug 2026 13:34:05 GMT"
+
+    def seed(self, item_id, published_raw, first_seen_at):
+        with self.database.connect() as connection:
+            self.add_item_dated(connection, item_id, published_raw, first_seen_at)
+
+    def run_cleanup(self):
+        return self.service.run("manual")
+
+    # -- 优先级（核心） ---------------------------------------------------
+
+    def test_valid_published_at_wins_over_an_old_first_seen_at(self):
+        """ISO 有效且较新 + ``first_seen_at`` 很旧 → 必须保留。
+
+        若实现把 ``first_seen_at`` 当主判据（或 COALESCE 参数写反），这条会红。
+        """
+        self.seed("ITEM-priority-keep", _stamp(NOW - self.FRESH), NOW - self.STALE)
+
+        result = self.run_cleanup()
+
+        self.assertEqual(result["deleted_items"], 0)
+        self.assertEqual(self.counts("external_items"), 1)
+
+    def test_valid_published_at_wins_when_first_seen_at_is_fresh(self):
+        """ISO 有效但很旧 + ``first_seen_at`` 较新 → 必须删除。
+
+        与上一条互为反向：两条一起才钉得住"published_at 优先"这个顺序。
+        """
+        self.seed("ITEM-priority-delete", _stamp(NOW - self.STALE), NOW - self.FRESH)
+
+        result = self.run_cleanup()
+
+        self.assertEqual(result["deleted_items"], 1)
+        self.assertEqual(self.counts("external_items"), 0)
+
+    # -- 兜底路径 ---------------------------------------------------------
+
+    def test_null_published_at_falls_back_and_deletes_when_first_seen_is_stale(self):
+        """77,231 行的形状：NULL 时必须回落到 ``first_seen_at``，否则永远删不掉。"""
+        self.seed("ITEM-null-stale", None, NOW - self.STALE)
+
+        result = self.run_cleanup()
+
+        self.assertEqual(result["deleted_items"], 1)
+        self.assertEqual(self.counts("external_items"), 0)
+
+    def test_null_published_at_falls_back_and_keeps_when_first_seen_is_fresh(self):
+        self.seed("ITEM-null-fresh", None, NOW - self.FRESH)
+
+        result = self.run_cleanup()
+
+        self.assertEqual(result["deleted_items"], 0)
+        self.assertEqual(self.counts("external_items"), 1)
+
+    def test_rfc822_published_at_falls_back_and_deletes_when_first_seen_is_stale(self):
+        """537 行的形状：``'Thu, 06 Aug 2026 ...'`` 首字符大于 ``'2'``，
+        旧判据的字典序比较恒为假；新判据必须识别出它"不是 ISO"并回落。"""
+        self.seed("ITEM-rfc822-stale", self.RFC822, NOW - self.STALE)
+
+        result = self.run_cleanup()
+
+        self.assertEqual(result["deleted_items"], 1)
+        self.assertEqual(self.counts("external_items"), 0)
+
+    def test_rfc822_published_at_falls_back_and_keeps_when_first_seen_is_fresh(self):
+        self.seed("ITEM-rfc822-fresh", self.RFC822, NOW - self.FRESH)
+
+        result = self.run_cleanup()
+
+        self.assertEqual(result["deleted_items"], 0)
+        self.assertEqual(self.counts("external_items"), 1)
+
+    def test_empty_published_at_falls_back_and_deletes_when_first_seen_is_stale(self):
+        """空串不匹配 LIKE，同样走兜底。"""
+        self.seed("ITEM-empty-stale", "", NOW - self.STALE)
+
+        result = self.run_cleanup()
+
+        self.assertEqual(result["deleted_items"], 1)
+        self.assertEqual(self.counts("external_items"), 0)
+
+    # -- 边界 -------------------------------------------------------------
+
+    def test_published_at_exactly_on_the_cutoff_survives(self):
+        """恰好等于 cutoff 保留、早一秒删除 —— 双向钉住 ``<`` 而不是 ``<=``。
+
+        先断言 ``result["cutoff"]`` 与造出来的值逐字符相等，否则这条是在测一个
+        "差几微秒"的假边界。
+        """
+        boundary = NOW - timedelta(days=DEFAULT_DAYS)
+        self.seed("ITEM-boundary-equal", _stamp(boundary), NOW - self.STALE)
+        self.seed("ITEM-boundary-before", _stamp(boundary - timedelta(seconds=1)), NOW - self.FRESH)
+
+        result = self.run_cleanup()
+
+        self.assertEqual(result["cutoff"], _stamp(boundary), "边界值没对准，断言无意义")
+        self.assertEqual(result["deleted_items"], 1)
+        self.assertEqual(set(self.item_ids()), {"ITEM-boundary-equal"})
+
+    # -- 回归 -------------------------------------------------------------
+
+    def test_plain_iso_behaviour_is_unchanged(self):
+        """合法 ISO 的老行为不变：过期删、未过期留。"""
+        self.seed("ITEM-iso-old", _stamp(NOW - self.STALE), NOW - self.STALE)
+        self.seed("ITEM-iso-new", _stamp(NOW - self.FRESH), NOW - self.FRESH)
+
+        result = self.run_cleanup()
+
+        self.assertEqual(result["deleted_items"], 1)
+        self.assertEqual(set(self.item_ids()), {"ITEM-iso-new"})
+
+    # -- 级联 -------------------------------------------------------------
+
+    def test_deleting_an_item_cascades_to_its_source_and_match_rows(self):
+        """删条目必须同时清掉 ``external_item_sources`` 与 ``external_matches``。"""
+        with self.database.connect() as connection:
+            self.add_item_dated(connection, "ITEM-doomed", None, NOW - self.STALE)
+            self.add_item_source(connection, "ITEM-doomed")
+            self.add_item_source(connection, "ITEM-doomed", source_id="src-2")
+            self.add_item_match(connection, "ITEM-doomed")
+            self.add_item_dated(connection, "ITEM-keeper", None, NOW - self.FRESH)
+            self.add_item_source(connection, "ITEM-keeper")
+            self.add_item_match(connection, "ITEM-keeper")
+
+        result = self.run_cleanup()
+
+        self.assertEqual(result["deleted_items"], 1)
+        self.assertEqual(self.counts("external_item_sources", "item_id='ITEM-doomed'"), 0)
+        self.assertEqual(self.counts("external_matches", "item_id='ITEM-doomed'"), 0)
+        self.assertEqual(self.counts("external_item_sources", "item_id='ITEM-keeper'"), 1)
+        self.assertEqual(self.counts("external_matches", "item_id='ITEM-keeper'"), 1)
+
+    def test_conclusions_and_audit_survive_an_item_purge(self):
+        """A 层删条目时，结论类数据与审计必须逐字节不变（契约 §5）。"""
+        with self.database.connect() as connection:
+            self.seed_immutable(connection)
+            self.add_cluster(connection, "C-keep", NOW - timedelta(days=1))
+            self.add_judgment(connection, "J-keep", "C-keep", NOW - timedelta(days=1))
+        self.seed("ITEM-doomed", None, NOW - self.STALE)
+        with self.database.connect() as connection:
+            self.add_snapshot(connection, "S-720", 720, NOW - timedelta(days=900))
+            connection.execute(
+                "INSERT INTO audit_log(occurred_at,action,object_type,object_id,details_json)"
+                " VALUES (?,'pre_existing','note','X','{}')",
+                (_stamp(NOW - timedelta(days=10)),),
+            )
+        before = self.immutable_fingerprints()
+        limit, frozen, _ = self.audit_state()
+
+        result = self.run_cleanup()
+
+        self.assertEqual(result["deleted_items"], 1, "本次没有删条目，等价性断言不成立")
+        self.assertEqual(self.immutable_fingerprints(), before)
+        self.assertEqual(self.audit_state(limit=limit)[1], frozen)
+        self.assertEqual(self.counts("trend_snapshots", "window_hours=720"), 1)
+
+    # -- 幂等与计数 -------------------------------------------------------
+
+    def test_second_run_deletes_nothing_in_the_a_layer(self):
+        with self.database.connect() as connection:
+            self.add_item_dated(connection, "ITEM-stale", None, NOW - self.STALE)
+            self.add_item_dated(connection, "ITEM-fresh", _stamp(NOW - self.FRESH), NOW - self.FRESH)
+
+        first = self.service.run("threshold")
+        second = self.service.run("manual")
+
+        self.assertEqual(first["deleted_items"], 1)
+        self.assertEqual(second["deleted_items"], 0)
+        self.assertEqual(second["status"], "ok")
+
+    def test_deleted_items_matches_the_rows_actually_removed(self):
+        """``deleted_items`` 必须等于真实消失的行数，不是候选数。"""
+        with self.database.connect() as connection:
+            for index in range(5):
+                self.add_item_dated(
+                    connection, "ITEM-bulk-%d" % index, None, NOW - self.STALE
+                )
+            self.add_item_dated(connection, "ITEM-live", None, NOW - self.FRESH)
+        before = self.counts("external_items")
+
+        result = self.run_cleanup()
+
+        self.assertEqual(before - self.counts("external_items"), 5)
+        self.assertEqual(result["deleted_items"], 5)
+
+    def test_cluster_item_links_are_left_behind_when_items_are_purged(self):
+        """**现状记录**（不是我认为对的行为，见 harness 里的说明）：
+
+        A 层只删 ``external_item_sources`` / ``external_matches``，不碰
+        ``event_cluster_items``。所以条目被删后，簇与条目的关联行会留下一根
+        悬空引用。这里把现状钉住，是为了让"要不要一起清"变成一个显式决定，
+        而不是悄悄发生。若 team-lead 判定这是缺陷，那是 src 的改动，我改测试。
+        """
+        with self.database.connect() as connection:
+            self.add_cluster(connection, "C-live", NOW - timedelta(days=1))
+            self.add_item_dated(connection, "ITEM-linked", None, NOW - self.STALE)
+            connection.execute(
+                "INSERT INTO event_cluster_items(cluster_id,item_id,similarity,"
+                "merge_reason,source_domain,is_primary,added_at)"
+                " VALUES ('C-live','ITEM-linked',1.0,'new_cluster','example.com',1,?)",
+                (_stamp(NOW - self.STALE),),
+            )
+
+        result = self.run_cleanup()
+
+        self.assertEqual(result["deleted_items"], 1)
+        self.assertEqual(
+            self.counts("event_cluster_items", "item_id='ITEM-linked'"),
+            1,
+            "关联行被一并删掉了 —— 行为变了，请确认这是有意为之",
+        )
+        self.assertEqual(self.counts("external_items", "item_id='ITEM-linked'"), 0)
+
+    def item_ids(self):
+        with self.database.connect() as connection:
+            return [row["item_id"] for row in connection.execute("SELECT item_id FROM external_items")]
 
 
 class DisabledAndSettingTests(CleanupBase):

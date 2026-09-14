@@ -79,6 +79,43 @@
 - **C 层的真正价值在稳态，不在那一次性 10.2 MB**：`judgment_jobs` 以约 3,384 行/日累积，
   C 层上线后每天清掉约 0.95 MB，一年约 340 MB 的持续抑制。
 
+**数据体积 · A 层判据修正**
+
+- A 层原判据 `published_at < cutoff` 对约 **80% 的行永远为假**，等于这些行永久删不掉：
+  - `published_at IS NULL` 的 **77,231 行**（占 96,613 行的 79.9%）——SQL 中 NULL 比较结果为
+    NULL，永不为真；
+  - **537 行**存的是 RSS 原样的 RFC 2822（如 `Thu, 06 Aug 2026 13:34:05 GMT`）——
+    首字符 `'T'`(0x54) > `'2'`(0x32)，字典序恒大于 ISO 截止值。
+- 判据改为 `COALESCE(CASE WHEN published_at LIKE '____-__-__T%' THEN published_at END,
+  first_seen_at) < ?`：**发布日期有效（ISO 形状）时优先用它，NULL 或非 ISO 形状时退化用
+  `first_seen_at`**。
+- **不解析 RFC 2822 回写、也不回填 NULL**——那是伪造发布日期；`first_seen_at`
+  （首次看到该条目的时间）才是诚实的兜底，且实测 96,613 行零空缺。
+- 入库侧**无需改动**：`external_sources.py` 早已有 `normalize_published_at()`，
+  三条解析路径都在调用，新数据不再产生这两种形态。
+- **实测今天多删 0 行**（表内 `first_seen_at` 只跨 39 天，未达 60 天阈值），
+  旧判据与新判据在真实数据上都删 304 行。**这是纯未来防护**：不改的话，
+  约 2026-10-05 起这张 55.7 MB 的表会开始只进不出。
+- 代价如实记录：新判据用不上 `idx_external_items_published`，退化为全表扫描，
+  实测 97.0 ms → 107.8 ms（+11%）。若该索引已建立，则是 0.3 ms → 约 122 ms。
+  两者差距虽大，但清理每日仅一次，绝对代价约 0.12 秒，故选择保留简单判据。
+- 顺带说明：**"归一化历史行即可恢复索引"是错的**。库中 80% 的行 `published_at IS NULL`，
+  永远要走兜底，`COALESCE` 仍在，索引照样用不上。要拿回索引只有一条路——把判据结果
+  **物化成列**（如 `retention_at`）并为其建索引，代价是要改写入路径。本轮不做。
+
+**部署提示：正在运行的安装包落后于源码**
+
+- 排查中发现真实库里 `database.py` 声明的 **5 条热路径索引一条都不存在**
+  （`idx_external_items_source`、`idx_external_items_published`、
+  `idx_notification_log_cluster_created`、`idx_judgment_jobs_finished`、
+  `idx_event_cluster_items_item`）。
+- 这不是代码缺陷：`application.py` 在数据库已存在时**每次启动都会调用
+  `database.initialize()`**，而这些索引是 `CREATE INDEX IF NOT EXISTS` 无条件创建。
+  唯一解释是**已安装的程序包早于引入这些索引的提交**，那些语句从未在真库上执行过。
+- 影响：那几条热路径至今仍是全表扫描；且本轮全部改进（分层清理、路由重构、
+  A 层修正、补测）在当前安装包上**均未生效**。**需要重新打包并安装**才会生效；
+  首次启动会一次性补建索引（约 5 秒、约 14 MB）。
+
 **清理**
 
 - 移除 `/api/dashboard` 接口。它界面从未调用、无测试覆盖，却会把全部预测正文读出来

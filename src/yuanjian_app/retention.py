@@ -416,6 +416,16 @@ class RetentionService:
           `free_pages_before` 在进入清理事务**之前**自开连接读取，
           `free_pages_after` 则在事务内用**同一个 connection** 读——写事务持锁
           期间另开连接会拿不到锁而死等。
+        - **A 层判据（2026-09-14 修正）**：删除的依据取
+          ``COALESCE(CASE WHEN published_at LIKE '____-__-__T%' THEN
+          published_at END, first_seen_at)``。即优先用发布日期，但**只有它
+          是 ISO 形状时才用**；`published_at` 为 NULL 或非 ISO 形状（历史遗留
+          的 RFC 2822 等）时一律退化用 `first_seen_at`。
+          旧判据 `published_at < ?` 有两处永假：NULL 比较得 NULL，RFC 2822
+          首字符 `'T'` > `'2'` 按字典序恒大于截止值。**不解析 RFC 2822 回写、
+          也不 backfill NULL**——那是伪造发布日期，`first_seen_at` 才是诚实的
+          兜底。代价是这条 SELECT 用不上 `idx_external_items_published`，
+          退化为全表扫描（实测约 96k 行 / 数十毫秒，每日一次可接受）。
         """
         setting = read_retention_setting(self.database)
         now_utc = self.now().astimezone(timezone.utc)
@@ -473,10 +483,30 @@ class RetentionService:
 
         with self.database.connect() as connection:
             # 阶段 A：可再生的原始抓取条目
+            #
+            # 判据必须是「发布日期」和「首次看到时间」里那个**真的能用的**：
+            #
+            # - `published_at` 为 NULL 时，`NULL < ?` 结果是 NULL，永远为假
+            #   ——库里 80% 的行就是这样，旧判据把它们永久焊死。
+            # - `published_at` 不是 ISO 形状时（历史遗留的 RFC 2822，如
+            #   "Thu, 06 Aug 2026 13:34:05 GMT"），按字典序比会因为首字符
+            #   'T'(0x54) > '2'(0x32) 而恒大于截止值，也永远删不掉。
+            #
+            # 这两种情况一律退化用 `first_seen_at`。它的语义是"我们第一次
+            # 看到这条的时间"，拿它兜底是诚实的；**不解析 RFC 2822 回写、
+            # 也不 backfill NULL**，那是伪造发布日期。`first_seen_at` 是
+            # NOT NULL 且实测无空缺，`COALESCE` 一定取得到值。
             stale_ids = [
                 row["item_id"]
                 for row in connection.execute(
-                    "SELECT item_id FROM external_items WHERE published_at < ?",
+                    """
+                    SELECT item_id FROM external_items
+                    WHERE COALESCE(
+                        CASE WHEN published_at LIKE '____-__-__T%'
+                             THEN published_at END,
+                        first_seen_at
+                    ) < ?
+                    """,
                     (cutoff,),
                 ).fetchall()
             ]

@@ -22,8 +22,10 @@ own reports were treated as claims, not as evidence.
 
 ## Automated verification
 
-- Full suite: **426 tests passed, three consecutive runs**, with `ResourceWarning`
-  treated as an error (`unittest discover -s tests`). Up from 269 at `80b7541`.
+- Full suite: **440 tests passed, three consecutive runs**, with `ResourceWarning`
+  treated as an error (`unittest discover -s tests`). Up from 269 at `80b7541`
+  (426 at the first commit of this round, plus 14 covering the layer-A condition
+  corrected in the follow-up commit).
 - Coverage, measured with the zero-dependency `tools/coverage_baseline.py`:
   **84.1 % overall** (6280 / 7468 executable lines), up from a **80.4 %** baseline
   (5589 / 6948).
@@ -159,23 +161,55 @@ single local window. **The RST symptom is not claimed as fixed.** What is pinned
 tests is the bounded behaviour, and the test docstrings state explicitly that they
 cannot distinguish draining from not draining.
 
-## Caveats found, not fixed
+## Caveats found, and what happened to them
 
-- **Retention layer A is ineffective for ~80 % of its rows.** 77,231 of 96,613
-  `external_items` rows have `published_at IS NULL`, and 537 more store a raw RSS
-  RFC-822 date. Layer A deletes on `published_at < cutoff`; a NULL comparison is never
-  true and `'F' > '2'` lexicographically, so neither group can ever be deleted. There
-  is no loss today — the table spans only 39 days and the window is 60 — but from
-  about 2026-10-05 the table (55.7 MB, the third largest) begins accumulating
-  permanently. Fixing it means choosing a fallback (`first_seen_at` is complete and
-  well-formed, and would delete 0 extra rows today) and/or normalising dates at
-  ingest, and it **deletes real rows irreversibly**, so it was referred to the owner
-  rather than decided here.
+- **Retention layer A was ineffective for ~80 % of its rows — fixed in a follow-up
+  commit.** 77,231 of 96,613 `external_items` rows have `published_at IS NULL`, and 537
+  more store a raw RSS RFC-822 date. Layer A deleted on `published_at < cutoff`; a NULL
+  comparison is never true and `'T' > '2'` lexicographically, so neither group could
+  ever be deleted. There was no loss at the time — the table spans only 39 days and the
+  window is 60 — but from about 2026-10-05 the table (55.7 MB, the third largest) would
+  have begun accumulating permanently.
+  The condition is now
+  `COALESCE(CASE WHEN published_at LIKE '____-__-__T%' THEN published_at END, first_seen_at) < ?`,
+  so a valid ISO publish date still wins and anything else falls back to when the item
+  was first seen. RFC-2822 dates are **not** parsed back into the row and NULLs are
+  **not** backfilled: that would fabricate a publication date, and `first_seen_at` is
+  the honest fallback. Ingestion needed no change — `normalize_published_at()` already
+  existed and all three parse paths already called it, so the unparseable rows are
+  legacy data, not an ongoing defect.
+  Measured effect on the real database: **0 extra rows deleted today** (304 either way),
+  so this is future-proofing only. Cost: the new predicate cannot use
+  `idx_external_items_published` and degrades to a full scan, 97.0 ms → 107.8 ms; with
+  the index present it would be 0.3 ms → ~122 ms. The absolute cost is 0.12 s once a day.
+  A correction worth recording: **"normalising the legacy rows would restore the index"
+  is false** — 80 % of rows are NULL and always take the fallback, so `COALESCE` remains
+  and the index stays unusable. Recovering it would require materialising the predicate
+  into a column, which means changing the write path.
+- **The five hot-path indexes did not exist in the live database.** See the deployment
+  note below; the cause is a stale installed build, not a code fault.
 - Two suites that claim to pin retention behaviour were found to be vacuous during
   this round and were repaired: an audit-log assertion that could never fail, and an
   idempotency assertion that survived a mutation deleting one row per layer. Both were
   caught by deliberately mutating the source and checking that the tests turn red — a
   check that coverage alone cannot provide.
+
+## Deployment note: the installed build lags the source
+
+The live database is missing all five hot-path indexes declared in `database.py`
+(`idx_external_items_source`, `idx_external_items_published`,
+`idx_notification_log_cluster_created`, `idx_judgment_jobs_finished`,
+`idx_event_cluster_items_item`). This is not a defect: when the database already
+exists, `application.py` takes the `else` branch and calls `database.initialize()` on
+**every** startup, and those indexes are unconditional `CREATE INDEX IF NOT EXISTS`
+statements. The only consistent explanation is that **the installed program predates
+the commit that introduced them**, so those statements have never run against the live
+database.
+
+Consequences: those hot paths are still full table scans, and **none of this round's
+work is active in the running program** — not the retention layers, not the route
+table, not the layer-A fix, not the added tests. A rebuilt and reinstalled package is
+required; the first start after that creates the indexes once (about 5 s, about 14 MB).
 
 ## Not verified
 
