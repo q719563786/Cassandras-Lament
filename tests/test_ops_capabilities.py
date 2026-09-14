@@ -145,9 +145,20 @@ class RetentionTests(unittest.TestCase):
         )
         # cluster_days 是结论明细的保留期，与原始条目的 days 分开；
         # 未显式写入时给默认值 180（比 60 天宽得多，保住近期结论）。
+        # 2026-09-14 起新增 C/D/E/F 层的键（契约 §3 只增不改），
+        # 未显式写入时必须回落到契约规定的默认值。
         self.assertEqual(
             read_retention_setting(self.database),
-            {"enabled": False, "days": 30, "cluster_days": 180},
+            {
+                "enabled": False,
+                "days": 30,
+                "cluster_days": 180,
+                "job_days": 7,
+                "run_days": 90,
+                "max_judgments_per_cluster": 8,
+                "threshold_mb": 2048,
+                "min_interval_hours": 6,
+            },
         )
         with self.assertRaises(ValueError):
             write_retention_setting(self.database, {"days": 3})

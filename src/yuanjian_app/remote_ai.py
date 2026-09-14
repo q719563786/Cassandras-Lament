@@ -25,6 +25,7 @@ from .judgments import (
     repair_judgment,
     validate_judgment,
 )
+from .retention import read_retention_setting
 
 
 DEFAULT_ENDPOINT = "https://api.openai.com/v1/responses"
@@ -701,6 +702,68 @@ class JudgmentQueue:
             return int(self._remote_used_today(connection, now))
 
     def _persist_judgment(self, connection, job, provider, result, now):
+        """把一次判读结果落库，**始终返回该簇真实存在的一条研判 id**。
+
+        调用方依赖返回值有效，且 `event_clusters.latest_judgment_id` 必须始终
+        指向真实存在的研判——以下所有分支都满足这两点。
+
+        防冗余写入（2026-09-14 新增两道闸门，只跳过「新增」，绝不改动已有数据，
+        也绝不抛异常）：
+
+        - **F2 · 内容相同不重复写**：本次 `content_json` 与该簇**最新一条**
+          （按 `created_at`）**完全相同**时跳过插入。真正被拦住的不是"同证据重判"
+          ——那个早已由 `UNIQUE(cluster_id, provider, evidence_hash)` 加
+          `INSERT OR IGNORE` 覆盖（实测三元组重复数为 0，F1 是空操作）——
+          而是「簇内新增条目 → `evidence_hash` 变化 → 整条重新研判，模型却给出
+          一字不差的相同内容」。不拦的话就是把同一份 JSON 再存一遍。
+        - **F3 · 单簇条数上限**：该簇研判数 ≥ `max_judgments_per_cluster`
+          （默认 8）时不再新增。
+
+        **F3 的产品代价（必须知情，不要只当成一个磁盘开关）**：一旦某个簇触顶，
+        它的研判就**停止进化**——`latest_judgment_id` 不再跟随后续证据更新，
+        用户看到的是旧证据下的判读，直到用户调高上限。这是拿「判读新鲜度」
+        换磁盘，而实测 N=8 只省约 8.2 MB（1,193 条研判 + 1,731 条连带
+        `personal_impacts`，杠杆系数 1.569）。**交换比并不好**，所以上限
+        必须让用户可调（设置项 `max_judgments_per_cluster`，1~100）。
+
+        两条跳过路径都会把 `needs_judgment` 置 0。原因：不置 0 的话，认知扫描
+        会认为该簇"仍待研判"，每次扫描反复入队，**反而制造 `judgment_jobs` 垃圾**
+        ——那正是本层要治理的东西，得不偿失。
+
+        本方法不删除任何历史研判（判读不可变，`judgments` 另有触发器保护），
+        也不涉及 VACUUM。
+        """
+        cluster_id = job["cluster_id"]
+        content_json = json.dumps(result.to_dict(), ensure_ascii=False, sort_keys=True)
+
+        # 该簇最新一条研判。主排序是契约规定的 created_at；
+        # 附加 judgment_id 只是为了让同一秒并列时的结果确定，不改变语义。
+        latest = connection.execute(
+            """
+            SELECT judgment_id, content_json FROM judgments
+            WHERE cluster_id=?
+            ORDER BY created_at DESC, judgment_id DESC LIMIT 1
+            """,
+            (cluster_id,),
+        ).fetchone()
+
+        # F2：与最新一条内容完全相同 -> 不新增，仍返回已存在的最新 id
+        if latest is not None and latest["content_json"] == content_json:
+            return self._mark_cluster_judged(
+                connection, cluster_id, latest["judgment_id"], now
+            )
+
+        # F3：已达单簇上限 -> 不新增，仍返回已存在的最新 id
+        if latest is not None:
+            limit = read_retention_setting(self.database)["max_judgments_per_cluster"]
+            total = connection.execute(
+                "SELECT COUNT(*) FROM judgments WHERE cluster_id=?", (cluster_id,)
+            ).fetchone()[0]
+            if total >= limit:
+                return self._mark_cluster_judged(
+                    connection, cluster_id, latest["judgment_id"], now
+                )
+
         judgment_id = "J-" + uuid.uuid4().hex
         connection.execute(
             """
@@ -710,10 +773,10 @@ class JudgmentQueue:
             """,
             (
                 judgment_id,
-                job["cluster_id"],
+                cluster_id,
                 provider,
                 job["evidence_hash"],
-                json.dumps(result.to_dict(), ensure_ascii=False, sort_keys=True),
+                content_json,
                 _iso(now),
             ),
         )
@@ -722,16 +785,21 @@ class JudgmentQueue:
             SELECT judgment_id FROM judgments
             WHERE cluster_id=? AND provider=? AND evidence_hash=?
             """,
-            (job["cluster_id"], provider, job["evidence_hash"]),
+            (cluster_id, provider, job["evidence_hash"]),
         ).fetchone()["judgment_id"]
+        return self._mark_cluster_judged(connection, cluster_id, stored, now)
+
+    @staticmethod
+    def _mark_cluster_judged(connection, cluster_id, judgment_id, now):
+        """把簇标记为「已研判」：指到一条真实研判，并清掉待研判标志。"""
         connection.execute(
             """
             UPDATE event_clusters SET latest_judgment_id=?,needs_judgment=0,updated_at=?
             WHERE cluster_id=?
             """,
-            (stored, _iso(now), job["cluster_id"]),
+            (judgment_id, _iso(now), cluster_id),
         )
-        return stored
+        return judgment_id
 
     def run_due(self, limit: int = 5, *, remote_limit: int = 3) -> dict:
         """处理到期任务。远程任务每次最多处理remote_limit个，严格控制API消耗；

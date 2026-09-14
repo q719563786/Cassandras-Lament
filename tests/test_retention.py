@@ -3,7 +3,8 @@
 这一组测试钉死四件事：
 1. 过期簇的**派生明细**会被清掉（此前永不清理，是库体积膨胀的主因之一）
 2. **结论永不删除**：事件簇与研判都保留；`judgments` 还受数据库触发器保护
-3. **预测账本与趋势快照永不删除**（校准统计只读它们，不能被清理影响）
+3. **预测账本永不删除**，`trend_snapshots` 的 720h 窗口永久保留
+   （其余窗口自 2026-09-14 起由 E 层按 `SNAPSHOT_KEEP_DAYS` 降采样）
 4. 清理窗口彼此独立：结论明细用 cluster_days，原始条目用 days
 """
 
@@ -87,7 +88,13 @@ class RetentionCascadeTests(unittest.TestCase):
         )
 
     def add_ledger_rows(self, connection):
-        """造一条预测账本与一条趋势快照，它们绝不能被清理。"""
+        """造预测账本与趋势快照，它们属于不可清理的账本/保护名单。
+
+        2026-09-14 起 E 层会按窗口降采样趋势快照（契约 §2 `SNAPSHOT_KEEP_DAYS`），
+        所以这里刻意放两类：
+        - `window_hours=720` 且很旧 —— 受硬不变量保护，**永久保留**；
+        - `window_hours=24` 但很新 —— 在 60 天保留窗口内，也不该被删。
+        """
         connection.execute(
             "INSERT INTO forecasts(forecast_id,status,window_end,category)"
             " VALUES ('F-1','open','2026-12-31','finance')"
@@ -103,7 +110,12 @@ class RetentionCascadeTests(unittest.TestCase):
         connection.execute(
             "INSERT INTO trend_snapshots(snapshot_id,captured_at,category,window_hours,"
             "event_count,baseline_count,surge_ratio,status)"
-            " VALUES ('S-1','2026-01-01T00:00:00Z','finance',24,10,5,2.0,'rising')"
+            " VALUES ('S-720','2026-01-01T00:00:00Z','finance',720,10,5,2.0,'rising')"
+        )
+        connection.execute(
+            "INSERT INTO trend_snapshots(snapshot_id,captured_at,category,window_hours,"
+            "event_count,baseline_count,surge_ratio,status)"
+            " VALUES ('S-24','2026-09-10T00:00:00Z','finance',24,10,5,2.0,'rising')"
         )
 
     def counts(self, table, where="1=1", params=()):
@@ -151,11 +163,15 @@ class RetentionCascadeTests(unittest.TestCase):
                     "%s 误删了 %s 的行" % (table, cluster_id),
                 )
 
-        # 预测账本与趋势快照原样保留
+        # 预测账本原样保留
         self.assertEqual(self.counts("forecasts"), 1)
         self.assertEqual(self.counts("forecast_versions"), 1)
         self.assertEqual(self.counts("resolutions"), 1)
-        self.assertEqual(self.counts("trend_snapshots"), 1)
+        # 趋势快照：720h 窗口受硬不变量保护必须永久保留；
+        # 24h 窗口的这条很新（4 天），在 60 天保留窗口内，同样不该被删。
+        self.assertEqual(self.counts("trend_snapshots"), 2)
+        self.assertEqual(self.counts("trend_snapshots", "window_hours=720"), 1)
+        self.assertEqual(self.counts("trend_snapshots", "window_hours=24"), 1)
 
         # 审计里能查到这次删除的明细
         with self.database.connect() as connection:

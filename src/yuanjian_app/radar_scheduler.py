@@ -200,6 +200,36 @@ class RadarScheduler:
             return {"status": "skipped"}
         return self._execute("retention", self.retention_service.run)
 
+    def run_retention_if_threshold(self):
+        """体积阈值触发的清理：库文件或单表超阈值时才真正执行。
+
+        与 `run_retention_once`（每日墙钟一次）互补：这里管的是"库涨太快"，
+        每日一次来不及的场景。是否到期由 `should_run_by_threshold()` 只读判断，
+        真正的节流（默认 6 小时内不重复）由 `RetentionService.run("threshold")`
+        内部负责。
+
+        记录用的任务名是 `retention_threshold`，与 `run_retention_once` 的
+        `retention` **分开**——否则阈值触发会写脏 `task.retention`，
+        让当天的每日清理误判为"已经跑过"而被跳过。
+        """
+        if self.paused:
+            return {"status": "paused"}
+        if self.retention_service is None:
+            return {"status": "disabled"}
+        check = self.retention_service.should_run_by_threshold()
+        if not check["needed"]:
+            return {
+                "status": "skipped",
+                "reason": check["reason"],
+                "db_bytes": check["db_bytes"],
+                "largest_table": check["largest_table"],
+                "largest_bytes": check["largest_bytes"],
+            }
+        return self._execute(
+            "retention_threshold",
+            lambda: self.retention_service.run("threshold"),
+        )
+
     def run_learning_once(self):
         """误报反馈回灌：6 小时 monotonic 间隔（与墙钟无关）。"""
         if self.paused:
@@ -218,6 +248,7 @@ class RadarScheduler:
         next_trends = 0.0
         next_learning = 0.0
         next_daily = 0.0
+        next_retention_check = 0.0
 
         def following(interval):
             # 下次到期从「任务真正结束的时刻」起算，而不是从本轮循环开始时的
@@ -246,6 +277,11 @@ class RadarScheduler:
                 self.run_backup_once()
                 self.run_retention_once()
                 next_daily = following(300)
+            if current >= next_retention_check:
+                # 体积阈值检查：只读判断很便宜，但"任一表多大"要查 dbstat，
+                # 在近 900MB 的库上单次约 1.8 秒，所以按小时而不是按分钟做。
+                self.run_retention_if_threshold()
+                next_retention_check = following(3600)
             waits = [next_external - time.monotonic()]
             if self.cognition is not None:
                 waits.extend(
@@ -253,6 +289,7 @@ class RadarScheduler:
                 )
             waits.append(next_learning - time.monotonic())
             waits.append(next_daily - time.monotonic())
+            waits.append(next_retention_check - time.monotonic())
             self._stop.wait(max(0.01, min(max(0.0, value) for value in waits)))
 
     def start(self):

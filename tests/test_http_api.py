@@ -1,19 +1,32 @@
 import json
+import socket
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from yuanjian_app.database import Database
 from yuanjian_app.external_radar import ExternalRadarService
 from yuanjian_app.external_sources import ExternalItem
 from yuanjian_app.forecasts import ForecastService
 from yuanjian_app.cognition import CognitionController, CognitionService
-from yuanjian_app.http_api import Services, create_server
+from yuanjian_app import http_api
+from yuanjian_app.http_api import (
+    ROUTES,
+    SECURITY_HEADERS,
+    Route,
+    Services,
+    create_server,
+    match_route,
+    resolve_static_root,
+    routes_for,
+)
 from yuanjian_app.impacts import ImpactService
 from yuanjian_app.interests import InterestService
 from yuanjian_app.knowledge import KnowledgeService
@@ -1049,6 +1062,1265 @@ class HttpApiTests(unittest.TestCase):
         finally:
             response.close()
         self.assertIn("state", payload)
+
+
+TOKEN = "routing-token"
+SECURITY_HEADER_NAMES = tuple(name for name, _value in SECURITY_HEADERS)
+
+
+class StubService:
+    """按方法名预置返回值的假服务，并记录每次调用。
+
+    与 `HttpApiTests` 里那套"真数据库 + 真服务"不同：这里只关心
+    **HTTP 边界与路由分发契约**，所以把服务替换成可记录的桩，
+    既让每条路由都被走到，又能断言"到底调了哪个方法、传了什么参数"。
+
+    预置值可以是一个**可调用对象**，此时会用调用参数回调它 —— 这让桩能
+    "校验自己的入参"（比如 `get_forecast` 只认 "F-1"）。这一点很关键：
+    没有它，路由被写错、把 `/api/forecasts/progress` 当成预测 id 分发下去时，
+    桩会照样回 200，端到端用例就成了睁眼瞎。
+    """
+
+    def __init__(self, **results):
+        object.__setattr__(self, "calls", [])
+        object.__setattr__(self, "_results", results)
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+
+        def call(*args, **kwargs):
+            self.calls.append((name, args, kwargs))
+            value = self._results.get(name, {})
+            if isinstance(value, BaseException):
+                raise value
+            if callable(value):
+                return value(*args, **kwargs)
+            return value
+
+        return call
+
+    def called(self, name):
+        return [entry for entry in self.calls if entry[0] == name]
+
+
+def accepts_only(expected, payload):
+    """构造一个"只认某个入参"的桩返回值，用于暴露错误分发。"""
+
+    def check(value):
+        if value != expected:
+            raise KeyError(value)
+
+        return payload
+
+    return check
+
+
+class StubOperation:
+    """`cognition_operation` 的桩：只是两个被读的属性，不是方法。"""
+
+    def __init__(self, running=False, started_at_monotonic=None):
+        self.running = running
+        self.started_at_monotonic = started_at_monotonic
+
+    def run(self, source):
+        return {"source": source}
+
+
+def build_stub_services(**overrides):
+    """一套能让全部 29 条 GET 路由都返回 200 的桩服务。"""
+    stubs = {
+        "forecasts": StubService(
+            list_forecasts=([], 0),
+            progress_summary={"total": 0},
+            list_overdue=[],
+            calibration_summary={},
+            score_summary={"score": 0},
+            get_forecast=accepts_only("F-1", {"forecast_id": "F-1"}),
+            add_version={"version": 2},
+            resolve={"outcome": "hit"},
+            create_forecast={"forecast_id": "F-new"},
+        ),
+        "interests": StubService(list_objects=[], list_links=[]),
+        "signals": StubService(list_signals=[], ingest={"candidate": {}, "signal": {}}),
+        "knowledge": StubService(
+            discover_vaults=[], list_documents=[], index_vault={"indexed": 0}
+        ),
+        "external": StubService(
+            radar_page={"items": []},
+            list_sources=[],
+            list_rules=[],
+            add_source="S-new",
+            add_watch_rule="R-new",
+            import_opml={},
+            bulk_set_enabled={"updated": 0},
+            set_source_enabled={},
+            set_rule_enabled={},
+            refresh_source={},
+            update_source={},
+            delete_source={},
+            delete_watch_rule={},
+        ),
+        "cognition": StubService(
+            list_clusters_page={"items": []},
+            get_cluster={"cluster_id": "C-1"},
+        ),
+        "trends": StubService(summary={}),
+        "cognition_controller": StubService(
+            status={},
+            risk_dashboard={"state": "ok"},
+            now=lambda: datetime(2026, 8, 11, 8, tzinfo=timezone.utc),
+            cluster_detail=accepts_only("C-1", {"cluster_id": "C-1"}),
+            list_jobs=[],
+            run_once={"clusters": 0},
+            feedback={"ok": True},
+        ),
+        "notifications": StubService(
+            list_page={"items": []}, mark_all_read={}, mark_read={}
+        ),
+        "impacts": StubService(
+            pending_candidates=[], confirm_candidate={"impact_id": "P-1"}
+        ),
+        "startup": StubService(
+            status={"installed": False, "available": True},
+            install={"installed": True},
+            remove={"installed": False},
+        ),
+        "ai_settings": StubService(get={}, save={}),
+        "cognition_operation": StubOperation(running=True, started_at_monotonic=12.5),
+        "desktop": RecordingDesktop(),
+        "system_settings": StubService(get_learning={}, put_learning={}),
+        "diagnostics": StubService(snapshot={"state": "ok"}),
+        "backup_service": StubService(get_setting={}, put_setting={}),
+        "retention_service": StubService(get_setting={}, put_setting={}),
+        "mobile_export": StubService(export={"generated": True}),
+        "update_check": StubService(check={"latest": "1.0.0", "update": False}),
+    }
+    stubs.update(overrides)
+    services = Services(
+        stubs["forecasts"],
+        stubs["interests"],
+        stubs["signals"],
+        stubs["knowledge"],
+        stubs["external"],
+        stubs["cognition"],
+        stubs["trends"],
+        stubs["cognition_controller"],
+        stubs["notifications"],
+        stubs["impacts"],
+        stubs["startup"],
+        stubs["ai_settings"],
+        cognition_operation=stubs["cognition_operation"],
+        desktop=stubs["desktop"],
+        system_settings=stubs["system_settings"],
+        diagnostics=stubs["diagnostics"],
+        backup_service=stubs["backup_service"],
+        retention_service=stubs["retention_service"],
+        mobile_export=stubs["mobile_export"],
+        update_check=stubs["update_check"],
+    )
+    return services, stubs
+
+
+def bare_services():
+    """所有可选能力都未装配的服务，用来逼出 503 / 400 的 unavailable 分支。"""
+    return Services(
+        None, None, None, None, None, None, None, None, None, None, None, None
+    )
+
+
+class RoutingTestCase(unittest.TestCase):
+    """只做协议层验证：自带服务器 + 显式禁用代理的 opener。"""
+
+    token = TOKEN
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.services, self.stubs = build_stub_services()
+        self.start_server(self.services)
+
+    def tearDown(self):
+        self.stop_server()
+        self.temp_dir.cleanup()
+
+    def start_server(self, services, token=None):
+        self.server = create_server(
+            "127.0.0.1", 0, self.token if token is None else token, services
+        )
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.base_url = "http://127.0.0.1:%d" % self.server.server_address[1]
+        # 环境里可能设了 http_proxy，会把 127.0.0.1 的请求劫持成 502。
+        # 显式装一个空 ProxyHandler，让这些用例不受外部环境影响。
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def stop_server(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+
+    def call(self, method, path, payload=None, token=None, raw_body=None):
+        data = None
+        if raw_body is not None:
+            data = raw_body
+        elif payload is not None:
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(self.base_url + path, data=data, method=method)
+        if data is not None:
+            request.add_header("Content-Type", "application/json")
+        if token is not False:
+            request.add_header("X-YuanJian-Token", self.token if token is None else token)
+        try:
+            with self.opener.open(request, timeout=10) as response:
+                return response.status, response.headers, response.read()
+        except urllib.error.HTTPError as error:
+            body = error.read()
+            headers = error.headers
+            error.close()
+            return error.code, headers, body
+
+    def body(self, method, path, **kwargs):
+        status, _headers, raw = self.call(method, path, **kwargs)
+        return status, json.loads(raw.decode("utf-8"))
+
+    def raw_request(self, request_line, headers):
+        """直接走 socket 发送原始请求。
+
+        用来构造 `http.client` 不肯发的畸形头部（例如非整数的
+        `Content-Length`）—— 这类输入正是服务端需要防御的。
+        """
+        with socket.create_connection(
+            ("127.0.0.1", self.server.server_address[1]), timeout=10
+        ) as connection:
+            payload = (
+                request_line + "\r\n" + "\r\n".join(headers) + "\r\n\r\n"
+            ).encode("ascii")
+            connection.sendall(payload)
+            chunks = []
+            while True:
+                data = connection.recv(4096)
+                if not data:
+                    break
+                chunks.append(data)
+        return b"".join(chunks)
+
+    def assert_security_headers(self, headers, context=""):
+        missing = [
+            name for name in SECURITY_HEADER_NAMES if headers.get(name) is None
+        ]
+        self.assertEqual(missing, [], "缺少安全头 %r（%s）" % (missing, context))
+        for name, value in SECURITY_HEADERS:
+            self.assertEqual(
+                headers.get(name), value, "%s 的值与契约不符（%s）" % (name, context)
+            )
+
+
+class RouteTableTests(RoutingTestCase):
+    """路由表本身：匹配优先级、参数提取、构造期校验。"""
+
+    def endpoint_of(self, method, path):
+        route, params = match_route(method, path)
+        return (route.endpoint if route else None), params
+
+    def test_exact_route_wins_over_the_prefix_route_that_would_swallow_it(self):
+        """`/api/forecasts/progress` 必须命中精确路由，而不是 `/api/forecasts/<id>`。
+
+        这是路由表"声明顺序即优先级"的关键不变量：写反了会把 progress 当成
+        一个预测 id 去查库，返回 404 forecast_not_found。
+        """
+        self.assertEqual(
+            self.endpoint_of("GET", "/api/forecasts/progress"),
+            ("_get_forecast_progress", {}),
+        )
+        self.assertEqual(
+            self.endpoint_of("GET", "/api/forecasts/overdue"),
+            ("_get_forecast_overdue", {}),
+        )
+        self.assertEqual(
+            self.endpoint_of("POST", "/api/external/sources/import-opml"),
+            ("_post_external_sources_import_opml", {}),
+        )
+        self.assertEqual(
+            self.endpoint_of("POST", "/api/external/sources/bulk-enabled"),
+            ("_post_external_sources_bulk_enabled", {}),
+        )
+        self.assertEqual(
+            self.endpoint_of("POST", "/api/notifications/read-all"),
+            ("_post_notifications_read_all", {}),
+        )
+        self.assertEqual(
+            self.endpoint_of("GET", "/api/interests/objects"),
+            ("_get_interest_objects", {}),
+        )
+
+    def test_prefix_route_extracts_the_whole_remainder(self):
+        self.assertEqual(
+            self.endpoint_of("GET", "/api/forecasts/F-1"),
+            ("_get_forecast", {"forecast_id": "F-1"}),
+        )
+        self.assertEqual(
+            self.endpoint_of("GET", "/api/cognition/clusters/C-9"),
+            ("_get_cluster_detail", {"cluster_id": "C-9"}),
+        )
+        self.assertEqual(
+            self.endpoint_of("DELETE", "/api/external/sources/S-1"),
+            ("_delete_external_source", {"source_id": "S-1"}),
+        )
+        self.assertEqual(
+            self.endpoint_of("PUT", "/api/external/sources/S-1"),
+            ("_put_external_source", {"source_id": "S-1"}),
+        )
+
+    def test_prefix_suffix_routes_strip_only_the_suffix(self):
+        self.assertEqual(
+            self.endpoint_of("POST", "/api/external/sources/S-1/enabled"),
+            ("_post_source_enabled", {"source_id": "S-1"}),
+        )
+        self.assertEqual(
+            self.endpoint_of("POST", "/api/external/rules/R-1/enabled"),
+            ("_post_rule_enabled", {"rule_id": "R-1"}),
+        )
+        self.assertEqual(
+            self.endpoint_of("POST", "/api/forecasts/F-1/versions"),
+            ("_post_forecast_versions", {"forecast_id": "F-1"}),
+        )
+        self.assertEqual(
+            self.endpoint_of("POST", "/api/forecasts/F-1/resolve"),
+            ("_post_forecast_resolve", {"forecast_id": "F-1"}),
+        )
+        self.assertEqual(
+            self.endpoint_of("POST", "/api/notifications/N-1/read"),
+            ("_post_notification_read", {"notification_id": "N-1"}),
+        )
+        self.assertEqual(
+            self.endpoint_of("POST", "/api/cognition/candidates/P-1/confirm"),
+            ("_post_candidate_confirm", {"impact_id": "P-1"}),
+        )
+        self.assertEqual(
+            self.endpoint_of("POST", "/api/cognition/clusters/C-1/feedback"),
+            ("_post_cluster_feedback", {"cluster_id": "C-1"}),
+        )
+
+    def test_prefix_suffix_entry_and_extraction_are_faithfully_replicated(self):
+        """进入分支用 `startswith(P) and endswith(S)`，参数取"剩余段去掉末尾 S"。
+
+        这两者并不完全等价：`_post_source_enabled` 里 `path.removeprefix(P)`
+        对 `/api/external/sources/a/enabled/b/enabled` 会得到 `a/enabled/b`。
+        路由表的文档明确说"如实复刻旧实现、不做顺手修正"，
+        这里把该行为钉死，防止有人以"看起来是 bug"为由悄悄改掉语义。
+        """
+        route, params = match_route(
+            "POST", "/api/external/sources/a/enabled/b/enabled"
+        )
+        self.assertEqual(route.endpoint, "_post_source_enabled")
+        self.assertEqual(params, {"source_id": "a/enabled/b"})
+        # 处理器随后会 rstrip("/")，但不会把中间的 "/" 当分隔符拆开
+        self.assertEqual(params["source_id"].rstrip("/"), "a/enabled/b")
+
+    def test_unknown_path_matches_nothing(self):
+        for method in ("GET", "POST", "PUT", "DELETE"):
+            with self.subTest(method=method):
+                self.assertEqual(
+                    match_route(method, "/api/definitely-not-a-route"), (None, None)
+                )
+        self.assertEqual(match_route("PATCH", "/api/forecasts"), (None, None))
+
+    def test_route_rejects_unknown_kind_and_empty_suffix(self):
+        with self.assertRaises(ValueError):
+            Route("GET", "bogus-kind", "/api/x", "_get_score")
+        with self.assertRaises(ValueError):
+            Route("POST", "prefix_suffix", "/api/x/", "_post_events", suffix="")
+
+    def test_every_route_points_at_a_handler_that_exists(self):
+        """路由表写错一个方法名就会变成运行期 500，必须在建表时就炸出来。"""
+        self.assertTrue(ROUTES)
+        for route in ROUTES:
+            with self.subTest(route=route.path):
+                self.assertIn(route.kind, ("exact", "prefix", "prefix_suffix"))
+                self.assertTrue(route.endpoint.startswith("_"))
+        self.assertEqual(
+            set(routes_for("GET")) | set(routes_for("POST")) | set(routes_for("PUT"))
+            | set(routes_for("DELETE")),
+            set(ROUTES),
+        )
+
+    def test_routes_for_returns_only_that_method(self):
+        self.assertTrue(all(r.method == "PUT" for r in routes_for("PUT")))
+        self.assertEqual(routes_for("put"), routes_for("PUT"))
+        self.assertEqual(routes_for("PATCH"), ())
+
+    def test_static_root_resolution_supports_the_frozen_layout(self):
+        """PyInstaller 冻结后静态资源在 `_MEIPASS/yuanjian_app/static`。"""
+        bundled = resolve_static_root(__file__, bundle_root="C:/bundle")
+        self.assertEqual(
+            bundled.name, "static"
+        )
+        self.assertEqual(bundled.parent.name, "yuanjian_app")
+        source = resolve_static_root(__file__)
+        self.assertEqual(source.name, "static")
+
+
+class GetRouteContractTests(RoutingTestCase):
+    """每一条 GET 路由都必须 200，且带齐安全头。"""
+
+    PREFIX_SAMPLES = {
+        "/api/forecasts/": "/api/forecasts/F-1",
+        "/api/cognition/clusters/": "/api/cognition/clusters/C-1",
+    }
+
+    def sample_path(self, route, query=""):
+        if route.kind == "exact":
+            return route.path + query
+        return self.PREFIX_SAMPLES[route.path] + query
+
+    def test_every_get_route_returns_200_with_security_headers(self):
+        for route in routes_for("GET"):
+            with self.subTest(path=route.path):
+                status, headers, raw = self.call("GET", self.sample_path(route))
+                self.assertEqual(status, 200, raw[:200])
+                self.assert_security_headers(headers, route.path)
+                self.assertIn("application/json", headers.get("Content-Type"))
+
+    def test_get_routes_dispatch_to_the_expected_service_methods(self):
+        expected = {
+            "/api/forecasts/progress": ("forecasts", "progress_summary"),
+            "/api/forecasts/overdue": ("forecasts", "list_overdue"),
+            "/api/interests/objects": ("interests", "list_objects"),
+            "/api/cognition/status": ("cognition_controller", "status"),
+            "/api/cognition/candidates": ("impacts", "pending_candidates"),
+            "/api/cognition/trends": ("trends", "summary"),
+            "/api/cognition/jobs": ("cognition_controller", "list_jobs"),
+            "/api/settings/startup": ("startup", "status"),
+            "/api/settings/ai": ("ai_settings", "get"),
+            "/api/settings/backup": ("backup_service", "get_setting"),
+            "/api/settings/retention": ("retention_service", "get_setting"),
+            "/api/settings/learning": ("system_settings", "get_learning"),
+            "/api/diagnostics": ("diagnostics", "snapshot"),
+            "/api/score": ("forecasts", "score_summary"),
+            "/api/external/sources": ("external", "list_sources"),
+            "/api/external/rules": ("external", "list_rules"),
+            "/api/signals": ("signals", "list_signals"),
+            "/api/knowledge/vaults": ("knowledge", "discover_vaults"),
+            "/api/risk-dashboard": ("cognition_controller", "risk_dashboard"),
+        }
+        for path, (stub_name, method) in expected.items():
+            with self.subTest(path=path):
+                status, _headers, raw = self.call("GET", path)
+                self.assertEqual(status, 200, raw[:200])
+                self.assertTrue(
+                    self.stubs[stub_name].called(method),
+                    "%s 没有调用 %s.%s" % (path, stub_name, method),
+                )
+
+    def test_cognition_status_merges_the_running_operation(self):
+        status, payload = self.body("GET", "/api/cognition/status")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["running"])
+        self.assertEqual(payload["started_at_monotonic"], 12.5)
+
+    def test_calibration_attaches_pending_candidates(self):
+        status, payload = self.body("GET", "/api/calibration")
+        self.assertEqual(status, 200)
+        self.assertIn("candidates", payload)
+        self.assertTrue(self.stubs["forecasts"].called("calibration_summary"))
+
+    def test_paged_get_routes_forward_the_query_parameters(self):
+        self.call("GET", "/api/forecasts?limit=5&offset=3")
+        call = self.stubs["forecasts"].called("list_forecasts")[0]
+        self.assertEqual(call[1], ())
+        self.assertEqual(call[2], {"limit": 5, "offset": 3})
+
+        self.call("GET", "/api/external/radar?limit=4&offset=1&q=" + urllib.parse.quote("医保"))
+        call = self.stubs["external"].called("radar_page")[0]
+        self.assertEqual(call[2], {"limit": 4, "offset": 1, "query": "医保"})
+
+        self.call("GET", "/api/cognition/clusters?needs_judgment=true")
+        call = self.stubs["cognition"].called("list_clusters_page")[0]
+        self.assertIs(call[2]["needs_judgment"], True)
+
+        self.call("GET", "/api/cognition/clusters?needs_judgment=false")
+        call = self.stubs["cognition"].called("list_clusters_page")[-1]
+        self.assertIs(call[2]["needs_judgment"], False)
+
+        self.call("GET", "/api/notifications?status=sent")
+        call = self.stubs["notifications"].called("list_page")[0]
+        self.assertEqual(call[2]["status"], "sent")
+
+    def test_knowledge_documents_forwards_the_search_term(self):
+        self.call("GET", "/api/knowledge/documents?q=" + urllib.parse.quote("预算"))
+        call = self.stubs["knowledge"].called("list_documents")[0]
+        self.assertEqual(call[1], ("预算",))
+
+    def test_invalid_needs_judgment_filter_returns_400(self):
+        status, payload = self.body("GET", "/api/cognition/clusters?needs_judgment=maybe")
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "待研判筛选无效")
+
+    def test_non_numeric_pagination_returns_400(self):
+        for query in ("?limit=abc", "?offset=abc"):
+            with self.subTest(query=query):
+                status, payload = self.body("GET", "/api/forecasts" + query)
+                self.assertEqual(status, 400)
+                self.assertEqual(payload["error"]["message"], "分页参数无效")
+
+    def test_prefix_routes_decoded_url_encoded_identifiers(self):
+        self.call("GET", "/api/cognition/clusters/%E4%B8%AD%E6%96%87%E7%B0%87")
+        call = self.stubs["cognition_controller"].called("cluster_detail")[0]
+        self.assertEqual(call[1], ("中文簇",))
+
+        self.call("GET", "/api/forecasts/F%2F1")
+        call = self.stubs["forecasts"].called("get_forecast")[0]
+        self.assertEqual(call[1], ("F/1",))
+
+    def test_prefix_route_404_codes_are_specific(self):
+        self.stubs["cognition_controller"]._results["cluster_detail"] = KeyError("gone")
+        status, payload = self.body("GET", "/api/cognition/clusters/C-missing")
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["error"]["code"], "cluster_not_found")
+
+        self.stubs["forecasts"]._results["get_forecast"] = KeyError("gone")
+        status, payload = self.body("GET", "/api/forecasts/F-missing")
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["error"]["code"], "forecast_not_found")
+
+    def test_unknown_api_path_returns_404_with_security_headers(self):
+        for method in ("GET", "POST", "PUT", "DELETE"):
+            with self.subTest(method=method):
+                payload = {} if method in ("POST", "PUT") else None
+                status, headers, raw = self.call(method, "/api/nope", payload=payload)
+                self.assertEqual(status, 404)
+                self.assert_security_headers(headers, method)
+                self.assertEqual(json.loads(raw.decode("utf-8"))["error"]["code"], "not_found")
+
+    def test_external_radar_invalid_pagination_returns_400(self):
+        status, payload = self.body("GET", "/api/external/radar?limit=abc")
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["message"], "分页参数无效")
+
+    def test_notifications_invalid_pagination_returns_400(self):
+        status, payload = self.body("GET", "/api/notifications?offset=-1")
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["message"], "分页参数无效")
+
+    def test_uncaught_key_error_from_a_handler_maps_to_404(self):
+        """处理器里冒出来的 KeyError 必须被兜成 404，不能变成 500。
+
+        这是旧实现的全局兜底语义，重构路由表时不能丢。
+        """
+        self.stubs["ai_settings"]._results["save"] = KeyError("gone")
+        status, payload = self.body("POST", "/api/settings/ai", payload={})
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+        self.assertEqual(payload["error"]["message"], "对象不存在")
+
+        self.stubs["system_settings"]._results["put_learning"] = KeyError("gone")
+        status, payload = self.body("PUT", "/api/settings/learning", payload={})
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+        self.assertEqual(payload["error"]["message"], "对象不存在")
+
+    def test_optional_dependencies_default_to_empty_collections(self):
+        """impacts / external 未装配时，这几条路由要退化成空集合而不是报错。"""
+        self.stop_server()
+        services, stubs = build_stub_services(impacts=None, external=None)
+        self.start_server(services)
+        self.stubs = stubs
+
+        status, payload = self.body("GET", "/api/cognition/candidates")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"candidates": []})
+
+        status, payload = self.body("GET", "/api/calibration")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["candidates"], [])
+
+        status, payload = self.body("GET", "/api/risk-dashboard")
+        self.assertEqual(status, 200)
+        call = stubs["cognition_controller"].called("risk_dashboard")[0]
+        self.assertEqual(call[1], ([],), "未装配外部源时应传空列表")
+        self.assertEqual(call[2], {"limit": 50})
+
+        status, payload = self.body("POST", "/api/export/mobile-summary", payload={})
+        self.assertEqual(status, 201)
+        call = stubs["mobile_export"].called("export")[0]
+        self.assertEqual(call[1][0]["state"], "ok")
+
+    def test_create_server_rejects_a_route_pointing_at_a_missing_handler(self):
+        """路由表写错方法名必须在**建服务时**炸掉，而不是等用户点到那条路由。"""
+        broken = Route("GET", "exact", "/api/broken", "_no_such_handler")
+        with mock.patch.object(http_api, "ROUTES", ROUTES + (broken,)):
+            with self.assertRaises(RuntimeError) as raised:
+                create_server("127.0.0.1", 0, TOKEN, self.services)
+
+        message = str(raised.exception)
+        self.assertIn("/api/broken", message)
+        self.assertIn("_no_such_handler", message)
+
+    def test_malformed_content_length_is_ignored_instead_of_crashing(self):
+        """`Content-Length` 不是整数时必须安全忽略，不能抛出去变成 500。
+
+        `http.client` 只会发合法的整数长度，所以这里用原始 socket 构造。
+        未授权路径会先丢弃请求体，正是这段防御逻辑的入口。
+        """
+        response = self.raw_request(
+            "DELETE /api/external/sources/S-1 HTTP/1.1",
+            [
+                "Host: 127.0.0.1",
+                "Content-Length: not-a-number",
+                "Connection: close",
+            ],
+        )
+
+        self.assertTrue(response, "服务端没有返回任何内容")
+        status_line = response.split(b"\r\n", 1)[0]
+        self.assertIn(b"403", status_line)
+
+
+class UnavailableServiceTests(RoutingTestCase):
+    """未装配可选能力时，GET 走 503、PUT/POST 走 400（按现实现如实断言）。"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.start_server(bare_services())
+        self.stubs = {}
+
+    def test_get_routes_report_503_when_capability_is_missing(self):
+        cases = {
+            "/api/forecasts/progress": "预测能力未装配",
+            "/api/forecasts/overdue": "预测能力未装配",
+            "/api/diagnostics": "诊断能力未装配",
+            "/api/settings/backup": "备份能力未装配",
+            "/api/settings/retention": "数据保留能力未装配",
+            "/api/settings/learning": "反馈学习未装配",
+        }
+        for path, message in cases.items():
+            with self.subTest(path=path):
+                status, headers, raw = self.call("GET", path)
+                self.assertEqual(status, 503)
+                self.assert_security_headers(headers, path)
+                payload = json.loads(raw.decode("utf-8"))
+                self.assertEqual(payload["error"]["code"], "unavailable")
+                self.assertEqual(payload["error"]["message"], message)
+
+    def test_update_check_reports_503_when_not_wired(self):
+        status, payload = self.body("POST", "/api/update-check", payload={})
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["error"]["code"], "unavailable")
+        self.assertEqual(payload["error"]["message"], "更新检查未装配")
+
+    def test_put_settings_report_400_when_capability_is_missing(self):
+        """PUT 处理器抛的是 ValueError（不是 503），do_PUT 统一映射成 400。
+
+        与 GET 的 503 不一致，但这是**现实现的行为**，如实钉死；
+        要改成 503 属于 src 变更，不是测试放宽。
+        """
+        for path, message in (
+            ("/api/settings/backup", "备份能力未装配"),
+            ("/api/settings/retention", "数据保留能力未装配"),
+            ("/api/settings/learning", "反馈学习未装配"),
+        ):
+            with self.subTest(path=path):
+                status, payload = self.body("PUT", path, payload={})
+                self.assertEqual(status, 400)
+                self.assertEqual(payload["error"]["code"], "invalid_request")
+                self.assertEqual(payload["error"]["message"], message)
+
+    def test_settings_startup_get_falls_back_to_a_safe_default(self):
+        """startup 未装配时 GET 不报错，返回保守默认值。"""
+        status, payload = self.body("GET", "/api/settings/startup")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"installed": False, "available": False})
+
+    def test_mobile_export_reports_400_when_not_wired(self):
+        status, payload = self.body("POST", "/api/export/mobile-summary", payload={})
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["message"], "移动摘要导出未装配")
+
+    def test_settings_startup_post_reports_400_when_not_supported(self):
+        status, payload = self.body(
+            "POST", "/api/settings/startup", payload={"enabled": True}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["message"], "当前运行方式不支持登录启动设置")
+
+
+class WriteRouteContractTests(RoutingTestCase):
+    """POST / PUT / DELETE 的全部路由。"""
+
+    def test_post_routes_reach_their_handlers(self):
+        cases = (
+            ("/api/external/sources", {}, 201, "external", "add_source"),
+            ("/api/external/rules", {}, 201, "external", "add_watch_rule"),
+            ("/api/interests/objects", {}, 201, "interests", "create_object"),
+            ("/api/interests/links", {}, 201, "interests", "create_link"),
+            ("/api/external/refresh", {"source_id": "S-1"}, 200, "external", "refresh_source"),
+            ("/api/knowledge/index", {"path": "Vault"}, 201, "knowledge", "index_vault"),
+            ("/api/settings/ai", {}, 200, "ai_settings", "save"),
+            ("/api/forecasts", {}, 201, "forecasts", "create_forecast"),
+        )
+        for path, payload, status, stub_name, method in cases:
+            with self.subTest(path=path):
+                got_status, headers, raw = self.call("POST", path, payload=payload)
+                self.assertEqual(got_status, status, raw[:200])
+                self.assert_security_headers(headers, path)
+                self.assertTrue(
+                    self.stubs[stub_name].called(method),
+                    "%s 没有调用 %s.%s" % (path, stub_name, method),
+                )
+
+    def test_update_check_returns_the_missing_capability_free_result(self):
+        status, payload = self.body("POST", "/api/update-check", payload={})
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["update"])
+        self.assertTrue(self.stubs["update_check"].called("check"))
+
+    def test_external_source_enabled_toggle_validates_the_flag(self):
+        status, payload = self.body(
+            "POST", "/api/external/sources/S-1/enabled", payload={"enabled": True}
+        )
+        self.assertEqual(status, 200)
+        call = self.stubs["external"].called("set_source_enabled")[0]
+        self.assertEqual(call[1], ("S-1", True))
+
+        status, payload = self.body(
+            "POST", "/api/external/sources/S-1/enabled", payload={"enabled": "yes"}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["message"], "数据源状态无效")
+
+    def test_external_rules_enabled_toggle_and_missing_rule(self):
+        status, _payload = self.body(
+            "POST", "/api/external/rules/R-1/enabled", payload={"enabled": False}
+        )
+        self.assertEqual(status, 200)
+        call = self.stubs["external"].called("set_rule_enabled")[0]
+        self.assertEqual(call[1], ("R-1", False))
+
+        self.stubs["external"]._results["set_rule_enabled"] = KeyError("gone")
+        status, payload = self.body(
+            "POST", "/api/external/rules/R-missing/enabled", payload={"enabled": True}
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["error"]["code"], "rule_not_found")
+
+        status, payload = self.body(
+            "POST", "/api/external/rules/R-1/enabled", payload={"enabled": 1}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["message"], "关注词状态无效")
+
+    def test_bulk_enabled_requires_a_boolean_and_forwards_filters(self):
+        status, _payload = self.body(
+            "POST",
+            "/api/external/sources/bulk-enabled",
+            payload={"enabled": True, "region": "cn", "category": "policy"},
+        )
+        self.assertEqual(status, 200)
+        call = self.stubs["external"].called("bulk_set_enabled")[0]
+        self.assertEqual(call[1], (True,))
+        self.assertEqual(call[2], {"region": "cn", "category": "policy"})
+
+        status, _payload = self.body(
+            "POST",
+            "/api/external/sources/bulk-enabled",
+            payload={"enabled": True, "region": "", "category": ""},
+        )
+        self.assertEqual(status, 200)
+        call = self.stubs["external"].called("bulk_set_enabled")[-1]
+        self.assertEqual(call[2], {"region": None, "category": None})
+
+        status, payload = self.body(
+            "POST", "/api/external/sources/bulk-enabled", payload={"enabled": "yes"}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["message"], "数据源状态无效")
+
+    def test_external_refresh_requires_a_source_id(self):
+        status, payload = self.body("POST", "/api/external/refresh", payload={})
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["message"], "缺少数据源编号")
+
+    def test_events_rejects_an_empty_body_text(self):
+        status, payload = self.body("POST", "/api/events", payload={"text": "   "})
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["message"], "事件内容不能为空")
+
+    def test_notification_read_routes(self):
+        status, _payload = self.body("POST", "/api/notifications/read-all", payload={})
+        self.assertEqual(status, 200)
+        self.assertTrue(self.stubs["notifications"].called("mark_all_read"))
+
+        status, _payload = self.body(
+            "POST", "/api/notifications/N-1/read", payload={}
+        )
+        self.assertEqual(status, 200)
+        call = self.stubs["notifications"].called("mark_read")[0]
+        self.assertEqual(call[1], ("N-1",))
+
+        self.stubs["notifications"]._results["mark_read"] = KeyError("gone")
+        status, payload = self.body("POST", "/api/notifications/N-x/read", payload={})
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["error"]["code"], "notification_not_found")
+
+    def test_candidate_confirm_and_cluster_feedback(self):
+        status, _payload = self.body(
+            "POST", "/api/cognition/candidates/P-1/confirm", payload={"probability": 0.6}
+        )
+        self.assertEqual(status, 201)
+        call = self.stubs["impacts"].called("confirm_candidate")[0]
+        self.assertEqual(call[1], ("P-1", 0.6))
+
+        self.stubs["impacts"]._results["confirm_candidate"] = KeyError("gone")
+        status, payload = self.body(
+            "POST", "/api/cognition/candidates/P-x/confirm", payload={}
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["error"]["code"], "candidate_not_found")
+
+        status, _payload = self.body(
+            "POST", "/api/cognition/clusters/C-1/feedback", payload={"action": "mute"}
+        )
+        self.assertEqual(status, 200)
+        call = self.stubs["cognition_controller"].called("feedback")[0]
+        self.assertEqual(call[1], ("C-1", "mute", {"action": "mute"}))
+
+        self.stubs["cognition_controller"]._results["feedback"] = KeyError("gone")
+        status, payload = self.body(
+            "POST", "/api/cognition/clusters/C-x/feedback", payload={}
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["error"]["code"], "cluster_not_found")
+
+    def test_settings_startup_install_and_remove(self):
+        status, payload = self.body(
+            "POST", "/api/settings/startup", payload={"enabled": True}
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["installed"])
+
+        status, payload = self.body(
+            "POST", "/api/settings/startup", payload={"enabled": False}
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["installed"])
+
+        status, payload = self.body(
+            "POST", "/api/settings/startup", payload={"enabled": "yes"}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["message"], "登录启动状态无效")
+
+    def test_forecast_version_and_resolve_routes(self):
+        status, payload = self.body(
+            "POST", "/api/forecasts/F-1/versions", payload={"probability": 0.7}
+        )
+        self.assertEqual(status, 201)
+        call = self.stubs["forecasts"].called("add_version")[0]
+        self.assertEqual(call[1], ("F-1", {"probability": 0.7}))
+
+        status, payload = self.body(
+            "POST",
+            "/api/forecasts/F-1/resolve",
+            payload={"outcome": "hit", "resolved_at": "2026-09-01", "note": "备注"},
+        )
+        self.assertEqual(status, 201)
+        call = self.stubs["forecasts"].called("resolve")[0]
+        self.assertEqual(call[1], ("F-1", "hit", "2026-09-01", "备注"))
+
+    def test_cognition_run_uses_the_controller_when_no_operation_is_wired(self):
+        self.stop_server()
+        services, stubs = build_stub_services(cognition_operation=None)
+        self.start_server(services)
+        self.stubs = stubs
+
+        status, _payload = self.body("POST", "/api/cognition/run", payload={})
+        self.assertEqual(status, 200)
+        self.assertTrue(stubs["cognition_controller"].called("run_once"))
+
+    def test_cognition_run_conflict_is_reported_as_409(self):
+        self.stubs["cognition_operation"] = None
+        self.stop_server()
+        services, stubs = build_stub_services(
+            cognition_operation=StubOperation()
+        )
+        stubs["cognition_operation"].run = lambda source: (_ for _ in ()).throw(
+            OperationBusy("busy")
+        )
+        self.start_server(services)
+        self.stubs = stubs
+
+        status, payload = self.body("POST", "/api/cognition/run", payload={})
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["error"]["code"], "operation_busy")
+
+    def test_window_show_and_monitoring_toggle_report_a_missing_desktop(self):
+        self.stop_server()
+        services, stubs = build_stub_services(desktop=None)
+        self.start_server(services)
+        self.stubs = stubs
+
+        for path in ("/api/window/show", "/api/monitoring/toggle"):
+            with self.subTest(path=path):
+                status, payload = self.body("POST", path, payload={})
+                self.assertEqual(status, 400)
+                self.assertEqual(payload["error"]["message"], "桌面窗口尚未就绪")
+
+    def test_monitoring_toggle_returns_the_new_state(self):
+        status, payload = self.body("POST", "/api/monitoring/toggle", payload={})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["monitoring"], False)
+
+    def test_mobile_export_returns_created(self):
+        status, _headers, raw = self.call(
+            "POST", "/api/export/mobile-summary", payload={}
+        )
+        self.assertEqual(status, 201, raw[:200])
+        self.assertTrue(self.stubs["mobile_export"].called("export"))
+
+    def test_shutdown_prefers_the_desktop_exit_hook(self):
+        events = []
+
+        class ExitingDesktop(RecordingDesktop):
+            def request_exit(self):
+                events.append("exit")
+
+        self.stop_server()
+        services, stubs = build_stub_services(desktop=ExitingDesktop())
+        self.start_server(services)
+        self.stubs = stubs
+
+        status, payload = self.body("POST", "/api/shutdown", payload={})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["status"], "shutting_down")
+        for _ in range(50):
+            if events:
+                break
+            time.sleep(0.02)
+        self.assertEqual(events, ["exit"], "没有走 desktop.request_exit 钩子")
+
+    def test_put_routes_reach_their_handlers(self):
+        cases = (
+            ("/api/settings/backup", "backup_service", "put_setting"),
+            ("/api/settings/retention", "retention_service", "put_setting"),
+            ("/api/settings/learning", "system_settings", "put_learning"),
+        )
+        for path, stub_name, method in cases:
+            with self.subTest(path=path):
+                status, _headers, raw = self.call("PUT", path, payload={})
+                self.assertEqual(status, 200, raw[:200])
+                self.assertTrue(self.stubs[stub_name].called(method))
+
+    def test_put_external_source_updates_and_validates_the_identifier(self):
+        status, _payload = self.body(
+            "PUT", "/api/external/sources/S-1", payload={"name": "新名字"}
+        )
+        self.assertEqual(status, 200)
+        call = self.stubs["external"].called("update_source")[0]
+        self.assertEqual(call[1], ("S-1", {"name": "新名字"}))
+
+        status, payload = self.body(
+            "PUT", "/api/external/sources/a%2Fb", payload={"name": "x"}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["message"], "数据源编号无效")
+
+    def test_delete_external_source_paths(self):
+        status, _payload = self.body("DELETE", "/api/external/sources/S-1")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self.stubs["external"].called("delete_source")[0][1], ("S-1",)
+        )
+
+        status, payload = self.body("DELETE", "/api/external/sources/")
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["message"], "数据源编号无效")
+
+        self.stubs["external"]._results["delete_source"] = KeyError("gone")
+        status, payload = self.body("DELETE", "/api/external/sources/S-x")
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+        self.stubs["external"]._results["delete_source"] = ValueError("在用")
+        status, payload = self.body("DELETE", "/api/external/sources/S-inuse")
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["message"], "在用")
+
+    def test_delete_watch_rule_paths(self):
+        status, _payload = self.body("DELETE", "/api/external/rules/R-1")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            self.stubs["external"].called("delete_watch_rule")[0][1], ("R-1",)
+        )
+
+        status, payload = self.body("DELETE", "/api/external/rules/")
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["message"], "关注词编号无效")
+
+        self.stubs["external"]._results["delete_watch_rule"] = KeyError("gone")
+        status, payload = self.body("DELETE", "/api/external/rules/R-x")
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["error"]["code"], "rule_not_found")
+
+        self.stubs["external"]._results["delete_watch_rule"] = ValueError("非法")
+        status, payload = self.body("DELETE", "/api/external/rules/R-y")
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["message"], "非法")
+
+    def test_unexpected_service_errors_become_a_clean_500(self):
+        """处理器抛未预期异常时，必须返回干净 500，不能泄漏堆栈。"""
+        self.stubs["forecasts"]._results["score_summary"] = RuntimeError(
+            "内部细节不应外泄"
+        )
+
+        status, headers, raw = self.call("GET", "/api/score")
+
+        self.assertEqual(status, 500)
+        self.assert_security_headers(headers, "/api/score")
+        text = raw.decode("utf-8")
+        self.assertNotIn("内部细节不应外泄", text)
+        self.assertNotIn("Traceback", text)
+        self.assertEqual(json.loads(text)["error"]["code"], "internal_error")
+
+
+class RequestBodyBoundaryTests(RoutingTestCase):
+    """超限 / 谎报 Content-Length 的请求体：有界排空之后再如实回 400。
+
+    这是 Windows 回环 RST 修复的验收面：服务端在"还没读完请求体就要拒绝"时，
+    若直接关连接，内核会发 RST，客户端拿到的是 ``RemoteDisconnected``，而不是
+    我们写好的那句可读的 400。所以这些用例全部走原始 socket —— ``urllib`` 与
+    ``http.client`` 不肯构造这些畸形请求。
+    """
+
+    def raw_post(self, declared_length, body, shutdown_write=False, timeout=15):
+        """发一个 Content-Length 与实际 body 不一致的 POST，回读整个响应。
+
+        返回 ``(响应字节, 耗时秒)``。耗时用来验证排空确实"有界"。
+        """
+        request_lines = [
+            "POST /api/events HTTP/1.1",
+            "Host: 127.0.0.1",
+            "Content-Type: application/json",
+            "X-YuanJian-Token: %s" % self.token,
+            "Content-Length: %d" % declared_length,
+            "Connection: close",
+        ]
+        head = ("\r\n".join(request_lines) + "\r\n\r\n").encode("ascii")
+        started = time.monotonic()
+        with socket.create_connection(
+            ("127.0.0.1", self.server.server_address[1]), timeout=timeout
+        ) as connection:
+            connection.sendall(head + body)
+            if shutdown_write:
+                connection.shutdown(socket.SHUT_WR)
+            chunks = []
+            while True:
+                data = connection.recv(4096)
+                if not data:
+                    break
+                chunks.append(data)
+        return b"".join(chunks), time.monotonic() - started
+
+    def assert_bad_request(self, response):
+        """断言拿到的是完整的 400 响应，而不是被 RST 掐断的空连接。"""
+        self.assertTrue(response, "服务端没有返回任何内容（连接被 RST 了？）")
+        head, _, body = response.partition(b"\r\n\r\n")
+        status_line = head.split(b"\r\n", 1)[0]
+        self.assertIn(b"400", status_line)
+        # 头部是 ASCII，正文是 UTF-8，分开解码，避免用 latin-1 把中文读成乱码。
+        header_text = head.decode("latin-1")
+        # 安全头由 _json 统一发送，排空后的 4xx 也不能漏。
+        for name, _value in SECURITY_HEADERS:
+            self.assertIn(name + ": ", header_text, "400 响应缺少安全头 %s" % name)
+        self.assertIn("请求内容为空或过大", body.decode("utf-8"))
+
+    def test_oversized_body_from_a_client_that_half_closes_is_still_400(self):
+        """对端报 70000+ 字节却只发一部分就半关闭：必须是可读的 400。
+
+        真实场景是粘贴超长文本时连接被提前掐断 —— 此时既不能把工作线程挂在
+        读上，也不能因为"读不满"就丢掉响应。
+
+        诚实声明（用 ``build-artifacts/t8_drain_mutation_control.py`` 实测过）：
+        这条用例**不能**判别"排空"与"不排空"。本机 Windows 上把
+        ``_drain_request_body`` 换成 no-op 之后，100B / 64KiB / 70KB / 200KB /
+        900KB 五种体积的客户端**全都**仍能读到 400 —— 头部是走
+        ``BufferedReader`` 读的，缓冲区吞下的字节不留在内核，既然没有内核残留
+        就不会有 RST，那个"用户看到网络错误"的症状在这台机器上复现不出来。
+        所以它钉的是"部分请求体也必须给出完整 400（含安全头）"这条响应契约，
+        真正能判别修复的是下面那条谎报长度的用例。
+        """
+        response, _elapsed = self.raw_post(
+            70000, b"x" * 20000, shutdown_write=True
+        )
+
+        self.assert_bad_request(response)
+
+    def test_lying_content_length_cannot_pin_the_worker_forever(self):
+        """一个字节都不发、只报个天文数字：排空必须超时收手，工作线程要能回来。
+
+        这是"有界"二字的真正含义：读多久由服务端的 5 秒读超时决定，绝不由对端
+        给的 Content-Length 决定 —— 否则一个恶意（或只是实现糟糕的）客户端就能
+        用一个不存在的 4GB 请求体永久占住一个工作线程。
+        """
+        response, elapsed = self.raw_post(500000, b"", shutdown_write=False)
+
+        self.assert_bad_request(response)
+        self.assertGreaterEqual(
+            elapsed, 4.0, "没有等到读超时就回了 400，说明排空根本没在等真实数据"
+        )
+        self.assertLess(elapsed, 12.0, "排空耗时失控，5 秒读超时没有生效")
+
+
+class StaticAssetBoundaryTests(RoutingTestCase):
+    """静态资源白名单与路径穿越防护。"""
+
+    def test_root_and_every_whitelisted_asset_are_served(self):
+        for path, (relative, content_type) in http_api.STATIC_FILES.items():
+            with self.subTest(path=path):
+                status, headers, raw = self.call("GET", path)
+                self.assertEqual(status, 200, "%s -> %s" % (path, raw[:120]))
+                self.assertEqual(headers.get("Content-Type"), content_type)
+                self.assert_security_headers(headers, path)
+                self.assertTrue(raw, "静态资源内容为空")
+                self.assertEqual(headers.get("Cache-Control"), "no-cache")
+                self.assertEqual(int(headers.get("Content-Length")), len(raw))
+
+    def test_unknown_static_path_returns_404(self):
+        status, headers, raw = self.call("GET", "/js/not-registered.js")
+        self.assertEqual(status, 404)
+        self.assert_security_headers(headers)
+        payload = json.loads(raw.decode("utf-8"))
+        self.assertEqual(payload["error"]["code"], "not_found")
+        self.assertEqual(payload["error"]["message"], "页面不存在")
+
+    def test_traversal_attempts_are_rejected_with_403(self):
+        for path in (
+            "/../secrets.txt",
+            "/%2e%2e/secrets.txt",
+            "/js/%2Fetc%2Fpasswd",
+            "/js/%5Cwindows",
+        ):
+            with self.subTest(path=path):
+                status, headers, raw = self.call("GET", path)
+                self.assertEqual(status, 403, "%s -> %s" % (path, raw[:120]))
+                self.assert_security_headers(headers)
+                self.assertEqual(
+                    json.loads(raw.decode("utf-8"))["error"]["code"], "forbidden"
+                )
+
+    def test_registered_asset_missing_on_disk_returns_404(self):
+        with mock.patch.dict(
+            http_api.STATIC_FILES, {"/ghost.js": ("js/ghost.js", "text/javascript")}
+        ):
+            status, _headers, raw = self.call("GET", "/ghost.js")
+
+        self.assertEqual(status, 404)
+        payload = json.loads(raw.decode("utf-8"))
+        self.assertEqual(payload["error"]["code"], "not_found")
+        self.assertEqual(payload["error"]["message"], "页面资源不存在")
+
+    def test_registered_asset_escaping_the_static_root_returns_403(self):
+        with mock.patch.dict(
+            http_api.STATIC_FILES, {"/escape.js": ("../escape.js", "text/javascript")}
+        ):
+            status, _headers, raw = self.call("GET", "/escape.js")
+
+        self.assertEqual(status, 403)
+        payload = json.loads(raw.decode("utf-8"))
+        self.assertEqual(payload["error"]["code"], "forbidden")
+        self.assertEqual(payload["error"]["message"], "非法的资源路径")
+
+
+class SecurityAndTokenTests(RoutingTestCase):
+    """令牌校验与安全头覆盖。"""
+
+    def test_every_response_carries_all_security_headers(self):
+        probes = (
+            ("GET", "/", None),
+            ("GET", "/js/app.js", None),
+            ("GET", "/api/app/version", None),
+            ("GET", "/api/nope", None),
+            ("GET", "/api/nope.js", None),
+            ("POST", "/api/unknown", {}),
+            ("PUT", "/api/unknown", {}),
+            ("DELETE", "/api/unknown", None),
+            ("GET", "/api/app/version", None),
+        )
+        for method, path, payload in probes:
+            with self.subTest(method=method, path=path):
+                status, headers, _raw = self.call(method, path, payload=payload)
+                self.assert_security_headers(headers, "%s %s %s" % (method, path, status))
+
+    def test_security_headers_also_cover_unauthenticated_responses(self):
+        for method, path in (
+            ("GET", "/api/app/version"),
+            ("POST", "/api/update-check"),
+            ("PUT", "/api/settings/backup"),
+            ("DELETE", "/api/external/sources/S-1"),
+        ):
+            with self.subTest(method=method):
+                status, headers, _raw = self.call(method, path, token="wrong")
+                self.assertEqual(status, 403)
+                self.assert_security_headers(headers, method)
+
+    def test_missing_or_wrong_token_is_rejected_on_every_method(self):
+        for method, path in (
+            ("GET", "/api/app/version"),
+            ("POST", "/api/update-check"),
+            ("PUT", "/api/settings/backup"),
+            ("DELETE", "/api/external/sources/S-1"),
+        ):
+            for token in (False, "", "wrong-token", TOKEN + "x", TOKEN[:-1]):
+                with self.subTest(method=method, token=token):
+                    status, _headers, raw = self.call(
+                        method, path, token=token, payload={} if method != "GET" else None
+                    )
+                    self.assertEqual(status, 403, raw[:120])
+                    self.assertEqual(
+                        json.loads(raw.decode("utf-8"))["error"]["code"], "forbidden"
+                    )
+
+    def test_static_assets_are_not_behind_the_token(self):
+        """页面本身必须能在带 token 的 URL 下加载，静态资源不能要令牌。"""
+        status, _headers, raw = self.call("GET", "/", token=False)
+        self.assertEqual(status, 200)
+        self.assertTrue(raw)
+
+    def test_correct_token_is_accepted(self):
+        status, payload = self.body("GET", "/api/app/version", token=TOKEN)
+        self.assertEqual(status, 200)
+        self.assertIn("version", payload)
+
+    def test_health_style_endpoints_require_the_token_too(self):
+        status, _headers, _raw = self.call("GET", "/api/score", token=False)
+        self.assertEqual(status, 403)
+
+
+class AppVersionAndUpdateCheckTests(RoutingTestCase):
+    """两条较新的路由：/api/app/version 与 /api/update-check。"""
+
+    def test_app_version_reports_package_version_and_releases_url(self):
+        from yuanjian_app import __version__
+        from yuanjian_app.update_check import RELEASES_PAGE
+
+        status, payload = self.body("GET", "/api/app/version")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"version": __version__, "releases_url": RELEASES_PAGE})
+
+    def test_update_check_returns_the_service_result(self):
+        status, payload = self.body("POST", "/api/update-check", payload={})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["latest"], "1.0.0")
+        call = self.stubs["update_check"].called("check")[0]
+        from yuanjian_app import __version__
+
+        self.assertEqual(call[1], (__version__,))
+
+    def test_update_check_requires_the_token(self):
+        status, _headers, _raw = self.call("POST", "/api/update-check", token=False)
+        self.assertEqual(status, 403)
 
 
 if __name__ == "__main__":
