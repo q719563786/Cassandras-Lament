@@ -13,7 +13,7 @@
   - `pystray==0.19.5`
   - `Pillow==12.3.0`
 - 无需联网即可使用本地研判、利益映射和预测账本；外部 AI 是可选增强项，默认关闭。
-- 运行数据统一存放在 `%LOCALAPPDATA%\YuanJian`，不在源码目录或安装目录内。
+- 运行数据统一存放在 `%LOCALAPPDATA%\YuanJian`，不在源码目录或安装目录内。需要换到别的盘时，在 `YuanJian.exe` 旁边放一个 `data-dir.txt`，内容写目标目录即可（例如 `D:\远见\数据`）；环境变量 `YUANJIAN_DATA_DIR` 优先级更高，便于脚本化启动。
 
 ## 使用方式
 
