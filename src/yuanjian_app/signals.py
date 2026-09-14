@@ -93,9 +93,6 @@ class SignalService:
             result.append(item)
         return result
 
-    def high_alerts(self):
-        return [item for item in self.list_signals("new") if item["alert_level"] in {"L3", "L4"}]
-
     @staticmethod
     def _alert_level(text, candidate):
         if candidate.get("direction") == "benefit":

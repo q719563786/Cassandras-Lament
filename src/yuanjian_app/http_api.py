@@ -411,19 +411,6 @@ def create_server(host, port, token, services):
                     self._error(503, "unavailable", "反馈学习未装配")
                 else:
                     self._json(services.system_settings.get_learning())
-            elif path == "/api/dashboard":
-                forecasts, _total = services.forecasts.list_forecasts()
-                self._json(
-                    {
-                        "open": [item for item in forecasts if item["status"] == "open"],
-                        "high_alerts": [
-                            item
-                            for item in forecasts
-                            if item["status"] == "open" and item["alert_level"] in {"L3", "L4"}
-                        ],
-                        "high_signals": services.signals.high_alerts(),
-                    }
-                )
             elif path == "/api/score":
                 self._json(services.forecasts.score_summary())
             elif path.startswith("/api/forecasts/"):

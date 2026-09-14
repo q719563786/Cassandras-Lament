@@ -1019,6 +1019,37 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 403)
         raised.exception.close()
 
+    def test_removed_dashboard_endpoint_is_not_served(self):
+        """`/api/dashboard` 已删除，不该再被响应。
+
+        它界面从未调用、无测试覆盖，却会把全部预测正文读出来再在 Python 里筛，
+        实测在真实数据上返回 17.5 MB。功能与界面在用的 /api/risk-dashboard 重叠，
+        因此整体移除。这条测试防止它被无意间恢复。
+        """
+        request = urllib.request.Request(
+            self.base_url + "/api/dashboard",
+            headers={"X-YuanJian-Token": "test-token"},
+        )
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=2)
+        self.assertEqual(raised.exception.code, 404)
+        payload = json.loads(raised.exception.read().decode("utf-8"))
+        raised.exception.close()
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    def test_risk_dashboard_endpoint_still_serves_the_action_board(self):
+        """界面真正依赖的接口必须还在。"""
+        request = urllib.request.Request(
+            self.base_url + "/api/risk-dashboard",
+            headers={"X-YuanJian-Token": "test-token"},
+        )
+        response = urllib.request.urlopen(request, timeout=10)
+        try:
+            payload = json.loads(response.read().decode("utf-8"))
+        finally:
+            response.close()
+        self.assertIn("state", payload)
+
 
 if __name__ == "__main__":
     unittest.main()
