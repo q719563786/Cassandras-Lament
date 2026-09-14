@@ -4,7 +4,7 @@ Verified on 2026-09-13 on Windows with the packaged pywebview desktop build.
 
 ## Scope
 
-This record covers `main` at commit `84024c5` (version `1.0.0`, reported by
+This record covers `main` at commit `0bdb2be` (version `1.0.0`, reported by
 `src/yuanjian_app/__init__.py` and asserted by `tests/test_build_config.py`). The
 rebuild and the smoke run below were performed on that revision; this document itself
 was committed immediately afterwards and changes no code.
@@ -16,7 +16,7 @@ rather than being inferred from the automated results.
 
 ## Automated verification
 
-- Full suite: **237 tests passed in 39.458 seconds** with `ResourceWarning` treated as
+- Full suite: **242 tests passed in 43.141 seconds** with `ResourceWarning` treated as
   an error (`unittest discover -s tests`).
 - Privacy scan of the exact committed publication tree (118 files, via
   `tools/privacy_scan.py --committed`): `safe=True blocked=0 findings=0`.
@@ -30,6 +30,8 @@ rather than being inferred from the automated results.
   - cognition run with no API token fell back to the local provider (`provider=local`)
   - a second packaged instance was rejected
   - authenticated safe shutdown completed (`status=shutting_down`)
+  - installed copy under a separate drive read the data directory named by
+    `data-dir.txt` beside the executable, and the previous data location was not touched
 
 ## Behaviour changes in this release
 
@@ -83,8 +85,8 @@ rather than being inferred from the automated results.
 ## Artifact
 
 - Path: `build-artifacts/v1.0-dist/YuanJian/YuanJian.exe` (build output; not committed)
-- Size: 6,817,941 bytes
-- SHA-256: `95E80D694E189ACEC3DE6EE4FFA2647D3D41DABEAE3155FCAE640BA739590A83`
+- Size: 6,819,403 bytes
+- SHA-256: `9DCAE46B06DC5F605F5C199B4BFC88DDF498226965513E6B0DEA09773E1E2E5C`
 - Whole onedir tree: 182 files, 42.4 MB
 - Built 2026-09-13 from the commit above with PyInstaller 6.21.0 on Python 3.14.5,
   dependencies as pinned in `requirements-build.txt`.
