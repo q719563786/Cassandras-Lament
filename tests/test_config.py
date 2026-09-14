@@ -13,8 +13,12 @@ class AppPathsTests(unittest.TestCase):
             paths = AppPaths.from_environment({"YUANJIAN_DATA_DIR": str(private)})
             paths.ensure_directories()
 
-            self.assertEqual(paths.database, private / "data" / "yuanjian.db")
-            self.assertEqual(paths.logs, private / "logs")
+            # 两边都先 resolve 再比：Windows 上同一个目录可能同时存在短名
+            # （8.3 形式）与长名两种写法 —— CI 机器的临时目录恰好是短名，而
+            # 路径解析会把它换成长名，一边解析一边不解析就会误报「数据没有
+            # 落在指定目录」。这里要断言的是同一个位置，不是同一串字符。
+            self.assertEqual(paths.database, (private / "data" / "yuanjian.db").resolve())
+            self.assertEqual(paths.logs, (private / "logs").resolve())
             self.assertTrue(paths.database.parent.is_dir())
 
     def test_marker_beside_the_program_selects_the_data_directory(self):
