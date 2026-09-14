@@ -290,6 +290,64 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(preserved_source, "旧版源")
             self.assertEqual(preserved_forecast, "open")
 
+    def test_hot_path_indexes_exist_and_are_used(self):
+        """热路径查询必须走索引，不能再全表扫描。
+
+        这些索引来自一次真实数据库（约 9 倍于测试规模）上的执行计划审查：
+        加索引前相关查询单次 26~110 毫秒且全表扫描，加索引后降到 0.01~0.25 毫秒。
+        这里用执行计划本身断言，避免以后有人"清理"掉这些索引。
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Database(Path(temp_dir) / "yuanjian.db")
+            database.initialize()
+
+            expected = {
+                "idx_external_items_source",
+                "idx_external_items_published",
+                "idx_notification_log_cluster_created",
+                "idx_judgment_jobs_finished",
+                "idx_event_cluster_items_item",
+            }
+
+            with database.connect() as connection:
+                present = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='index'"
+                    )
+                }
+                # 用空表也能拿到执行计划：关键是计划里不能对大表做全表扫描
+                plans = {
+                    "external_items": "SELECT item_id FROM external_items WHERE source_id = ?",
+                    "notification_log": (
+                        "SELECT * FROM notification_log WHERE cluster_id=? AND created_at>=? "
+                        "ORDER BY created_at DESC, notification_id DESC LIMIT 1"
+                    ),
+                    "judgment_jobs": (
+                        "SELECT COUNT(*) FROM judgment_jobs WHERE provider!='local' "
+                        "AND finished_at IS NOT NULL AND finished_at>=? AND finished_at<?"
+                    ),
+                    "event_cluster_items": (
+                        "SELECT cluster_id FROM event_cluster_items WHERE item_id=?"
+                    ),
+                }
+                for table, sql in plans.items():
+                    placeholders = sql.count("?")
+                    plan = " | ".join(
+                        str(row[-1])
+                        for row in connection.execute(
+                            "EXPLAIN QUERY PLAN " + sql, tuple([None] * placeholders)
+                        )
+                    )
+                    self.assertNotIn(
+                        "SCAN %s" % table,
+                        plan,
+                        f"{table} 的查询退化成全表扫描：{plan}",
+                    )
+
+            missing = expected - present
+            self.assertEqual(missing, set(), f"缺少热路径索引：{sorted(missing)}")
+
 
 if __name__ == "__main__":
     unittest.main()

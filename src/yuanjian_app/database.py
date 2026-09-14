@@ -337,6 +337,22 @@ class Database:
                     ON personal_impacts(alert_level, user_label, muted_until);
                 CREATE INDEX IF NOT EXISTS idx_notification_log_status_created
                     ON notification_log(status, created_at);
+                -- 下面五条索引来自一次真实数据库上的执行计划审查。此前这些查询
+                -- 全部走全表扫描，在 9~11 万行的表上单次耗时 26~110 毫秒，而它们
+                -- 都在热路径上（每条外部条目、每次通知去重、每天的预算统计都要跑）。
+                -- 实测加索引后：通知去重 55.7ms -> 0.01ms，条目归属簇 26.5ms -> 0.01ms，
+                -- 按来源查条目 110.4ms -> 0.23ms，预算计数 36.8ms -> 0.23ms。
+                -- 五个索引合计约 14MB（库本身近 900MB），建索引一次性约 4 秒。
+                CREATE INDEX IF NOT EXISTS idx_external_items_source
+                    ON external_items(source_id);
+                CREATE INDEX IF NOT EXISTS idx_external_items_published
+                    ON external_items(published_at);
+                CREATE INDEX IF NOT EXISTS idx_notification_log_cluster_created
+                    ON notification_log(cluster_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_judgment_jobs_finished
+                    ON judgment_jobs(finished_at);
+                CREATE INDEX IF NOT EXISTS idx_event_cluster_items_item
+                    ON event_cluster_items(item_id);
                 CREATE TRIGGER IF NOT EXISTS forecast_versions_no_update
                 BEFORE UPDATE ON forecast_versions BEGIN
                     SELECT RAISE(ABORT, 'forecast versions are immutable');
