@@ -372,8 +372,18 @@ class ImpactService:
         旧版本在map_judgment中自动将候选预测写入正式账本，产生大量未经验证的F-CAND记录。
         此方法删除所有F-CAND-*预测，并清除对应impact的confirmed标记，让用户重新确认。
         返回清理的预测数量。
+
+        审计说明：本方法会改写不可变账本，属于**受控例外**，因此每轮清理都写一条
+        `audit_log`（`action='forecast.purge_garbage'`），如实记录删了多少父行、
+        留下多少孤儿子行、清了多少 impact 的确认标记。注意父行（`forecasts`）能删，
+        子行（`forecast_versions`）删不掉——后者受 `forecast_versions_no_delete`
+        不可变触发器保护，所以父行一删，子行就变成孤儿留在库里（真库实测孤儿行数
+        很大、约占该表一半）。这些孤儿不是本方法能处理的，是否给"已废弃候选预测"
+        开一条受控删除路径是产品决策，见团队结论；本方法只负责留痕，不改触发器。
         """
         purged = 0
+        orphaned_versions = 0
+        cleared_impacts = 0
         with self.database.connect() as connection:
             garbage = connection.execute(
                 "SELECT forecast_id FROM forecasts WHERE forecast_id LIKE 'F-CAND-%'"
@@ -395,10 +405,39 @@ class ImpactService:
                             "UPDATE personal_impacts SET candidate_json=? WHERE impact_id=?",
                             (json.dumps(cj, ensure_ascii=False, sort_keys=True), irow["impact_id"]),
                         )
+                        cleared_impacts += 1
                     except Exception:
                         pass
+                # 先把这对父子的子行数记下来（父行删除后就没法再数了）。子行受
+                # 不可变触发器保护删不掉，只会成为孤儿，所以这里只统计、不删除。
+                orphaned_versions += connection.execute(
+                    "SELECT COUNT(*) FROM forecast_versions WHERE forecast_id=?", (fid,)
+                ).fetchone()[0]
                 connection.execute("DELETE FROM forecasts WHERE forecast_id=?", (fid,))
                 purged += 1
+            if purged:
+                connection.execute(
+                    "INSERT INTO audit_log(occurred_at, action, object_type, object_id,"
+                    " details_json) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        datetime.now(timezone.utc).isoformat(),
+                        "forecast.purge_garbage",
+                        "forecast",
+                        None,
+                        json.dumps(
+                            {
+                                "deleted_forecasts": purged,
+                                "orphaned_forecast_versions": orphaned_versions,
+                                "cleared_impacts": cleared_impacts,
+                                "note": (
+                                    "forecast_versions 受不可变触发器保护，子行删除被拒，"
+                                    "父行删除后成为孤儿；是否清理待产品决策"
+                                ),
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ),
+                )
             connection.commit()
         return purged
 

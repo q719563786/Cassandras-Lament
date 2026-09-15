@@ -1,8 +1,11 @@
 import logging
 import logging.handlers
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from yuanjian_app.application import (
     Application,
@@ -22,15 +25,47 @@ class RecordingDesktop:
         self.run_calls.append({"url": url, "hidden": hidden})
 
 
+class RecordingPurge:
+    """`impacts.purge_garbage_forecasts()` 的替身，记录启动清理有没有真的被调用。
+
+    加这个替身的原因：`application.py:328` 的启动清理会调
+    `self.scheduler.cognition.impacts.purge_garbage_forecasts()`，而这条调用在
+    `run()` 里被 `except Exception` + 一行 warning 兜着。原来的 `RecordingScheduler`
+    没有 `cognition` 属性，于是**每次全量/覆盖率运行都会静默吞掉一次 AttributeError**：
+    测试全绿、日志里留一行"启动时清理垃圾预测失败"，而启动清理这条路径实际上从来没
+    被执行过，在覆盖率里永远显示未覆盖。
+
+    把替身补成与真实依赖图同形之后，"有没有被调用"变成一条可断言的可见事实。
+    """
+
+    def __init__(self):
+        self.calls = 0
+
+    def purge_garbage_forecasts(self):
+        self.calls += 1
+        return 0
+
+
 class RecordingScheduler:
     def __init__(self):
         self.running = False
+        self.impacts = RecordingPurge()
+        self.cognition = SimpleNamespace(impacts=self.impacts)
 
     def start(self):
         self.running = True
 
     def stop(self, timeout=5):
         self.running = False
+
+    def wait_for_startup_purge(self, timeout=3.0):
+        """启动清理跑在 `run()` 开的后台线程里，等它有界地跑完（不无限轮询）。"""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.impacts.calls:
+                return True
+            time.sleep(0.005)
+        return bool(self.impacts.calls)
 
 
 class ApplicationTests(unittest.TestCase):
@@ -89,6 +124,10 @@ class ApplicationTests(unittest.TestCase):
                 desktop.run_calls, [{"url": expected_url, "hidden": False}]
             )
             self.assertFalse(app.scheduler.running)
+            self.assertTrue(
+                app.scheduler.wait_for_startup_purge(),
+                "启动清理没有被调用 —— 这条路径要么被 except 吞了，要么替身又和真实依赖图脱节了",
+            )
 
     def test_background_launch_starts_desktop_hidden(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -99,6 +138,24 @@ class ApplicationTests(unittest.TestCase):
             app.run(hidden=True)
 
             self.assertTrue(desktop.run_calls[0]["hidden"])
+            self.assertTrue(
+                app.scheduler.wait_for_startup_purge(),
+                "启动清理没有被调用 —— 这条路径要么被 except 吞了，要么替身又和真实依赖图脱节了",
+            )
+
+    def test_startup_purge_double_matches_the_real_call_chain(self):
+        """替身必须和真实依赖图**同形**，而且这条要在替身上确定性地验，不靠线程时序。
+
+        `application.py:328` 调的是 `scheduler.cognition.impacts.purge_garbage_forecasts()`。
+        三层缺任何一层，这里会立刻 `AttributeError`；而在 `run()` 里同样的缺口会被
+        `except Exception` 吞成一行 warning，测试照样全绿 —— 那正是这次要堵的洞。
+        """
+        scheduler = RecordingScheduler()
+
+        purged = scheduler.cognition.impacts.purge_garbage_forecasts()
+
+        self.assertEqual(purged, 0)
+        self.assertEqual(scheduler.impacts.calls, 1)
 
 
 class LoggingConfigurationTests(unittest.TestCase):

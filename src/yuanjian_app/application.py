@@ -14,7 +14,7 @@ from .cognition import CognitionController, CognitionService
 from .database import Database
 from .desktop import DesktopBridge, DesktopUnavailable, PyWebViewDesktop
 from .diagnostics import DiagnosticsService
-from .forecasts import ForecastService
+from .forecasts import ForecastService, parse_frontmatter
 from .external_radar import ExternalRadarService
 from .http_api import Services, create_server
 from .interests import InterestService
@@ -36,16 +36,108 @@ from .trends import TrendService
 from .update_check import UpdateCheckService
 
 
-def _make_personal_context_loader(interests, forecasts):
-    """P2: 构建个人上下文加载器——读取利益地图与近期预测，供远程研判注入。
+def _is_exportable_privacy(level):
+    """隐私级别是否允许进入**任何可能离开本机**的结构。
 
-    本地启发式研判永不调用此函数（保持"local never sees personal interests"）。
-    返回 dict 或 None；加载失败时 JudgmentQueue 会静默跳过，不阻断研判。
+    白名单式判断：只有明确标成 P2 / P3 的才放行。P1 永不外发；级别缺失或不可
+    识别时**保守视为 P1**。写成 `level != "P1"` 是黑名单思路，漏掉 None / 空串
+    / 大小写变体就是一个外泄口。
+    """
+    return str(level or "").strip().upper() in {"P2", "P3"}
+
+
+def _forecast_privacy_levels(forecasts):
+    """一次查询取出 {forecast_id: privacy_level}，避免逐条 get_forecast 的 N+1。
+
+    `list_forecasts()` 的摘要里**不含** privacy_level（它写在版本的 content
+    frontmatter 里），所以这里必须自己解析，不能用现成摘要。
+    """
+    levels = {}
+    try:
+        with forecasts.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT f.forecast_id, v.content
+                FROM forecasts f
+                JOIN forecast_versions v ON v.forecast_id = f.forecast_id
+                JOIN (
+                    SELECT forecast_id, MAX(version) AS latest FROM forecast_versions
+                    GROUP BY forecast_id
+                ) l ON l.forecast_id = v.forecast_id AND l.latest = v.version
+                """
+            ).fetchall()
+    except Exception:
+        return levels
+    for row in rows:
+        try:
+            levels[row["forecast_id"]] = parse_frontmatter(row["content"]).get(
+                "privacy_level"
+            )
+        except Exception:
+            levels[row["forecast_id"]] = None
+    return levels
+
+
+def _load_self_reported_signals(interests, limit=12):
+    """读取用户主动记录的个人近况（「告诉远见」的输入）。
+
+    **local-only，任何外发结构都不得包含本函数的返回值。**
+
+    这是库里最直接的个人画像（用户亲口说的工作、收入、健康、家庭处境），
+    而外部 AI 在本设计里只该看到公开证据包。P0-1 之后它已从
+    `_make_personal_context_loader()` 的返回结构中移除；将来若做「本机模型
+    个性化」，请直接调用本函数，不要绕回远程队列。
+    """
+    entries = []
+    try:
+        with interests.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT summary, why_it_matters, received_at FROM signals
+                WHERE source_type='manual'
+                  AND IFNULL(status,'new')!='dismissed'
+                ORDER BY received_at DESC LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+    except Exception:
+        return entries
+    for row in rows:
+        entry = {"recorded_at": str(row["received_at"])[:19], "situation": row["summary"]}
+        if row["why_it_matters"]:
+            entry["relevance"] = row["why_it_matters"]
+        entries.append(entry)
+    return entries
+
+
+def _make_personal_context_loader(interests, forecasts):
+    """构建「个人上下文」加载器：利益地图 + 近期预测。
+
+    ⚠ **当前没有任何远程路径会调用它。** P0-1（2026-09-15）之后远程研判只发送
+    `build_public_bundle()` 的公开证据包（`PRIVACY.md` 的承诺），`JudgmentQueue`
+    还在出口处硬剥离 `personal_context`。保留下这个函数是为了将来可能的
+    「本机模型做个性化」路径复用。
+
+    **谁要复用它，必须先满足下面两条**，否则就是重新把个人画像推给外部：
+
+    1. **P1 一律不出本机**：返回结构里的利益对象与预测都已按 `privacy_level`
+       过滤（白名单，只放行 P2/P3；级别缺失保守当作 P1）。历史缺陷正是这里
+       完全不看 `privacy_level`。
+    2. **`manual` signals 永不外发**：用户主动记录的个人近况已整段移出本函数，
+       改由 `_load_self_reported_signals()` 提供，那个函数是 local-only 的。
+
+    返回 dict；全部内容都被隐私过滤掉时返回 None，调用方应跳过注入。
     """
     def loader(cluster_id):
-        objects = interests.list_objects()
-        id_to_name = {o["object_id"]: o["name"] for o in objects}
-        links = interests.list_links()
+        all_objects = interests.list_objects()
+        exportable = [
+            o for o in all_objects if _is_exportable_privacy(o.get("privacy_level"))
+        ]
+        allowed_ids = {o["object_id"] for o in exportable}
+        id_to_name = {o["object_id"]: o["name"] for o in all_objects}
+        # 两端都必须是可外发对象才保留这条关系，否则名字虽隐，关系本身仍会
+        # 暴露一个 P1 对象的存在与结构。列表上限放在过滤**之后**，避免被
+        # 前 20 条 P1 关系把有效内容挤空。
         resolved_links = [
             {
                 "source": id_to_name.get(l["source_id"], l["source_id"]),
@@ -54,34 +146,29 @@ def _make_personal_context_loader(interests, forecasts):
                 "impact": l["impact_direction"],
                 "strength": l["strength"],
             }
-            for l in links[:20]
-        ]
-        recent, _ = forecasts.list_forecasts(limit=5)
-        # 用户主动记录的个人近况（"告诉远见"输入），这是最直接的个人画像，必须让AI看到
-        self_reported = []
-        try:
-            with interests.database.connect() as _conn:
-                _rows = _conn.execute(
-                    """
-                    SELECT summary, why_it_matters, received_at FROM signals
-                    WHERE source_type='manual'
-                      AND IFNULL(status,'new')!='dismissed'
-                    ORDER BY received_at DESC LIMIT 12
-                    """
-                ).fetchall()
-            for _r in _rows:
-                entry = {"recorded_at": str(_r["received_at"])[:19], "situation": _r["summary"]}
-                if _r["why_it_matters"]:
-                    entry["relevance"] = _r["why_it_matters"]
-                self_reported.append(entry)
-        except Exception:
-            self_reported = []
+            for l in interests.list_links()
+            if l["source_id"] in allowed_ids and l["target_id"] in allowed_ids
+        ][:20]
+
+        levels = _forecast_privacy_levels(forecasts)
+        recent = [
+            f
+            for f in forecasts.list_forecasts()[0]
+            if _is_exportable_privacy(levels.get(f["forecast_id"]))
+        ][:5]
+
+        if not exportable and not resolved_links and not recent:
+            # 全被隐私过滤掉，等于没有可外发的个人上下文。
+            return None
         return {
-            "用户个人近况（用户本人主动记录，判断相关性时优先参考）": self_reported,
             "interests": {
                 "objects": [
-                    {"name": o["name"], "category": o["category"], "importance": o["importance"]}
-                    for o in objects[:20]
+                    {
+                        "name": o["name"],
+                        "category": o["category"],
+                        "importance": o["importance"],
+                    }
+                    for o in exportable[:20]
                 ],
                 "links": resolved_links,
             },
@@ -97,6 +184,7 @@ def _make_personal_context_loader(interests, forecasts):
                 for f in recent
             ],
         }
+
     return loader
 
 

@@ -72,6 +72,53 @@ def _iso(value):
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _strip_personal_context(bundle):
+    """P0-1：远程出口的硬闸——抹掉 bundle 里的个人上下文。
+
+    `PRIVACY.md` 承诺「外部 AI 的唯一输入是 build_public_bundle() 生成的公开
+    证据包」。所以远程分支连"本可以被注入"的机会都不留：只要 bundle 上带了
+    `personal_context`，这里一律剥成 None 再交给 provider。
+
+    为什么不依赖"上游不注入"：`bundle_loader` 是构造时注入的，只要它被换成一个
+    会塞个人数据的实现，请求体就会重新变脏。把闸门放在最靠近出口的地方，才是
+    与调用方实现无关的保证。
+
+    本地分支**不走这里** —— 本机个性化正是要用 `personal_context`。
+    """
+    if bundle is None or not getattr(bundle, "personal_context", None):
+        return bundle
+    return _replace(bundle, personal_context=None)
+
+
+def _public_payload_for_request(bundle):
+    """远程请求体的唯一准备出口：先硬剥离个人上下文，再校验体积契约。
+
+    这两件事都放在这里、而不是各 provider 自己的 `_request_body` 里，是因为
+    它们**必须在所有 provider 上生效**：
+
+    - **剥离**：`PRIVACY.md` 承诺外部 AI 的唯一输入就是公开证据包。之前远程
+      分支会把利益地图 / 历史预测 / 用户主动记录的个人近况拼进请求体，而远程
+      AI 只贡献 1.11% 的研判（803/72,253），交换比不成立。
+    - **体积**：`MAX_BUNDLE_CHARACTERS` / `MAX_EVIDENCE_SOURCES` 此前只有
+      `OpenAIResponsesProvider._request_body` 校验，`DeepSeekChatProvider`
+      完全没有校验，实测 Chat 分支曾实发 18,985 字符。
+
+    越限抛 `InvalidJudgmentError` 而**不是**裸 `ValueError`：调用方 `run_due`
+    对 `InvalidJudgmentError` 的处理是「立即降级 local、不重试」，而裸
+    ValueError 会冲出 `run_due` 打断整轮认知，只能被记成 task error。
+    """
+    public = bundle.to_public_dict()
+    # 硬闸：无论调用方怎么构造 bundle，远程请求都不含个人上下文。
+    # 用"剥离"而不是 `assert`：assert 在 -O 下会被整个删掉，剥离不会，
+    # 而且剥离后后续任何代码都不可能再把它拼回去。
+    public.pop("personal_context", None)
+    if len(public.get("evidence") or ()) > MAX_EVIDENCE_SOURCES:
+        raise InvalidJudgmentError("公开证据包来源超过上限")
+    if len(json.dumps(public, ensure_ascii=False)) > MAX_BUNDLE_CHARACTERS:
+        raise InvalidJudgmentError("公开证据包字符超过上限")
+    return public
+
+
 def _validate_endpoint(endpoint):
     parts = urlsplit(str(endpoint))
     if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
@@ -243,20 +290,10 @@ class OpenAIResponsesProvider:
         self.timeout = int(timeout)
 
     def _request_body(self, bundle):
-        public = bundle.to_public_dict()
-        if len(public["evidence"]) > MAX_EVIDENCE_SOURCES:
-            raise ValueError("公开证据包来源超过上限")
-        if len(json.dumps(public, ensure_ascii=False)) > MAX_BUNDLE_CHARACTERS:
-            raise ValueError("公开证据包字符超过上限")
+        # 出口闸：体积契约 + 个人上下文剥离。两件事都在共用助手里做，
+        # 保证任何 provider（含将来新增的）都逃不掉。
+        public = _public_payload_for_request(bundle)
         system_instruction = public.pop("system_instruction")
-        personal_context = public.pop("personal_context", None)
-        if personal_context:
-            system_instruction += (
-                "\n\n【用户个人上下文·仅供你参考，勿在输出中复述】"
-                "以下是用户的利益地图与近期预测，用于让研判贴合用户的「位置差」"
-                "（登高望远原则：每个人受影响的范围不同）。请据此评估事件对用户利益的影响方向：\n"
-                + json.dumps(personal_context, ensure_ascii=False, indent=2)
-            )
         return {
             "model": self.model,
             "input": [
@@ -351,9 +388,12 @@ class DeepSeekChatProvider:
         self.timeout = int(timeout)
 
     def _request_body(self, bundle):
-        public = bundle.to_public_dict()
+        # 出口闸：体积契约 + 个人上下文剥离。DeepSeek 分支历史上**完全没有**
+        # 校验上限（实测曾实发 18,985 字符），现在与 OpenAI 分支共用同一道闸。
+        public = _public_payload_for_request(bundle)
         system_instruction = public.pop("system_instruction")
-        personal_context = public.pop("personal_context", None)
+        # 注意：这里**没有** personal_context 可 pop —— 闸门已在
+        # _public_payload_for_request 里把它剥掉，远程请求体永远不含它。
         # DeepSeek 的 json_object 只保证输出合法 JSON，不保证字段齐全，
         # 必须在 prompt 内明确列出所有字段，再靠 repair_judgment 兜底。
         system_with_schema = (
@@ -368,26 +408,16 @@ class DeepSeekChatProvider:
             "leading_indicators/beneficiaries/cost_bearers/historical_parallel/observable_signals)。"
             "不要输出JSON以外的任何文字。"
         )
-        if personal_context:
-            system_with_schema += (
-                "\n\n【用户个人上下文·你必须据此替用户做判断，勿在输出中复述原文】"
-                "下面是用户的利益地图、近期预测和用户主动记录的个人近况。"
-                "请你站在用户的立场，先判断这件事与该用户是否真的相关、通过什么具体路径影响他，"
-                "再把结论写进 personal_action 字段：\n"
-                + json.dumps(personal_context, ensure_ascii=False, indent=2)
-                + "\n\npersonal_action 写作要求（这是给用户看的核心结论，最重要）："
-                "①直接替用户下判断，禁止出现'请你自行核实/查清是否在适用范围/建议你关注'这类把判断推回给用户的话；"
-                "②先给明确结论——这件事对该用户是'直接相关/间接相关/基本无关'中的哪一种、为什么；"
-                "③再给一个动词开头、该用户现在就能执行的具体动作和时间窗口；"
-                "④若判断与用户基本无关，要明确写'与你无直接关系，无需操作'并用一句话说明原因，不要硬凑建议；"
-                "⑤结合用户近况（如收入、工作、所在地）说话，不要放之四海皆准的套话；"
-                "⑥一句话到一段话，不超过300字。"
-            )
-        else:
-            system_with_schema += (
-                "\n\npersonal_action 字段要求：给出该事件的应对方向与一个可执行动作；"
-                "信息不足以判断与具体个人关系时，说明这是通用层面影响、暂不需要个人操作。"
-            )
+        # P0-1：这里原本会按 `personal_context` 拼一段「用户个人上下文」进
+        # system prompt，并要求 AI 结合用户近况（收入、工作、所在地）写
+        # personal_action —— 那正是把个人画像推给远程服务的根因。已整段删除。
+        # 远程产出的 personal_action 只基于事件本身；个性化行动建议由本机
+        # （impacts.map_judgment 与本机模型）生成。
+        system_with_schema += (
+            "\n\npersonal_action 字段要求：基于事件本身给出应对方向与一个可执行动作；"
+            "信息不足以判断与具体个人关系时，说明这是通用层面影响、暂不需要个人操作。"
+            "禁止出现'请你自行核实/查清是否在适用范围/建议你关注'这类把判断推回给用户的写法。"
+        )
         return {
             "model": self.model,
             "messages": [
@@ -869,14 +899,25 @@ class JudgmentQueue:
                 summary["deferred"] += 1
                 continue
             bundle = self.bundle_loader(job["cluster_id"])
-            # P2: 远程研判时注入个人利益地图与历史预测（本地研判跳过）
-            if is_remote and self.personal_context_loader:
-                try:
-                    ctx = self.personal_context_loader(job["cluster_id"])
-                    if ctx:
-                        bundle = _replace(bundle, personal_context=ctx)
-                except Exception:
-                    pass  # 个人上下文加载失败不阻断研判
+            # P0-1（2026-09-15）：远程路径**不再注入**个人上下文。
+            #
+            # `PRIVACY.md` 明文承诺「外部 AI 的唯一输入是 build_public_bundle()
+            # 生成的公开证据包」。此前远程分支会在这里把利益地图 + 历史预测 +
+            # 用户主动记录的个人近况塞进 bundle 再随请求外发，既违背该承诺，
+            # 交换比也不成立：远程 AI 只贡献 1.11% 的研判（803/72,253），却要
+            # 为此外发完整个人画像 736 次。
+            #
+            # 个性化一律留在本机完成：`impacts.map_judgment()` 在本机算分数与
+            # 等级，不需要远程参与。`personal_context_loader` 这个注入机制**保留**
+            # （将来若走「本机模型做个性化」可复用），但**远程队列不得使用它**。
+            # 另见 application.py 的 `_make_personal_context_loader`：那个函数即便
+            # 被复用，也已被改成默认按 privacy_level 过滤 P1、且不外发 manual signals。
+            #
+            # 这里对远程分支做一次**硬剥离**而不是「只是不注入」：bundle_loader 是
+            # 外部注入的，将来若被换成会塞个人数据的实现，请求体也不会因此变脏。
+            # 本地分支不动——本机个性化正是要走 personal_context 的。
+            if is_remote:
+                bundle = _strip_personal_context(bundle)
             request_chars = len(json.dumps(bundle.to_public_dict(), ensure_ascii=False))
             try:
                 result = provider.analyze(bundle)

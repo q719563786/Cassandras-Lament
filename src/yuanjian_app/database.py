@@ -369,6 +369,28 @@ class Database:
                 BEFORE DELETE ON judgments BEGIN
                     SELECT RAISE(ABORT, 'judgments are immutable');
                 END;
+                -- resolutions 存的是预测的**结算结果**（outcome）与 Brier 打分
+                -- （brier_score），是「预测账本不可变」里最该被保护的一块：一旦
+                -- 可改可删，事后就能悄悄篡改自己的命中率与校准分。此前它连
+                -- UPDATE/DELETE 触发器都没有，等于账本只锁了一半。这里补齐与
+                -- judgments 同级的 no_update / no_delete 防护（写入仍允许，
+                -- 见 forecasts.py 的 resolve()）。
+                CREATE TRIGGER IF NOT EXISTS resolutions_no_update
+                BEFORE UPDATE ON resolutions BEGIN
+                    SELECT RAISE(ABORT, 'resolutions are immutable');
+                END;
+                CREATE TRIGGER IF NOT EXISTS resolutions_no_delete
+                BEFORE DELETE ON resolutions BEGIN
+                    SELECT RAISE(ABORT, 'resolutions are immutable');
+                END;
+                -- forecasts 是**有意豁免**，不是漏写：它的 status 必须能从
+                -- 'open' 流转到 'resolved' / 'void'，而这一流转只能靠对
+                -- forecasts 做 UPDATE 完成（forecasts.py 的 resolve() 在写完
+                -- resolutions 之后就 `UPDATE forecasts SET status='resolved'`）。
+                -- 若在这里加 no_update，整条结算流程会被数据库直接拒绝。
+                -- 不可变性由两张内容表承担：forecast_versions（预测内容）与
+                -- resolutions（结算结果）；forecasts 本身只是"这条预测当前什么
+                -- 状态"的可变索引，不承载不可改的账本内容，所以它没有触发器。
                 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
                 VALUES (1, CURRENT_TIMESTAMP);
                 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
@@ -430,6 +452,15 @@ class Database:
             connection.execute("PRAGMA synchronous=NORMAL")
         except Exception:
             pass
+        # recursive_triggers 默认是 OFF。OFF 时 `INSERT OR REPLACE` 的冲突消解
+        # 内部虽然会删掉旧行，但**不会触发该表的 BEFORE DELETE 触发器**——于是
+        # 只要写法从 UPDATE / DELETE 换成 `INSERT OR REPLACE`（撞 PK 或撞 UNIQUE），
+        # 就能静默改写不可变表的行，甚至借 UNIQUE 冲突把原行整行抹掉（等于一次
+        # 未经拦截的 DELETE），直接绕过 judgments_no_delete /
+        # forecast_versions_no_delete 这两个「判读不可变 / 预测账本不可变」的守卫。
+        # 打开后 REPLACE 的删除也会触发 delete 触发器，承诺才真正由数据库强制。
+        # 实测探针见 build-artifacts/t9b_immutability_probe.py。
+        connection.execute("PRAGMA recursive_triggers=ON")
         try:
             yield connection
             connection.commit()

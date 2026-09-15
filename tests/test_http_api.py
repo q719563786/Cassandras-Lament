@@ -1,3 +1,4 @@
+import http.client
 import json
 import socket
 import tempfile
@@ -37,6 +38,83 @@ from yuanjian_app.operations import CognitionOperation, OperationBusy
 from yuanjian_app.remote_ai import AiSettingsService, JudgmentQueue
 from yuanjian_app.secret_store import DpapiSecretStore
 from yuanjian_app.trends import TrendService
+
+
+# ---------------------------------------------------------------------------
+# 客户端传输层的**瞬时异常有界重试**（team-lead 裁定方案 2）
+# ---------------------------------------------------------------------------
+# 背景：全量跑里 `test_paged_radar_cluster_and_notification_apis_form_action_center_contract`
+# 偶发红过一次（14 轮里 1 次），形态是 **ERROR（异常抛出）而不是断言失败**，
+# 单跑 30/30 绿。回环 TCP 在负载下会瞬时重置，这不是产品契约的一部分。
+#
+# 关键区分（这条很重要，别被后来的维护者误解成"把测试调软了"）：
+#   - **放松语义断言**（`total==1` 改成"≥0"、先轮询到非空再断言）= 调软 → 不做；
+#   - **在传输层重试瞬时异常** = 去掉环境噪声 → 只做这一件，且只对下面三类。
+#
+# `HTTPError` 单独排除：它是"服务端给了真·HTTP 响应"，是产品行为，必须原样暴露。
+TRANSIENT_EXCEPTIONS = (
+    http.client.RemoteDisconnected,
+    ConnectionResetError,
+    TimeoutError,
+)
+
+TRANSIENT_RETRY_LIMIT = 2
+TRANSIENT_RETRY_BACKOFF_SECONDS = 0.05
+
+# 可见性：重试次数必须能被看见。频繁非零本身就是产品症状（服务端连接管理有问题），
+# 不该被重试悄悄盖掉。
+TRANSIENT_RETRIES = {"count": 0, "details": []}
+TRANSIENT_RETRY_REPORT = Path(__file__).resolve().parents[1] / "build-artifacts" / "http-api-transient-retries.txt"
+
+
+def is_transient(error):
+    """只认那三类瞬时异常；其余一律不重试。
+
+    `urllib` 会把连接阶段的 `OSError` 包成 `URLError`，所以要把 `reason` 拆开看，
+    否则一条"不是瞬时"的 `URLError`（比如域名解析失败）会被误当成可重试。
+    """
+    if isinstance(error, urllib.error.HTTPError):
+        return False
+    if isinstance(error, TRANSIENT_EXCEPTIONS):
+        return True
+    if isinstance(error, urllib.error.URLError):
+        return isinstance(error.reason, TRANSIENT_EXCEPTIONS)
+    return False
+
+
+def transient_retry(fetch, backoff=TRANSIENT_RETRY_BACKOFF_SECONDS):
+    """跑一次 `fetch()`；只对瞬时异常最多重试 `TRANSIENT_RETRY_LIMIT` 次。
+
+    不吞任何异常：重试额度用完（或异常不是瞬时的）就**原样抛出**，
+    调用方与断言看到的行为和没有这层包装时完全一致。
+    """
+    attempts = 0
+    while True:
+        try:
+            return fetch()
+        except Exception as error:  # noqa: BLE001 —— 先分类，不是瞬时就原样抛
+            if attempts >= TRANSIENT_RETRY_LIMIT or not is_transient(error):
+                raise
+            attempts += 1
+            TRANSIENT_RETRIES["count"] += 1
+            TRANSIENT_RETRIES["details"].append(
+                "第 %d 次重试 %s: %s" % (attempts, type(error).__name__, error)
+            )
+            if backoff:
+                time.sleep(backoff * attempts)
+
+
+def tearDownModule():
+    """收尾把重试计数落盘 —— 只在计数 > 0 时落，避免正常运行的噪声。"""
+    count = TRANSIENT_RETRIES["count"]
+    if count:
+        TRANSIENT_RETRY_REPORT.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        with TRANSIENT_RETRY_REPORT.open("a", encoding="utf-8") as handle:
+            handle.write("=== %s 传输层瞬时异常重试 %d 次 ===\n" % (stamp, count))
+            for line in TRANSIENT_RETRIES["details"]:
+                handle.write("  %s\n" % line)
+    print("[test_http_api] 传输层瞬时异常重试次数=%d" % count)
 
 
 class RecordingDesktop:
@@ -451,37 +529,46 @@ class HttpApiTests(unittest.TestCase):
         return data
 
     def post_json(self, path, payload, token="test-token"):
-        request = urllib.request.Request(
-            self.base_url + path,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "X-YuanJian-Token": token,
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return response.status, json.loads(response.read().decode("utf-8"))
+        def fetch():
+            request = urllib.request.Request(
+                self.base_url + path,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "X-YuanJian-Token": token,
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+
+        return transient_retry(fetch)
 
     def get_json(self, path, token="test-token"):
-        request = urllib.request.Request(
-            self.base_url + path, headers={"X-YuanJian-Token": token}
-        )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8"))
+        def fetch():
+            request = urllib.request.Request(
+                self.base_url + path, headers={"X-YuanJian-Token": token}
+            )
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+
+        return transient_retry(fetch)
 
     def request_json(self, path, payload, method, token="test-token"):
-        request = urllib.request.Request(
-            self.base_url + path,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "X-YuanJian-Token": token,
-            },
-            method=method,
-        )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return response.status, json.loads(response.read().decode("utf-8"))
+        def fetch():
+            request = urllib.request.Request(
+                self.base_url + path,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "X-YuanJian-Token": token,
+                },
+                method=method,
+            )
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+
+        return transient_retry(fetch)
 
     def test_settings_get_put_and_calibration_diagnostics_contract(self):
         # GET 默认值
@@ -802,6 +889,20 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(set(labels), {"false_positive"})
 
     def test_paged_radar_cluster_and_notification_apis_form_action_center_contract(self):
+        """雷达 / 待研判 / 提醒 三个分页接口拼成"行动中心"的契约。
+
+        关于这条用例的偶发抖动（2026-09-15 全量 14 轮里红过 1 次，形态是 ERROR
+        而不是断言失败；单跑 30/30 绿）—— 先排除一个**看起来像但不成立**的假设：
+        `http_api.py` 的 `_post_external_refresh` 是**同步**调用
+        `services.external.refresh_source(source_id)` 之后才返回的，所以**不存在**
+        「刷新还没写完就去 GET」的竞态。这条用例的失败形态是传输层异常抛出，
+        与 `total==1` 这类语义断言无关。
+
+        因此本文件只在客户端传输层对
+        `RemoteDisconnected` / `ConnectionResetError` / `TimeoutError` 三类瞬时异常
+        做**有界重试**（最多 2 次，计数落 `build-artifacts/http-api-transient-retries.txt`），
+        下面的语义断言一个都没有改动。
+        """
         self.post_json(
             "/api/external/sources",
             {
@@ -1062,6 +1163,111 @@ class HttpApiTests(unittest.TestCase):
         finally:
             response.close()
         self.assertIn("state", payload)
+
+
+class TransientRetryPolicyTests(unittest.TestCase):
+    """重试策略本身要能测、要能红 —— 不是"加了重试就完事"。
+
+    这四条钉住的是**边界**：
+    - 三类瞬时异常确实会被重试，且**恰好** 2 次；
+    - 额度用完必须把原异常抛出（不许吞掉、不许无限重试）；
+    - 非瞬时的错（尤其 `HTTPError` 和裸 `ValueError`）**一次都不许重试**；
+    - `URLError` 要拆 `reason` 看，不能整类放行。
+
+    没有这组断言的话，"重试"很容易被后来的人改成 `except Exception: retry`
+    —— 那才是真正的"把测试调软"，而且会把真实故障掩盖掉。
+    """
+
+    def setUp(self):
+        self.before_count = TRANSIENT_RETRIES["count"]
+        self.before_details = len(TRANSIENT_RETRIES["details"])
+        self.addCleanup(self.restore_counter)
+
+    def restore_counter(self):
+        """别让本类的自造重试污染真·重试计数（收尾要落盘的是真实发生的那次）。"""
+        TRANSIENT_RETRIES["count"] = self.before_count
+        del TRANSIENT_RETRIES["details"][self.before_details :]
+
+    def retries(self):
+        return TRANSIENT_RETRIES["count"] - self.before_count
+
+    def test_transient_errors_are_retried_exactly_twice_then_raised(self):
+        for error in (
+            http.client.RemoteDisconnected("connection closed"),
+            ConnectionResetError(10054, "连接被重置"),
+            TimeoutError("timed out"),
+            urllib.error.URLError(ConnectionResetError(10054, "连接被重置")),
+        ):
+            with self.subTest(error=type(error).__name__):
+                calls = []
+
+                def fetch(error=error, calls=calls):
+                    calls.append(1)
+                    raise error
+
+                with self.assertRaises(type(error)):
+                    transient_retry(fetch, backoff=0)
+
+                self.assertEqual(
+                    len(calls), 3, "瞬时异常应重试 2 次（1 次原始 + 2 次重试）后抛出"
+                )
+        self.assertEqual(self.retries(), 8, "四种瞬时异常各该重试 2 次")
+
+    def test_a_transient_error_that_clears_up_is_not_raised(self):
+        """重试的意义：第二/第三次成功就必须返回结果，而不是把异常漏给调用方。"""
+        attempts = []
+
+        def fetch():
+            attempts.append(1)
+            if len(attempts) < 2:
+                raise ConnectionResetError(10054, "连接被重置")
+            return "ok"
+
+        self.assertEqual(transient_retry(fetch, backoff=0), "ok")
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(self.retries(), 1)
+
+    def test_http_errors_are_never_retried(self):
+        """`HTTPError` 是服务端给了真·HTTP 响应，属于产品行为，必须原样暴露。
+
+        它继承自 `URLError`，所以只按 `URLError` 判会把它一起放行 —— 这条就是防那个。
+        """
+        calls = []
+
+        def fetch():
+            calls.append(1)
+            raise urllib.error.HTTPError(
+                "http://127.0.0.1/x", 500, "boom", {}, None
+            )
+
+        with self.assertRaises(urllib.error.HTTPError):
+            transient_retry(fetch, backoff=0)
+
+        self.assertEqual(len(calls), 1, "HTTPError 被重试了 —— 真故障会被掩盖")
+        self.assertEqual(self.retries(), 0)
+
+    def test_non_transient_errors_are_never_retried(self):
+        """裸异常（含 `URLError` 但 reason 不是那三类）一律一次都不重试。"""
+        for error in (
+            ValueError("语义错误"),
+            urllib.error.URLError("域名解析失败"),
+            OSError(2, "No such file or directory"),
+        ):
+            with self.subTest(error=repr(error)):
+                calls = []
+
+                def fetch(error=error, calls=calls):
+                    calls.append(1)
+                    raise error
+
+                with self.assertRaises(BaseException):
+                    transient_retry(fetch, backoff=0)
+
+                self.assertEqual(len(calls), 1, "非瞬时异常被重试了")
+
+    def test_the_retry_limit_is_small_and_finite(self):
+        """把它写死在断言里：有人把上限改成 50 或无限，这条要红。"""
+        self.assertEqual(TRANSIENT_RETRY_LIMIT, 2)
 
 
 TOKEN = "routing-token"

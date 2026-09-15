@@ -110,8 +110,10 @@ class EvidenceBundle:
     categories: tuple[str, ...]
     items: tuple[EvidenceItem, ...]
     system_instruction: str = SYSTEM_INSTRUCTION
-    # P2: 个人利益地图与近期历史预测，仅在远程 AI 研判时注入
-    # （本地启发式研判永远不读取此字段，保持隐私边界）。
+    # 个人利益地图与近期预测。**P0-1（2026-09-15）起远程请求永不携带它**：
+    # PRIVACY.md 承诺外部 AI 的唯一输入是 build_public_bundle() 的公开证据包，
+    # JudgmentQueue 在出口处还会硬剥离一次。字段本身保留是为了本机个性化路径
+    # （本地启发式研判现在也不读它）。为空时 to_public_dict() 不会输出该键。
     personal_context: dict | None = None
 
     @property

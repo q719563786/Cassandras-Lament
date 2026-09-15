@@ -397,6 +397,245 @@ class HardInvariantTests(CleanupBase):
         self.assertEqual(self.counts("trend_snapshots", "window_hours=999"), 1)
 
 
+class ImmutabilityTriggerTests(CleanupBase):
+    """契约 §5 的**执行机制**：不可变表必须挡住 UPDATE / DELETE / REPLACE / upsert。
+
+    §5 说的是"清理前后逐字节等价"；这里测深一层 —— schema 自己有没有牙。
+    触发器只写了 BEFORE UPDATE / BEFORE DELETE 时，`INSERT OR REPLACE` 会走
+    REPLACE 冲突消解，而 SQLite 在 ``recursive_triggers=0``（默认）下**不为
+    REPLACE 触发 DELETE 触发器**，于是行被静默改写、甚至被换掉主键。
+
+    实测证据：`build-artifacts/t9b_immutability_probe.py`（用 app 自己的
+    `Database.initialize()` 建 schema）。
+    """
+
+    def seed(self):
+        with self.database.connect() as connection:
+            self.seed_immutable(connection)
+            self.add_cluster(connection, "C-1", NOW - timedelta(days=1))
+            self.add_judgment(connection, "J-1", "C-1", NOW - timedelta(days=1))
+
+    def judgment_content(self, judgment_id="J-1"):
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT content_json FROM judgments WHERE judgment_id=?",
+                (judgment_id,),
+            ).fetchone()
+            return None if row is None else row["content_json"]
+
+    # -- 已经被触发器挡住的（这些必须一直是绿的） -------------------------
+
+    def test_update_and_delete_are_blocked_on_triggered_tables(self):
+        self.seed()
+        cases = (
+            (
+                "judgments",
+                "judgments are immutable",
+                "UPDATE judgments SET content_json='{\"v\":2}' WHERE judgment_id='J-1'",
+            ),
+            (
+                "judgments",
+                "judgments are immutable",
+                "DELETE FROM judgments WHERE judgment_id='J-1'",
+            ),
+            (
+                "forecast_versions",
+                "forecast versions are immutable",
+                "UPDATE forecast_versions SET content='HACKED' WHERE forecast_id='F-1'",
+            ),
+            (
+                "forecast_versions",
+                "forecast versions are immutable",
+                "DELETE FROM forecast_versions WHERE forecast_id='F-1'",
+            ),
+        )
+        for table, message, sql in cases:
+            with self.subTest(table=table, sql=sql.split()[0]):
+                with self.database.connect() as connection:
+                    with self.assertRaises(sqlite3.IntegrityError) as raised:
+                        connection.execute(sql)
+                self.assertIn(message, str(raised.exception))
+
+    def test_upsert_do_update_is_blocked_because_the_update_trigger_fires(self):
+        """`ON CONFLICT ... DO UPDATE` 会被拦住 —— 它真的去 UPDATE 行。
+
+        这一条值得单列：它和 `INSERT OR REPLACE` 看起来都是"upsert"，但
+        REPLACE 走的是冲突消解（删除+插入），DO UPDATE 走的是更新，只有后者
+        会触发 BEFORE UPDATE 触发器。别以为"upsert 被拦住了"就万事大吉。
+        """
+        self.seed()
+        with self.database.connect() as connection:
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO judgments(judgment_id,cluster_id,provider,evidence_hash,"
+                    "content_json,created_at) VALUES ('J-1','C-1','local','h1','{\"v\":98}',?)"
+                    " ON CONFLICT(judgment_id) DO UPDATE SET content_json=excluded.content_json",
+                    (_stamp(NOW),),
+                )
+
+        self.assertEqual(self.judgment_content(), "{}")
+
+    def triggered_tables(self):
+        with self.database.connect() as connection:
+            return {
+                row["tbl_name"]
+                for row in connection.execute(
+                    "SELECT DISTINCT tbl_name FROM sqlite_master WHERE type='trigger'"
+                )
+            }
+
+    def test_trigger_coverage_never_regresses_and_never_over_reaches(self):
+        """两个方向都要钉住，否则"保护面"这件事没有牙齿。
+
+        - **下限**：`judgments` / `forecast_versions` 必须一直有触发器。它们是
+          已经落地的保护，任何一次 schema 改动把它们弄丢，这条就会红。
+        - **上限**：`event_clusters` / `interest_objects` / `interest_links` 虽然
+          在契约 §5 里同属"不可变"，但应用本身要写它们（簇的 `updated_at`、
+          `needs_judgment`、利益对象改名改重要度）。给它们加触发器会把正常
+          业务写死在 IntegityError 上，所以这几张表**不能被触发器覆盖**。
+          §5 对它们的要求靠"清理代码不去碰"来满足，而不是靠 schema 阻挡。
+        """
+        protected = self.triggered_tables() & set(IMMUTABLE_TABLES)
+
+        self.assertTrue(
+            {"judgments", "forecast_versions"} <= protected,
+            "已落地的触发器保护丢了：%s" % sorted(protected),
+        )
+        self.assertEqual(
+            protected & {"event_clusters", "interest_objects", "interest_links"},
+            set(),
+            "给应用自己会写的表加了触发器，正常业务会被 IntegityError 打断",
+        )
+
+    # -- 尚未挡住的（P1 缺口；修复落地后必须摘掉 expectedFailure） ---------
+    #
+    # 待 team-lead 一声令下即可摘掉的装饰器清单（共 5 条）：
+    #   test_insert_or_replace_cannot_rewrite_a_judgment
+    #   test_insert_or_replace_cannot_erase_a_judgment_through_its_unique_triple
+    #   test_insert_or_replace_cannot_rewrite_a_forecast_version
+    #   test_resolutions_reject_update_and_delete
+    #   test_trigger_coverage_includes_the_resolution_ledger
+    # 摘掉的依据不是"src 改了"，而是"这 5 条真的转绿"；转绿到摘除之间不该
+    # 留太多空档，否则 unittest 的 "unexpected success" 会掩盖真正的回归。
+
+    def test_trigger_coverage_includes_the_resolution_ledger(self):
+        """`resolutions` 存结算结果与 Brier 分数，是最该被保护的一张表。
+
+        现状：`resolutions` 连 UPDATE / DELETE 触发器都没有（实测均成功）。
+        修复后它必须进入触发器保护面。`forecasts` 不在此列并非缺口 ——
+        它的 `status` 要走 open → resolved 的正常流转，见下面那条正向用例。
+        """
+        protected = self.triggered_tables() & set(IMMUTABLE_TABLES)
+
+        self.assertIn("resolutions", protected)
+
+    def test_insert_or_replace_cannot_rewrite_a_judgment(self):
+        """`INSERT OR REPLACE` 撞同一个主键时，必须同样被拦。
+
+        当前实测是"成功（未被拦截）"，content_json 被静默改写成 {"v":99}。
+        根因：REPLACE 冲突消解内部走的是删除，而 recursive_triggers 默认 0，
+        不触发 BEFORE DELETE 触发器。改为 `PRAGMA recursive_triggers=ON` 后
+        实测被拦（`build-artifacts/qa2_group3_probe.py`）。
+
+        断言不止"抛异常"：还要求内容一字未改、行数没变 —— 否则"先改写再抛异常"
+        这种半吊子实现也能骗过 assertRaises。
+
+        这条一旦意外转绿（unittest 会报 unexpected success），说明修复已落地，
+        把装饰器摘掉即可。
+        """
+        self.seed()
+        with self.database.connect() as connection:
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT OR REPLACE INTO judgments(judgment_id,cluster_id,provider,"
+                    "evidence_hash,content_json,created_at)"
+                    " VALUES ('J-1','C-1','local','h1','{\"v\":99}',?)",
+                    (_stamp(NOW),),
+                )
+
+        self.assertEqual(self.judgment_content("J-1"), "{}", "研判内容被 REPLACE 改写了")
+        with self.database.connect() as connection:
+            total = connection.execute("SELECT COUNT(*) FROM judgments").fetchone()[0]
+        self.assertEqual(total, 1, "REPLACE 之后研判行数变了")
+
+    def test_insert_or_replace_cannot_erase_a_judgment_through_its_unique_triple(self):
+        """同 UNIQUE(cluster_id, provider, evidence_hash) 但换个主键时，原行不能被抹掉。
+
+        实测更严重：J-1 整行消失、只剩内容被改写的 J-2 —— 这已经不是"内容被
+        改写"，而是借 REPLACE 实现了一次**删除**，直接违反 §5。
+
+        所以这条同时验证两件事：**改写被拦**（抛 IntegrityError）与**删除没发生**
+        （J-1 仍在、J-2 没被创出来）。只断前者的话，"先删后插再回滚失败"这类
+        实现仍可能漏过。
+        """
+        self.seed()
+        with self.database.connect() as connection:
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT OR REPLACE INTO judgments(judgment_id,cluster_id,provider,"
+                    "evidence_hash,content_json,created_at)"
+                    " VALUES ('J-2','C-1','local','hash-J-1','{\"v\":97}',?)",
+                    (_stamp(NOW),),
+                )
+
+        self.assertEqual(self.judgment_content("J-1"), "{}", "原研判被 REPLACE 抹掉了")
+        self.assertIsNone(self.judgment_content("J-2"), "REPLACE 竟然插进了一条新研判")
+
+    def test_insert_or_replace_cannot_rewrite_a_forecast_version(self):
+        """`forecast_versions` 同样能被 REPLACE 改写（实测 content 变成 'HACKED'）。"""
+        self.seed()
+        with self.database.connect() as connection:
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT OR REPLACE INTO forecast_versions(forecast_id,version,"
+                    "probability,content_sha256,content) VALUES ('F-1',1,0.7,'sha','HACKED')"
+                )
+
+        with self.database.connect() as connection:
+            content = connection.execute(
+                "SELECT content FROM forecast_versions WHERE forecast_id='F-1' AND version=1"
+            ).fetchone()["content"]
+        self.assertEqual(content, "内容", "版本内容被 REPLACE 改写了")
+
+    def test_resolutions_reject_update_and_delete(self):
+        """`resolutions` 的 UPDATE / DELETE 必须被拦。
+
+        它存的是结算结果与 Brier 分数（未来还会用来校准模型），属于"预测账本"
+        的结算半边。现状实测：`UPDATE resolutions SET outcome='miss'`、
+        `DELETE FROM resolutions` 全部成功 —— 一次手滑就能把"预测对错"这个
+        学习回路唯一的真值改写掉。
+        """
+        self.seed()
+        with self.database.connect() as connection:
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "UPDATE resolutions SET outcome='miss' WHERE forecast_id='F-1'"
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute("DELETE FROM resolutions WHERE forecast_id='F-1'")
+
+    def test_forecast_status_transition_is_still_allowed(self):
+        """`forecasts.status` 的 open → resolved 流转**必须继续可用**。
+
+        这条是防过度收紧的正向对照：`forecasts` 与 `resolutions` 同属"预测账本"，
+        但 `forecasts` 只有身份字段（id / window_end / category）是不可变的，
+        `status` 是活的状态机。如果修复时给 `forecasts` 加一张 no_update 触发器，
+        结算流程会被 IntegityError 打断 —— 那时这条会红，而它是**对的**。
+        """
+        self.seed()
+
+        with self.database.connect() as connection:
+            connection.execute(
+                "UPDATE forecasts SET status='resolved' WHERE forecast_id='F-1'"
+            )
+
+        with self.database.connect() as connection:
+            status = connection.execute(
+                "SELECT status FROM forecasts WHERE forecast_id='F-1'"
+            ).fetchone()["status"]
+        self.assertEqual(status, "resolved")
+
+
 class IdempotencyTests(CleanupBase):
     """契约 §7.2：连跑两次，第二次各层删除数必须为 0。"""
 
@@ -1034,12 +1273,18 @@ class LayerAPublishedAtTests(CleanupBase):
         self.assertEqual(result["deleted_items"], 5)
 
     def test_cluster_item_links_are_left_behind_when_items_are_purged(self):
-        """**现状记录**（不是我认为对的行为，见 harness 里的说明）：
+        """**现状记录**（不是我认为对的行为）：
 
         A 层只删 ``external_item_sources`` / ``external_matches``，不碰
         ``event_cluster_items``。所以条目被删后，簇与条目的关联行会留下一根
-        悬空引用。这里把现状钉住，是为了让"要不要一起清"变成一个显式决定，
-        而不是悄悄发生。若 team-lead 判定这是缺陷，那是 src 的改动，我改测试。
+        **悬空引用**（item_id 指向已不存在的条目）。
+
+        这里把"每删一个被簇引用的条目就新增一条悬空引用"钉成数字，是为了让
+        "要不要一起清"变成一个显式决定，而不是悄悄发生。若 team-lead 判定这是
+        缺陷，那是 src 的改动 —— 那时把断言改成"悬空引用不得增加"即可，我改测试。
+
+        （真库实测：清理前 848 行悬空引用 / 740 个簇受影响；一次完整清理净变化
+        -233 —— A 新增 84、B 清掉 317。见 build-artifacts/t9c、t9d 两个脚本。）
         """
         with self.database.connect() as connection:
             self.add_cluster(connection, "C-live", NOW - timedelta(days=1))
@@ -1050,6 +1295,7 @@ class LayerAPublishedAtTests(CleanupBase):
                 " VALUES ('C-live','ITEM-linked',1.0,'new_cluster','example.com',1,?)",
                 (_stamp(NOW - self.STALE),),
             )
+        orphans_before = self.orphan_link_count()
 
         result = self.run_cleanup()
 
@@ -1060,6 +1306,19 @@ class LayerAPublishedAtTests(CleanupBase):
             "关联行被一并删掉了 —— 行为变了，请确认这是有意为之",
         )
         self.assertEqual(self.counts("external_items", "item_id='ITEM-linked'"), 0)
+        self.assertEqual(
+            self.orphan_link_count() - orphans_before,
+            1,
+            "悬空引用的增量变了：若变成 0 说明 A 层已改为一并清理，请更新本用例",
+        )
+
+    def orphan_link_count(self):
+        """统计 ``event_cluster_items`` 中 item_id 已不存在的行数。"""
+        with self.database.connect() as connection:
+            return connection.execute(
+                "SELECT COUNT(*) FROM event_cluster_items i WHERE NOT EXISTS"
+                " (SELECT 1 FROM external_items e WHERE e.item_id = i.item_id)"
+            ).fetchone()[0]
 
     def item_ids(self):
         with self.database.connect() as connection:

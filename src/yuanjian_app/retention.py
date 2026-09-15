@@ -8,6 +8,10 @@
 - 「结论明细」= 挂在事件簇下面的派生数据：个人利益影响、通知记录、研判任务、
   实体、簇成员。它们此前**永不删除**，是库体积无限增长的主因之一。
   现在按 `cluster_days` 清理（默认 180 天，比原始条目的 60 天宽）。
+  例外：`personal_impacts` 与 `notification_log` 里混着**用户自撰状态**
+  （用户标注 `user_label`、`muted_until`、`importance_override`，通知的已读
+  标记 `read_at`），且被学习回路当输入，所以只清"无任何用户标注"的行——
+  见 `CLUSTER_DETAIL_FILTERS`。抹掉它们等于抹掉用户教给系统的判断。
 - 「作业流水」`judgment_jobs`（C 层）：作业一旦成功产出研判，这条流水就完全冗余
   （结果已在 `judgments` 里）。因此清掉「`succeeded` 且对应研判已存在」中
   `created_at` 早于 `job_days`（默认 7 天）的行；另设绝对上限
@@ -20,7 +24,11 @@
   不在 `SNAPSHOT_KEEP_DAYS` 里、也不在保护名单里的窗口一律不动。
 - **预测账本永不删除**：`forecasts`、`forecast_versions`、`resolutions`。
 - 审计留痕 `audit_log` 不删（体积小、有追责价值），且**只增不减**。
-- 只有真的删掉了东西才写一条审计，避免每天留下一行全零记录。
+- **审计与节流时钟是两件事，不要混用**：审计只增不减、且只在真的删掉了东西
+  时才写一条（避免每天留下全零记录）；阈值触发的 6 小时节流时钟改存
+  `runtime_state` 的专用键（`THROTTLE_STATE_KEY`），**每次真正执行过的尝试都
+  推进**。若拿"只写于真删时"的审计当时钟，空跑就不会推进时钟，节流形同虚设，
+  会每个检查周期重跑一遍全量清理。
 
 **不自动 VACUUM**：删除只把页标记为空闲，物理文件不会缩小
 （真实库 `PRAGMA auto_vacuum=0`），因此库级 `db_bytes_before` 与
@@ -92,6 +100,32 @@ CLUSTER_DETAIL_TABLES = (
     "event_entities",
     "event_cluster_items",
 )
+
+# 逐表追加的"不可清理"条件（簇过期也不删）。多数明细表是纯派生物，簇过期即可清；
+# 但下面两张表里**混着用户亲手写下的状态**，删掉就等于抹掉用户的判断，必须保命：
+#
+# - `personal_impacts`：`user_label` 是用户在界面上标的 `dismissed` /
+#   `false_positive`，`muted_until` 是"免打扰到某时刻"，`importance_override`
+#   是用户手动调过的重要性。这三者都还被**学习回路当输入**
+#   （cognition.py / impacts.py 都会按 `user_label` 过滤）——删掉它们不只是
+#   丢展示，而是让系统"忘掉"用户教过的判断。
+# - `notification_log`：`read_at` 是用户的已读标记，非空表示这条通知用户看过、
+#   处理过；删了就抹掉了"读过"这个事实。
+#
+# 所以只删"没有任何用户标注"的行（user_label 为空、没静音、没改过重要性；
+# 通知没被读过）。其余表沿用原判据，行为不变。
+CLUSTER_DETAIL_FILTERS = {
+    "personal_impacts": (
+        "COALESCE(user_label, '') = ''"
+        " AND muted_until IS NULL"
+        " AND importance_override IS NULL"
+    ),
+    "notification_log": "read_at IS NULL",
+}
+
+# 阈值节流的时钟：存"上一次真正执行过清理尝试"的时间。
+# 与 `settings.retention`（用户设置）分开，语义不同、读写时机也不同。
+THROTTLE_STATE_KEY = "retention.last_attempt_at"
 
 
 def _iso(value: datetime) -> str:
@@ -363,11 +397,24 @@ class RetentionService:
             "largest_bytes": largest_bytes,
         }
 
-    def _last_cleanup_at(self, fallback=None):
-        """上一次「真的删掉东西」的清理时间；没有则返回 fallback。
+    @staticmethod
+    def _parse_moment(value):
+        """把 ISO 字符串解析成 UTC datetime；解析不了返回 None。"""
+        if not value:
+            return None
+        try:
+            moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return moment.astimezone(timezone.utc)
 
-        以 `audit_log` 为唯一事实来源：只有真删了才写审计，所以这个时间
-        天然代表「上一次有效清理」，不会因为空跑而重置 6 小时间隔。
+    def _audit_last_cleanup_at(self, fallback=None):
+        """旧口径：`audit_log` 里最后一次 `retention_cleanup` 的时间。
+
+        仅用于升级兼容——旧库还没有节流时钟键时，拿它当一次回退基准，避免
+        升级后的第一次阈值检查把"上次真删"当成"从未清理"而立刻重跑。
         """
         try:
             with self.database.connect() as connection:
@@ -378,15 +425,42 @@ class RetentionService:
         except sqlite3.Error:
             return fallback
         value = row[0] if row is not None else None
-        if not value:
-            return fallback
+        moment = self._parse_moment(value)
+        return fallback if moment is None else moment
+
+    def _last_attempt_at(self, fallback=None):
+        """上一次**真正执行**过清理尝试的时间；取不到返回 fallback。
+
+        时钟存在 `runtime_state` 的专用键（``THROTTLE_STATE_KEY``）里，**不复用
+        `audit_log`**。原因：审计是"只在真的删掉了东西时才写"（有意设计，避免
+        每天留一条全零记录），而节流要的是"每次尝试都前进"的时钟。两者语义不同，
+        共用同一个字段就会退化成死循环——当判定该清理、跑完却什么都没删时
+        （例如 `judgments` 触顶后长期无可删数据），审计不写、时钟不动，于是每个
+        阈值检查周期都重跑一遍 A~E 全表扫描 + dbstat（真库单次约 1.8 秒），
+        而调度器每小时检查一次。时钟与审计必须分开。
+
+        兼容：旧库还没有这个键时，回退到旧的 `audit_log` 口径（
+        `_audit_last_cleanup_at`），让升级后的第一次检查仍按"上次真删"判定；
+        两者都没有（全新库）则返回 fallback，表示"从未清理过"、允许执行一次。
+        """
         try:
-            moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        except ValueError:
-            return fallback
-        if moment.tzinfo is None:
-            moment = moment.replace(tzinfo=timezone.utc)
-        return moment.astimezone(timezone.utc)
+            with self.database.connect() as connection:
+                row = connection.execute(
+                    "SELECT value_json FROM runtime_state WHERE state_key=?",
+                    (THROTTLE_STATE_KEY,),
+                ).fetchone()
+        except sqlite3.Error:
+            return self._audit_last_cleanup_at(fallback)
+        if row is not None:
+            raw = row["value_json"]
+            try:
+                value = json.loads(raw)
+            except (TypeError, ValueError):
+                value = raw
+            moment = self._parse_moment(value)
+            if moment is not None:
+                return moment
+        return self._audit_last_cleanup_at(fallback)
 
     # -- 执行 -------------------------------------------------------------
 
@@ -398,15 +472,19 @@ class RetentionService:
         trigger : ``"scheduled"`` | ``"threshold"`` | ``"manual"``
             - ``scheduled``：每日定时清理（上游已做「今天是否跑过」的墙钟判断）。
             - ``threshold``：体积阈值触发；受 ``min_interval_hours`` 约束，
-              间隔内返回 ``status="skipped"`` 且不做删除。
+              间隔内返回 ``status="skipped"`` 且不做删除。间隔以
+              ``runtime_state`` 里的节流时钟为准（``THROTTLE_STATE_KEY``），**每次
+              真正执行的尝试都会推进它**，所以空跑也会重置下一个 6 小时窗口；被
+              跳过的检查不推进时钟，因此不会把窗口错误地向后推。
             - ``manual``：人工强制，**绕过**最小间隔检查。
 
         行为约定
         --------
         - 设置为 ``enabled=False`` 时直接返回 ``status="disabled"``，不删任何东西。
         - **单事务**：A~E 全部删除在同一个事务里完成，任一层抛异常整体回滚，
-          不留半删状态。审计行也在同一事务内写入。
-        - **只有真的删了东西才写 audit_log**（沿用既有约定，避免每天留全零记录）。
+          不留半删状态。审计行与节流时钟也在同一事务内写入。
+        - **只有真的删了东西才写 audit_log**（沿用既有约定，避免每天留全零记录）；
+          节流时钟与此无关，每次尝试都写。
         - **不自动 VACUUM**：删除不缩小物理文件，库级 before/after 正常相等。
           返回值为逻辑删除行数，不等于磁盘占用下降量。
         - **效果证据看空闲页，不看体积**：库是 `PRAGMA auto_vacuum=0`，删掉的行
@@ -454,7 +532,7 @@ class RetentionService:
 
         if trigger == "threshold":
             interval = timedelta(hours=setting["min_interval_hours"])
-            last = self._last_cleanup_at(fallback=None)
+            last = self._last_attempt_at(fallback=None)
             if (
                 interval > timedelta(0)
                 and last is not None
@@ -552,6 +630,20 @@ class RetentionService:
             # 用同一个 connection 读，绝不在写事务里新开连接（拿不到锁会卡死）。
             free_pages_after = self._freelist_count(connection)
 
+            # 节流时钟：**每次真正执行过的尝试都推进**，无论本次是否删了东西。
+            # 与下面的审计写入刻意分开——审计只在真删时写（保持既有语义），
+            # 时钟则必须每次前进，否则空跑会让 6 小时节流失效、每周期重跑全扫。
+            # 写在同一个事务里：失败回滚时时钟一并回滚，不会出现"尝试失败却把
+            # 6 小时窗口耗掉"的情况。被节流跳过的检查根本没走到这里，不推进时钟，
+            # 以免把 6 小时窗口错误地向后推（见 MinIntervalTests）。
+            connection.execute(
+                "INSERT INTO runtime_state(state_key, value_json, updated_at)"
+                " VALUES (?, ?, ?)"
+                " ON CONFLICT(state_key) DO UPDATE SET"
+                " value_json=excluded.value_json, updated_at=excluded.updated_at",
+                (THROTTLE_STATE_KEY, json.dumps(now_text), now_text),
+            )
+
             # 只有真的删掉了东西才写审计，避免每天留下一条全零的记录
             if removed_total:
                 details = {
@@ -606,25 +698,42 @@ class RetentionService:
         只删 `CLUSTER_DETAIL_TABLES` 里的派生数据；事件簇本身与研判是结论，
         一律保留（judgments 另有触发器保护，想删也删不掉）。
 
+        **逐表判据不同**：多数明细表是纯派生物，簇过期即可清；但
+        `personal_impacts` / `notification_log` 里混着用户自撰状态（用户标注、
+        静音、重要性覆盖、已读标记），这些还被学习回路当输入，删掉等于抹掉
+        用户的判断——所以对这两张表额外叠加 `CLUSTER_DETAIL_FILTERS` 里的
+        "无任何用户标注"条件，只清从未被用户碰过的行。其余表行为不变。
+
         表名来自模块常量，不是外部输入，所以这里用 f-string 拼表名是安全的
         （SQLite 不支持把表名参数化）。先统计再删除，统计进 audit_log，
         便于事后核对"到底删了什么"。
         """
+
+        def where_for(table):
+            scope = (
+                "cluster_id IN (SELECT cluster_id FROM event_clusters"
+                " WHERE last_seen_at < ?)"
+            )
+            extra = CLUSTER_DETAIL_FILTERS.get(table)
+            return scope if extra is None else f"{scope} AND {extra}"
+
         expired = connection.execute(
             "SELECT COUNT(*) FROM event_clusters WHERE last_seen_at < ?",
             (cluster_cutoff,),
         ).fetchone()[0]
         if not expired:
             return 0, {}
-        scope = "cluster_id IN (SELECT cluster_id FROM event_clusters WHERE last_seen_at < ?)"
         counts = {}
         for table in CLUSTER_DETAIL_TABLES:
             counts[table] = connection.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE {scope}", (cluster_cutoff,)
+                f"SELECT COUNT(*) FROM {table} WHERE {where_for(table)}",
+                (cluster_cutoff,),
             ).fetchone()[0]
         for table in CLUSTER_DETAIL_TABLES:
             if counts[table]:
-                connection.execute(f"DELETE FROM {table} WHERE {scope}", (cluster_cutoff,))
+                connection.execute(
+                    f"DELETE FROM {table} WHERE {where_for(table)}", (cluster_cutoff,)
+                )
         return expired, counts
 
     def _purge_judgment_jobs(self, connection, job_cutoff, absolute_cutoff):

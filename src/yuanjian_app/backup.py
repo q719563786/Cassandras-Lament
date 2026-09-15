@@ -11,11 +11,40 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
 KEEP_COUNT = 7
+
+#: 只有 `run()` 产出的日期备份才参与保留计数与 `latest()`。
+#:
+#: **不要再用 `glob("yuanjian-*.db")` 这种宽 glob。** 备份目录里还存在升级前的
+#: 手工快照 `yuanjian-pre-v0.4-*` / `yuanjian-pre-v0.5-*`，它们也匹配那个通配符，
+#: 而 `'p'(0x70) > '2'(0x32)` —— 按文件名倒序时这些 `pre-*` **全部排在日期备份
+#: 之前**，于是长期占住 `KEEP_COUNT=7` 里的名额，把真正的日期备份挤出保留窗口；
+#: `latest()` 也因此会返回一个 1.3 MB 的空壳，而不是最新那份 922 MB 的真备份。
+#:
+#: `pre-*` 是用户的数据，**永不删除**，只是从此不参与保留计数与 `latest()`。
+BACKUP_NAME_PATTERN = re.compile(r"^yuanjian-\d{8}T\d{6}Z\.db$")
+
+
+def _dated_backups(backup_dir: Path) -> list[Path]:
+    """列出日期备份，按文件名倒序（时间戳零填充，字典序即时间序）。
+
+    `_rotate()` 与 `latest()` **共用本函数**，避免两处筛选口径再次漂移——
+    历史上它们就是各自复制了一份宽 glob，才一起跑偏的。
+    """
+    return sorted(
+        (
+            item
+            for item in backup_dir.glob("yuanjian-*.db")
+            if item.is_file() and BACKUP_NAME_PATTERN.match(item.name)
+        ),
+        key=lambda item: item.name,
+        reverse=True,
+    )
 
 
 def _iso(value: datetime) -> str:
@@ -63,21 +92,17 @@ class BackupService:
         }
 
     def _rotate(self):
-        backups = sorted(
-            (item for item in self.backup_dir.glob("yuanjian-*.db") if item.is_file()),
-            key=lambda item: item.name,
-            reverse=True,
-        )
+        backups = _dated_backups(self.backup_dir)
         for stale in backups[KEEP_COUNT:]:
             stale.unlink(missing_ok=True)
 
     def latest(self) -> dict | None:
-        """最近一次成功备份的信息（诊断面板用），没有则 None。"""
-        backups = sorted(
-            (item for item in self.backup_dir.glob("yuanjian-*.db") if item.is_file()),
-            key=lambda item: item.name,
-            reverse=True,
-        )
+        """最近一次成功备份的信息（诊断面板用），没有则 None。
+
+        只认日期备份：`pre-*` 升级前快照不参与，否则这里会返回一个空壳
+        （实测 1.3 MB 的 8/11 文件排在 922 MB 的真备份前面）。
+        """
+        backups = _dated_backups(self.backup_dir)
         if not backups:
             return None
         newest = backups[0]
