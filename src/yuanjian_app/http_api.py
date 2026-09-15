@@ -1,5 +1,6 @@
 import hmac
 import json
+import sqlite3
 import sys
 import threading
 from dataclasses import dataclass
@@ -280,6 +281,7 @@ ROUTES = (
     ),
     Route("POST", "exact", "/api/settings/startup", "_post_settings_startup"),
     Route("POST", "exact", "/api/settings/ai", "_post_settings_ai"),
+    Route("POST", "exact", "/api/backup/run", "_post_backup_run"),
     Route(
         "POST",
         "exact",
@@ -963,6 +965,26 @@ def create_server(host, port, token, services):
 
         def _post_settings_ai(self, services, params, parsed, payload):
             self._json(services.ai_settings.save(payload))
+
+        def _post_backup_run(self, services, params, parsed, payload):
+            """立即产出一份备份（设置页「立即备份」按钮）。
+
+            刻意**不看** `settings.backup.enabled`：那个开关管的是「每日自动备份」，
+            手动按钮的意义正在于用户当下就想要一份。`BackupService.run()` 本身也不
+            读该开关，这里不重复判断，免得出现两套语义。
+            """
+            if services.backup_service is None:
+                self._error(503, "unavailable", "备份能力未装配")
+                return
+            try:
+                result = services.backup_service.run()
+            except (OSError, RuntimeError, sqlite3.Error) as error:
+                # run() 的预期失败：完整性检查不过（RuntimeError）、落盘失败
+                # （OSError：磁盘满/权限）、源库被写锁或目标库打不开（sqlite3.Error）。
+                # 真实原因必须原样带给用户——「服务内部错误」对磁盘满毫无帮助。
+                self._error(500, "backup_failed", f"备份失败：{error}")
+                return
+            self._json(result, 201)
 
         def _post_export_mobile_summary(self, services, params, parsed, payload):
             if services.mobile_export is None:

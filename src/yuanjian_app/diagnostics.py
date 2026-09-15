@@ -55,8 +55,11 @@ class DiagnosticsService:
             try:
                 settings = self.ai_settings.get()
                 payload["ai_enabled"] = bool(settings.get("enabled", False))
+                # 今日用量必须连着上限一起给，否则"今日 37 次"看不出离天花板还有多远。
+                payload["ai_daily_budget"] = int(settings.get("daily_budget", 0))
             except Exception:
                 payload["ai_enabled"] = False
+                payload["ai_daily_budget"] = 0
         if self.judgment_queue is not None:
             try:
                 payload["ai_jobs_today"] = int(self.judgment_queue.remote_used_today())

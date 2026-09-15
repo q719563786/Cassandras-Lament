@@ -1,9 +1,10 @@
-"""每日自动备份：SQLite backup API 在线快照 + 滚动保留 7 份。
+"""每日自动备份：SQLite backup API 在线快照 + 滚动保留 N 份。
 
 设计要点：
 - 使用 sqlite3 backup API 而非文件复制，避免抓到写一半的 WAL 页。
 - 先写临时文件再 os.replace 原子落盘，失败不产生半份备份。
-- 滚动保留最近 7 份，旧的在成功落盘之后才删除。
+- 滚动保留最近 N 份（N 由设置项 `keep` 决定，默认 7，可在设置页改 1~30），
+  旧的在成功落盘之后才删除。
 - 备份目录位于数据根 backups/ 下，永不进入 git 或导出包。
 """
 
@@ -17,6 +18,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 KEEP_COUNT = 7
+"""保留份数的**默认值**（也是读侧非法值的回退值）。
+
+2026-09-15 之前 `_rotate()` 直接用它，于是设置页里的"保留份数"形同虚设；
+现在 `_rotate()` 读实际设置（`read_backup_setting()`），本常量只作为
+`read_backup_setting()` 的 fallback 与 `write_backup_setting()` 的起始值存在。
+"""
+
+MIN_KEEP_COUNT = 1
+MAX_KEEP_COUNT = 30
+"""保留份数区间。上限压到 30 的理由：一份真库备份接近 1 GB，30 份已是
+几十 GB 量级；再往上对用户是纯磁盘风险，且备份的价值集中在最近几份。"""
 
 #: 只有 `run()` 产出的日期备份才参与保留计数与 `latest()`。
 #:
@@ -92,8 +104,14 @@ class BackupService:
         }
 
     def _rotate(self):
+        """按**设置里的**保留份数滚动清理，只删日期备份。
+
+        `keep` 每次现读（一次 SQLite 查询），用户改完设置下一份备份就生效，
+        无需重启——这也是它必须读设置而不能用模块常量的原因。
+        """
+        keep = self.get_setting()["keep"]
         backups = _dated_backups(self.backup_dir)
-        for stale in backups[KEEP_COUNT:]:
+        for stale in backups[keep:]:
             stale.unlink(missing_ok=True)
 
     def latest(self) -> dict | None:
@@ -139,10 +157,21 @@ def read_backup_setting(database, *, default_hour=3) -> dict:
         hour = max(0, min(int(hour), 23))
     except (TypeError, ValueError):
         hour = default_hour
+    # keep 与 hour 不同：**越界不回夹、直接回退默认**。理由是保留份数越界属于
+    # 数据被删的边界，宁可退到保守的 7 份，也不要"按上限切"让用户以为改成了 30。
+    # 旧库只有 {enabled, hour} 时 payload.get 取不到 keep → 同样落到 KEEP_COUNT，
+    # 所以升级不会重置用户既有设置。
+    keep = payload.get("keep", KEEP_COUNT)
+    try:
+        keep = int(keep)
+    except (TypeError, ValueError):
+        keep = KEEP_COUNT
+    if not MIN_KEEP_COUNT <= keep <= MAX_KEEP_COUNT:
+        keep = KEEP_COUNT
     return {
         "enabled": bool(payload.get("enabled", False)),
         "hour": hour,
-        "keep": int(payload.get("keep", KEEP_COUNT)),
+        "keep": keep,
     }
 
 
@@ -154,10 +183,21 @@ def write_backup_setting(database, payload: dict, *, now=None) -> dict:
         hour = max(0, min(int(hour), 23))
     except (TypeError, ValueError):
         raise ValueError("备份目标时段无效（0-23）")
+    # 缺失时沿用当前值（与 hour 一致）；给了就校验，越界抛 ValueError。
+    # 修复前这里写的是 `current["keep"]`——用户传什么都不生效，设置页改不动。
+    keep = payload.get("keep", current["keep"])
+    try:
+        keep = int(keep)
+    except (TypeError, ValueError):
+        raise ValueError("备份保留份数无效")
+    if not MIN_KEEP_COUNT <= keep <= MAX_KEEP_COUNT:
+        raise ValueError(
+            f"备份保留份数需在 {MIN_KEEP_COUNT}-{MAX_KEEP_COUNT} 之间"
+        )
     updated = {
         "enabled": bool(payload.get("enabled", current["enabled"])),
         "hour": hour,
-        "keep": current["keep"],
+        "keep": keep,
     }
     with database.connect() as connection:
         connection.execute(

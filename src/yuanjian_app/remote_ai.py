@@ -29,7 +29,21 @@ from .retention import read_retention_setting
 
 
 DEFAULT_ENDPOINT = "https://api.openai.com/v1/responses"
-DAILY_REMOTE_BUDGET = 100  # 免费 API 日预算放宽，原 30 为付费 DeepSeek 设计
+
+DAILY_REMOTE_BUDGET = 2000
+"""每日远程研判上限的**默认值**（2026-09-15 由 100 提到 2000）。
+
+定 2000 的依据：Agnes AI 免费版对文本模型限的是 **20 RPM**（每分钟请求数），
+**没有每日配额**；而远见是顺序请求、单次调用十来秒，结构上到不了 20 RPM。
+所以真正的稀缺资源是"每天总共做多少件"，不是"峰值多快"——旧值 100 天/天
+把用户卡在了每天精确 100 条（真库 judgment_jobs 9/5–9/8 每天停在 100），
+而配额其实是白给的。用户可在设置页覆盖（0~100000，0 = 关闭远程）。
+"""
+
+MIN_DAILY_BUDGET = 0
+MAX_DAILY_BUDGET = 100000
+"""每日上限的可设置区间。0 = 用户明确关闭远程（不再发起任何请求）。
+上限给到 10 万是因为真瓶颈是 RPM 与用户自己的判断，不必在软件里再设一道墙。"""
 
 # Agnes AI（免费 OpenAI 兼容接口）默认配置
 AGNES_AI_BASE_URL = "https://apihub.agnes-ai.com/v1"
@@ -517,41 +531,65 @@ class DeepSeekChatProvider:
             raise
 
 
+AI_SETTINGS_STATE_KEY = "ai_settings"
+
+
+def _clamp_daily_budget(raw) -> int:
+    """每日上限的读侧归一化：非法/越界一律回退默认，**不抛异常**（读侧约定）。"""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DAILY_REMOTE_BUDGET
+    if not MIN_DAILY_BUDGET <= value <= MAX_DAILY_BUDGET:
+        return DAILY_REMOTE_BUDGET
+    return value
+
+
+def read_ai_setting(database) -> dict:
+    """读取远程 AI 设置（runtime_state.ai_settings）。读侧非法值回退默认。
+
+    `AiSettingsService._stored()` 与 `JudgmentQueue` **共用本函数**，
+    所以"设置页存了新上限、队列却还在用旧的常量"这类漂移不会发生——
+    这正是 `daily_budget` 从常量变成设置项时必须先解决的事。
+    """
+    with database.connect() as connection:
+        row = connection.execute(
+            "SELECT value_json FROM runtime_state WHERE state_key=?",
+            (AI_SETTINGS_STATE_KEY,),
+        ).fetchone()
+    value = {}
+    if row:
+        try:
+            loaded = json.loads(row["value_json"])
+            if isinstance(loaded, dict):
+                value = loaded
+        except (ValueError, TypeError):
+            value = {}
+    frequency = str(value.get("frequency", "medium")).strip().lower()
+    if frequency not in ("low", "medium", "high"):
+        frequency = "medium"
+    return {
+        "enabled": bool(value.get("enabled", False)),
+        "endpoint": str(value.get("endpoint") or DEFAULT_ENDPOINT),
+        "model": str(value.get("model") or ""),
+        "frequency": frequency,
+        "daily_budget": _clamp_daily_budget(
+            value.get("daily_budget", DAILY_REMOTE_BUDGET)
+        ),
+    }
+
+
 class AiSettingsService:
     """Persist non-secret AI settings while keeping the token in DPAPI storage."""
 
-    STATE_KEY = "ai_settings"
+    STATE_KEY = AI_SETTINGS_STATE_KEY
 
     def __init__(self, database, secret_store):
         self.database = database
         self.secret_store = secret_store
 
     def _stored(self):
-        with self.database.connect() as connection:
-            row = connection.execute(
-                "SELECT value_json FROM runtime_state WHERE state_key=?",
-                (self.STATE_KEY,),
-            ).fetchone()
-        if row is None:
-            return {
-                "enabled": False,
-                "endpoint": DEFAULT_ENDPOINT,
-                "model": "",
-                "frequency": "medium",
-            }
-        try:
-            value = json.loads(row["value_json"])
-        except json.JSONDecodeError:
-            value = {}
-        freq = str(value.get("frequency", "medium")).strip().lower()
-        if freq not in ("low", "medium", "high"):
-            freq = "medium"
-        return {
-            "enabled": bool(value.get("enabled", False)),
-            "endpoint": str(value.get("endpoint") or DEFAULT_ENDPOINT),
-            "model": str(value.get("model") or ""),
-            "frequency": freq,
-        }
+        return read_ai_setting(self.database)
 
     def get(self):
         value = self._stored()
@@ -571,12 +609,28 @@ class AiSettingsService:
         frequency = str(payload.get("frequency", current["frequency"])).strip().lower()
         if frequency not in ("low", "medium", "high"):
             frequency = "medium"
+        # 写侧越界抛 ValueError（与 hour / days 一致），缺失则沿用当前值。
+        raw_budget = payload.get("daily_budget", current["daily_budget"])
+        try:
+            daily_budget = int(raw_budget)
+        except (TypeError, ValueError):
+            raise ValueError("远程AI每日上限无效")
+        if not MIN_DAILY_BUDGET <= daily_budget <= MAX_DAILY_BUDGET:
+            raise ValueError(
+                f"远程AI每日上限需在 {MIN_DAILY_BUDGET}-{MAX_DAILY_BUDGET} 之间"
+            )
         if "token" in payload:
             self.secret_store.save(str(payload.get("token") or ""))
         configured = bool(self.secret_store.load())
         if enabled and (not model or not configured):
             raise ValueError("启用远程AI前必须填写模型编号和API密钥")
-        value = {"enabled": enabled, "endpoint": endpoint, "model": model, "frequency": frequency}
+        value = {
+            "enabled": enabled,
+            "endpoint": endpoint,
+            "model": model,
+            "frequency": frequency,
+            "daily_budget": daily_budget,
+        }
         now = _iso(datetime.now(timezone.utc))
         with self.database.connect() as connection:
             connection.execute(
@@ -626,7 +680,7 @@ class JudgmentQueue:
         bundle_loader,
         local_provider=None,
         now=lambda: datetime.now(timezone.utc),
-        daily_budget=DAILY_REMOTE_BUDGET,
+        daily_budget=None,
         personal_context_loader=None,
     ):
         self.database = database
@@ -634,7 +688,9 @@ class JudgmentQueue:
         self.bundle_loader = bundle_loader
         self.local_provider = local_provider or LocalHeuristicProvider()
         self.now = now
-        self.daily_budget = int(daily_budget)
+        #: `None`（默认）= 每次 `run_due` 现读设置，用户改完即时生效；
+        #: 传具体数值 = 固定上限（测试与嵌入式用法用这条路径）。
+        self.daily_budget = None if daily_budget is None else int(daily_budget)
         # P2: 远程研判时注入个人利益地图与历史预测的回调（cluster_id -> dict | None）。
         # 本地研判永不调用，保持"local never sees personal interests"隐私边界。
         self.personal_context_loader = personal_context_loader
@@ -730,6 +786,12 @@ class JudgmentQueue:
         now = self.now().astimezone(timezone.utc)
         with self.database.connect() as connection:
             return int(self._remote_used_today(connection, now))
+
+    def _current_daily_budget(self) -> int:
+        """本轮生效的每日上限。构造时没给固定值就从设置现读（用户改完即时生效）。"""
+        if self.daily_budget is not None:
+            return self.daily_budget
+        return read_ai_setting(self.database)["daily_budget"]
 
     def _persist_judgment(self, connection, job, provider, result, now):
         """把一次判读结果落库，**始终返回该簇真实存在的一条研判 id**。
@@ -871,6 +933,8 @@ class JudgmentQueue:
             ).fetchall()
             rows = list(remote_rows) + list(local_rows)
             used = self._remote_used_today(connection, now)
+        # 本轮固定用同一个上限：中途用户改设置也不让"半轮用旧值半轮用新值"。
+        daily_budget = self._current_daily_budget()
         summary = {"succeeded": 0, "deferred": 0, "failed": 0}
         remote_done = 0
         for row in rows:
@@ -889,7 +953,8 @@ class JudgmentQueue:
             if is_remote and self._shutdown.is_set():
                 break
             # 日预算检查（所有远程任务，含失败/格式错误，只要调用了API就计数）
-            if is_remote and used >= self.daily_budget:
+            # 上限 0 = 用户明确关闭远程：`used >= 0` 恒真，全部延到明天，一个请求都不发。
+            if is_remote and used >= daily_budget:
                 tomorrow = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
                 with self.database.connect() as connection:
                     connection.execute(

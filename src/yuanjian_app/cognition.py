@@ -14,6 +14,27 @@ from .text_cleaning import plain_text
 from .external_sources import normalize_published_at
 
 
+# ---- 远程 AI 节流三件套（2026-09-15 调整）------------------------------------
+#
+# 远程研判量由三道闸共同决定，任何一道单独放大都不会真的提高吞吐：
+#   ① 频率闸 `_remote_due()`：距上次远程完成多久才开新一轮（low 夜间窗口 /
+#      medium 6 小时 / high 见下）
+#   ② 每轮名额 `REMOTE_SLOTS_PER_ROUND`：开闸那一轮最多送多少个作业
+#   ③ 每日上限 `ai_settings.daily_budget`（默认 2000，可在设置页改）
+#
+# 三者的匹配关系：应用每 5 分钟轮询一次，high 档间隔 15 分钟 ≈ 每 3 轮开一次闸，
+# 每次最多 25 个 → 约 25 个/15 分钟 ≈ 100 个/小时 → 2000 的日上限约 6~7 小时用满。
+# 也就是说 high 档现在能真正吃满日上限，而旧值（1 小时 + 10 个槽）理论上限只有
+# 240 个/天，日预算提到 2000 也永远用不掉——两处必须一起改才有意义。
+#
+# **不要为了逼近 20 RPM 改成并发请求**：Agnes 免费版限的是每分钟 20 次，而远见是
+# 顺序请求、单次十几秒，实测约 6 次/分钟封顶，结构上撞不到 RPM；一旦并发撞限流，
+# 会走指数退避重试（15/30/60 分钟），净效果比顺序请求更慢。
+REMOTE_INTERVAL_HOURS_HIGH = 0.25
+REMOTE_INTERVAL_HOURS_MEDIUM = 6
+REMOTE_SLOTS_PER_ROUND = 25
+
+
 def _parse_time(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
@@ -592,8 +613,8 @@ class CognitionController:
         return "local"
 
     def _should_use_remote(self, cluster) -> bool:
-        """远程资格闸：Agnes 为免费接口，调用量由频率闸(每小时一轮)+每轮上限
-        +日预算统一节流，因此不再按证据级 E1/E2 设卡——旧逻辑把 90% 的 E1 事件
+        """远程资格闸：Agnes 为免费接口，调用量由频率闸+每轮上限+每日上限统一节流，
+        因此不再按证据级 E1/E2 设卡——旧逻辑把 90% 的 E1 事件
         全部挡在门外，而本地兜底按设计不看个人信息，导致用户看到的 L4 永远是
         与本人无关的套话。现在开闸期间所有待研判事件都有资格走远程，由队列按
         个人影响等级(L4>L3)优先调度。远程未启用时结果会被上层覆盖，天然兼容。"""
@@ -623,15 +644,23 @@ class CognitionController:
 
     def _remote_due(self) -> bool:
         """根据用户设置的频率判断现在是否可以启动远程分析。
-        闸门打开后，每轮（5分钟）最多处理3个远程任务，严格控制API消耗。
+        开闸后，每轮最多送 `REMOTE_SLOTS_PER_ROUND` 个远程作业，实际发出多少由
+        队列的日预算与限流器再决定（见文件顶部"远程 AI 节流三件套"）。
         - low：每天21:00~次日02:00为夜间汇总窗口，分批处理
         - medium：距上次远程任务完成 >= 6小时，开闸后分批处理
-        - high：距上次远程任务完成 >= 1小时，开闸后分批处理
-        远程未启用时返回 False。
+        - high：距上次远程任务完成 >= 15分钟，开闸后分批处理
+        远程未启用、或每日上限被设为 0 时返回 False。
         """
         settings = self.ai_settings.get()
         if not settings.get("enabled"):
             return False
+        # 每日上限 0 = 用户明确关闭远程。这里就关闸（而不是等队列把作业逐条延到
+        # 明天），可以让待办事件当轮改走本地研判，不留一堆 queued_budget 空转。
+        try:
+            if int(settings.get("daily_budget", 0)) <= 0:
+                return False
+        except (TypeError, ValueError):
+            pass
         frequency = settings.get("frequency")
         if not frequency or frequency not in ("low", "medium", "high"):
             frequency = "medium"
@@ -645,9 +674,9 @@ class CognitionController:
                 return False
             return True
         if frequency == "high":
-            interval_hours = 1
+            interval_hours = REMOTE_INTERVAL_HOURS_HIGH
         else:  # medium（默认）
-            interval_hours = 6
+            interval_hours = REMOTE_INTERVAL_HOURS_MEDIUM
         if last is None:
             return True  # 从未跑过远程，立即到期
         elapsed = (self.now() - last).total_seconds()
@@ -744,7 +773,7 @@ class CognitionController:
                 cluster["cluster_id"], cluster["evidence_hash"], provider
             )
         # 开闸时：把已有本地模板研判的高影响事件补送远程AI，结合个人画像升级结论
-        remote_slots = 10 if remote_enabled else 0
+        remote_slots = REMOTE_SLOTS_PER_ROUND if remote_enabled else 0
         if remote_enabled:
             self._enqueue_remote_upgrades(remote_provider, remote_slots)
         # 远程优先处理（不被本地任务挤出），本地任务补齐其余名额；关闸只处理本地

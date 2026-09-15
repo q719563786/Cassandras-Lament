@@ -14,31 +14,58 @@ async function putSetting(path, body) {
   await api(path, {method: 'PUT', body: JSON.stringify(body)});
 }
 
-  // 远程 AI 当前状态文案（端点域名 + 模型 + 启用/密钥状态 + 频率）
+// 远程 AI 的设置端点是 POST（不是 PUT）：单独一个写手，别把方法名当参数到处传。
+async function postSetting(path, body) {
+  await api(path, {method: 'POST', body: JSON.stringify(body)});
+}
+
+// 备份体积（诊断面板与用户手册都用"922 MB"这种量级说话，不用字节数）
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return '大小未知';
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let size = bytes;
+  let unit = -1;
+  while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1; }
+  return unit < 0 ? `${size} B` : `${size.toFixed(1)} ${units[unit]}`;
+}
+
+  // 远程 AI 当前状态文案（端点域名 + 模型 + 启用/密钥状态 + 频率 + 每日上限）
 function aiStatusText(ai) {
   if (!ai) return '读取中…未知';
   const domain = (ai.endpoint || '').replace(/^https?:\/\//, '').split('/')[0] || '—';
   const state = ai.enabled ? '已启用' : '未启用';
   const key = ai.configured ? '密钥已配置' : '密钥未配置';
-  const freqMap = {low: '低(每日21点)', medium: '中(每6小时)', high: '高(每小时)'};
+  const freqMap = {low: '低(每日21点)', medium: '中(每6小时)', high: '高(每15分钟)'};
   const freq = freqMap[ai.frequency] || '中(每6小时)';
-  return `${state} · 模型 ${ai.model || '—'} · 端点 ${domain} · ${key} · 频率 ${freq}`;
+  const budget = Number(ai.daily_budget);
+  const quota = Number.isFinite(budget) ? (budget > 0 ? `${budget} 次/天` : '已关闭远程') : '—';
+  return `${state} · 模型 ${ai.model || '—'} · 端点 ${domain} · ${key} · 频率 ${freq} · 每日上限 ${quota}`;
 }
 
-// 通用 toggle 行绑定：只绑定 data-key 匹配的开关，避免重复绑定
-async function bindToggle(root, path, key, extra) {
+// 通用 toggle 行绑定：只绑定 data-key 匹配的开关，避免重复绑定。
+// 点的当下就落库：成功 toast、失败回滚开关并显示真实原因（绝不静默）。
+// options.send：落库用的写手，默认 putSetting（远程 AI 那个端点是 POST，传 postSetting）。
+// options.after：保存成功后的跟进动作（如回读状态行）。它失败**不**回滚开关 ——
+// 设置确实已经落库了，回滚才是骗人。
+async function bindToggle(root, path, key, extra, options = {}) {
   const toggle = root.querySelector(`.toggle[data-key="${key}"]`);
   if (!toggle) return;
+  const {send = putSetting, after} = options;
   toggle.addEventListener('click', async () => {
     const next = toggle.getAttribute('aria-checked') !== 'true';
     toggle.setAttribute('aria-checked', String(next));
     try {
       const body = {enabled: next, ...(extra ? extra(next, root) : {})};
-      await putSetting(path, body);
+      await send(path, body);
       showToast('设置已保存');
     } catch (error) {
       toggle.setAttribute('aria-checked', String(!next)); // 失败回滚，不静默
       showToast(`保存失败：${error.message}`, 'err');
+      return;
+    }
+    if (after) {
+      try { await after(next); } catch (_) { /* 已保存成功，只是状态行没刷新 */ }
     }
   });
 }
@@ -54,18 +81,26 @@ export async function render(root) {
   ]);
 
   const hours = Array.from({length: 24}, (_, h) => `<option value="${h}"${Number(backup?.hour) === h ? ' selected' : ''}>${String(h).padStart(2, '0')}:00</option>`).join('');
+  // 读取失败时退到后端默认值 7，不要让输入框显示 NaN
+  const keepCount = Number(backup?.keep) > 0 ? Number(backup.keep) : 7;
 
   root.innerHTML = `<div class="u-max">
     <section class="set-sec">
       <h2>自动备份</h2>
       <div class="card">
-        ${toggleRow({key: 'backup', name: '每日自动备份', desc: '跨过目标时段后产出 backups/ 新备份，滚动保留 7 份', on: Boolean(backup?.enabled)})}
+        ${toggleRow({key: 'backup', name: '每日自动备份', desc: `跨过目标时段后产出 backups/ 新备份，滚动保留 ${keepCount} 份`, on: Boolean(backup?.enabled)})}
         <div class="set-row">
           <div><p class="name">目标时段</p><p class="desc">${backup ? '每天在这个时段附近执行一次' : '读取中…未知'}</p></div>
           <div class="u-row">
             <select class="btn btn-sm" data-backup-hour ${backup ? '' : 'disabled'} aria-label="备份目标时段">${hours}</select>
             <button type="button" class="btn btn-sm" data-backup-now ${backup ? '' : 'disabled'}>立即备份</button>
           </div>
+        </div>
+        <p class="u-dim u-mt-sm" data-backup-result hidden></p>
+        <div class="set-row">
+          <div><p class="name">备份保留份数（1–30，越多占磁盘越多）</p><p class="desc">${backup ? `当前保留 ${keepCount} 份` : '读取中…未知'} · 只清理超出的最旧自动备份，升级前的手工快照永不删除</p></div>
+          <div class="field"><label for="backup-keep" class="sr-only">备份保留份数</label>
+          <input id="backup-keep" type="number" min="1" max="30" value="${escapeHtml(String(keepCount))}" ${backup ? '' : 'disabled'}></div>
         </div>
       </div>
     </section>
@@ -110,11 +145,11 @@ export async function render(root) {
       <div class="card">
         <div class="set-row">
           <div><p class="name">启用远程 AI</p><p class="desc">开启后远见用你填的模型做外部研判，密钥只存本机</p></div>
-          <button type="button" class="toggle" role="switch" data-ai-enabled
+          <button type="button" class="toggle" role="switch" data-key="ai" data-ai-enabled
             aria-checked="${ai?.enabled ? 'true' : 'false'}" aria-label="启用远程AI"></button>
         </div>
         <div class="set-row">
-          <div><p class="name">分析频率</p><p class="desc">低=每天21点汇总一次 · 中=每6小时 · 高=每小时</p></div>
+          <div><p class="name">分析频率</p><p class="desc">低=每天21点汇总一次 · 中=每6小时 · 高=每15分钟</p></div>
           <div class="u-row" role="radiogroup" aria-label="AI分析频率">
             <button type="button" class="btn btn-sm ${ai?.frequency === 'low' ? 'btn-primary' : ''}" data-freq="low">低</button>
             <button type="button" class="btn btn-sm ${ai?.frequency === 'medium' ? 'btn-primary' : ''}" data-freq="medium">中</button>
@@ -128,6 +163,9 @@ export async function render(root) {
           <input id="ai-model" name="model" type="text" placeholder="如 gpt-4o / claude-3-5-sonnet" value="${escapeHtml(String(ai?.model || ''))}"></div>
           <div class="field u-mb-md"><label for="ai-key">API 密钥</label>
           <input id="ai-key" name="token" type="password" placeholder="留空 = 不修改已存密钥"></div>
+          <div class="field u-mb-md"><label for="ai-daily-budget">远程 AI 每日上限（0–100000）</label>
+          <input id="ai-daily-budget" name="daily_budget" type="number" min="0" max="100000" required value="${escapeHtml(String(ai?.daily_budget ?? 2000))}">
+          <p class="u-dim u-mt-sm">每天最多让远程 AI 研判多少条事件；填 0 = 关闭远程，只在本机研判。默认 2000。</p></div>
           <div class="u-row u-mb-md">
             <button type="button" class="btn btn-sm btn-secondary" data-ai-preset-agnes>一键填入 Agnes AI（免费）</button>
           </div>
@@ -189,44 +227,107 @@ export async function render(root) {
   </div>`;
 
   // 三组开关各自绑定到对应端点（key 过滤，互不串扰）
-  bindToggle(root, '/api/settings/backup', 'backup', (next, r) => ({hour: Number(r.querySelector('[data-backup-hour]')?.value || 3)}));
+  // 备份的每个字段 change 时都把另一个一起带上（显式读 DOM），避免"改一个把另一个
+  // 打回默认"。注意 bindToggle 拼体是 {enabled: next, ...extra()}，extra 在后、会覆盖
+  // enabled —— 所以 toggle 用的 extra 里**不能**再带 enabled，否则开关永远写回旧值。
+  //
+  // 时段/份数这两条路径同样**不带** enabled：这里原本写的是 `Boolean(backup?.enabled)`，
+  // 而 backup 是**页面加载时**读到的快照 —— 用户先点开「每日自动备份」，再去改目标时段，
+  // 就会把那一瞬间的旧值 false 一起写回去，开关被悄悄关掉（备份从此不再跑）。
+  // 后端 write_backup_setting 在缺该键时沿用当前值，所以不带正是我们要的。
+  const backupPayload = (hour, keep) => ({
+    hour: Number(hour),
+    keep: Number(keep),
+  });
+  bindToggle(root, '/api/settings/backup', 'backup', (next, r) => ({
+    hour: Number(r.querySelector('[data-backup-hour]')?.value ?? 3),
+    keep: Number(r.querySelector('#backup-keep')?.value ?? 7),
+  }));
   root.querySelector('[data-backup-hour]')?.addEventListener('change', async (event) => {
     try {
-      await putSetting('/api/settings/backup', {enabled: Boolean(backup?.enabled), hour: Number(event.target.value)});
+      await putSetting('/api/settings/backup', backupPayload(
+        event.target.value,
+        root.querySelector('#backup-keep')?.value ?? 7,
+      ));
       showToast('目标时段已保存');
     } catch (e) { showToast(`保存失败：${e.message}`, 'err'); }
   });
-  root.querySelector('[data-backup-now]')?.addEventListener('click', () => showToast('备份将在下一个目标时段执行'));
+  root.querySelector('#backup-keep')?.addEventListener('change', async (event) => {
+    try {
+      await putSetting('/api/settings/backup', backupPayload(
+        root.querySelector('[data-backup-hour]')?.value ?? 3,
+        event.target.value,
+      ));
+      showToast('备份保留份数已保存');
+    } catch (e) { showToast(`保存失败：${e.message}`, 'err'); }
+  });
+  // 立即备份：真的产出一份备份（POST /api/backup/run），成功显示文件名与体积，
+  // 失败显示后端给的真实原因（能力未装配 503、落盘失败 500…）。
+  // 不看「每日自动备份」开关：手动按钮的意义就是当下就要一份。
+  root.querySelector('[data-backup-now]')?.addEventListener('click', async (event) => {
+    const btn = event.currentTarget;
+    btn.disabled = true;
+    try {
+      const result = await api('/api/backup/run', {method: 'POST'});
+      const name = String(result?.path || '').split(/[\\/]/).pop() || '新备份';
+      const size = formatBytes(result?.bytes);
+      const line = root.querySelector('[data-backup-result]');
+      if (line) {
+        line.textContent = `已生成 ${result?.path || name}（${size}）`;
+        line.hidden = false;
+      }
+      showToast(`备份完成：${name}（${size}）`);
+    } catch (e) {
+      showToast(`备份失败：${e.message}`, 'err');
+    } finally { btn.disabled = false; }
+  });
 
   // 保留天数 + 开关持久化（两个天数一起提交，避免互相覆盖）
-  const retentionPayload = (days, clusterDays) => ({
-    enabled: Boolean(retention?.enabled),
-    days: Number(days),
-    cluster_days: Number(clusterDays),
+  // 与备份同理：extra 里**不能**带 enabled。bindToggle 拼体是
+  // `{enabled: next, ...extra()}`，extra 在后 —— 带 enabled 就会被页面加载时的旧值
+  // 覆盖，开关点下去永远写回旧值（2026-09-15 修的就是这个）。
+  // 天数路径不带 enabled 是安全的：write_retention_setting 在 payload 缺该键时
+  // 沿用当前值（`bool(payload.get("enabled", current["enabled"]))`），不会把它当关闭。
+  // 天数输入：空值/非法值一律**拒绝**，绝不静默回退默认。
+  // 原先写的是「输入框空了就用默认天数」：保留天数变小 = 更早删数据 ——
+  // 清一下输入框就变成 60，等于悄悄多删 30 天。min/max 属性只是浏览器提示、
+  // 不是保护（而且不清空也能直接键入越界值），所以边界在这里按 DOM 上的
+  // min/max 显式判一次，并把输入框恢复成上一次真正生效的值。
+  const readDays = (input, label, fallback) => {
+    const raw = String(input?.value ?? '').trim();
+    const value = Number(raw);
+    const min = Number(input?.getAttribute('min'));
+    const max = Number(input?.getAttribute('max'));
+    const inRange = (!Number.isFinite(min) || value >= min)
+      && (!Number.isFinite(max) || value <= max);
+    if (raw === '' || !Number.isInteger(value) || !inRange) {
+      if (input) input.value = String(fallback);
+      throw new Error(`${label}需为 ${min}-${max} 之间的整数，已保留原值`);
+    }
+    return value;
+  };
+  // 上一次**生效**的天数：校验失败时用它把输入框恢复回去。
+  const savedDays = {
+    days: Number(retention?.days ?? 60),
+    cluster_days: Number(retention?.cluster_days ?? 180),
+  };
+  const retentionPayload = (scope, saved) => ({
+    days: readDays(scope.querySelector('#retention-days'), '原始条目保留天数', saved.days),
+    cluster_days: readDays(
+      scope.querySelector('#retention-cluster-days'), '结论明细保留天数', saved.cluster_days,
+    ),
   });
-  bindToggle(root, '/api/settings/retention', 'retention', (next, r) => retentionPayload(
-    r.querySelector('#retention-days')?.value || 60,
-    r.querySelector('#retention-cluster-days')?.value || 180,
-  ));
-  root.querySelector('#retention-days')?.addEventListener('change', async (event) => {
+  const saveRetention = async (message) => {
     try {
-      await putSetting('/api/settings/retention', retentionPayload(
-        event.target.value,
-        root.querySelector('#retention-cluster-days')?.value || 180,
-      ));
-      showToast('原始条目保留天数已保存');
+      const body = retentionPayload(root, savedDays);
+      await putSetting('/api/settings/retention', body);
+      Object.assign(savedDays, body); // 提交成功才更新"上一次生效的值"
+      showToast(message);
     } catch (e) { showToast(`保存失败：${e.message}`, 'err'); }
-  });
-
-  root.querySelector('#retention-cluster-days')?.addEventListener('change', async (event) => {
-    try {
-      await putSetting('/api/settings/retention', retentionPayload(
-        root.querySelector('#retention-days')?.value || 60,
-        event.target.value,
-      ));
-      showToast('结论明细保留天数已保存');
-    } catch (e) { showToast(`保存失败：${e.message}`, 'err'); }
-  });
+  };
+  bindToggle(root, '/api/settings/retention', 'retention', (next, r) => retentionPayload(r, savedDays));
+  root.querySelector('#retention-days')?.addEventListener('change', () => saveRetention('原始条目保留天数已保存'));
+  root.querySelector('#retention-cluster-days')?.addEventListener('change', () => saveRetention('结论明细保留天数已保存'));
 
   // 学习开关闭环
   bindToggle(root, '/api/settings/learning', 'learning');
@@ -242,13 +343,6 @@ export async function render(root) {
     } catch (e) {
       showToast(`导出失败：${e.message}`, 'err');
     } finally { btn.disabled = false; }
-  });
-
-  // 远程 AI 启用开关：仅切换 aria-checked，提交时读取
-  const aiToggle = root.querySelector('[data-ai-enabled]');
-  aiToggle?.addEventListener('click', () => {
-    const next = aiToggle.getAttribute('aria-checked') !== 'true';
-    aiToggle.setAttribute('aria-checked', String(next));
   });
 
   // Agnes AI 快捷预设：填入端点和模型，用户只需填 API 密钥
@@ -274,14 +368,30 @@ export async function render(root) {
   const aiStatus = root.querySelector('[data-ai-status]');
   if (aiStatus) aiStatus.textContent = aiStatusText(ai);
 
+  // 远程 AI 启用开关：和旁边三个开关一样点了就落库（端点方法是 POST，不是 PUT）。
+  // 提交体只带 {enabled}：AiSettingsService.save() 对缺键沿用当前值，所以
+  // endpoint / model / frequency / daily_budget 不会被拖回默认。
+  // 点开时后端会校验「模型 + 密钥已配置」，缺失就 400 → 开关回滚 + 真实原因，
+  // 而不是像以前那样开关亮着、直到按保存才报错。
+  bindToggle(root, '/api/settings/ai', 'ai', undefined, {
+    send: postSetting,
+    after: async () => {
+      const updated = await api('/api/settings/ai'); // 回读，确认 UI 状态保持
+      if (aiStatus) aiStatus.textContent = aiStatusText(updated);
+    },
+  });
+
   root.querySelector('[data-ai-form]')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const endpoint = event.target.querySelector('#ai-endpoint').value.trim();
     const model = event.target.querySelector('#ai-model').value.trim();
     const token = event.target.querySelector('#ai-key').value.trim();
     const enabled = root.querySelector('[data-ai-enabled]')?.getAttribute('aria-checked') === 'true';
+    // 空值绝不能被当成 0 —— 0 的含义是"关闭远程"，静默关掉远程是危险的默认值。
+    const budgetRaw = event.target.querySelector('#ai-daily-budget').value.trim();
+    const daily_budget = budgetRaw === '' ? Number(ai?.daily_budget ?? 2000) : Number(budgetRaw);
     // 提交体字段名与 remote_ai.AiSettingsService.save() 读取键逐一对齐
-    const body = {enabled, endpoint, model, frequency: selectedFreq};
+    const body = {enabled, endpoint, model, frequency: selectedFreq, daily_budget};
     if (token) body.token = token; // 留空 = 不修改已存密钥（save 仅在有 token 键时覆盖）
     const btn = event.target.querySelector('button[type="submit"]');
     btn.disabled = true;

@@ -28,10 +28,12 @@ export async function render(root) {
   const coverage = [enabledCount, totalCount].every(Number.isFinite) ? `${enabledCount} / ${totalCount}` : '未知';
   const coverageState = totalCount > 0 && enabledCount === 0 ? 'err' : (Number.isFinite(enabledCount) && enabledCount > 0 ? 'ok' : 'warn');
 
-  // AI：启用状态 + 今日用量
+  // AI：启用状态 + 今日用量 / 每日上限
   const aiEnabled = Boolean(diag?.ai_enabled);
   const aiJobs = Number(diag?.ai_jobs_today);
-  const aiValue = aiEnabled ? `已启用 · 今日 ${Number.isFinite(aiJobs) ? aiJobs : 0} 次` : '未启用（默认关闭）';
+  const aiBudget = Number(diag?.ai_daily_budget);
+  const aiQuota = Number.isFinite(aiBudget) ? ` / 上限 ${aiBudget}` : '';
+  const aiValue = aiEnabled ? `已启用 · 今日 ${Number.isFinite(aiJobs) ? aiJobs : 0}${aiQuota} 次` : '未启用（默认关闭）';
 
   // DB 大小
   const dbBytes = Number(diag?.db_bytes);
