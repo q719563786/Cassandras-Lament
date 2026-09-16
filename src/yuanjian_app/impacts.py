@@ -542,7 +542,17 @@ class ImpactService:
             )
         return output
 
-    def confirm_candidate(self, impact_id: str, probability: float) -> dict:
+    def confirm_candidate(self, impact_id: str, probability: float, by: str = "user") -> dict:
+        """确认一条候选预测并写入不可变账本。
+
+        `by` 记录这条预测是怎么进来的，落库到 `forecasts.confirmed_by`：
+          - 'user'：本人在界面上选的概率（默认值，因为这是界面调用入口）
+          - 'auto'：auto_confirm_all 按 E2+ 多源证据自动确认
+        账本是不可变的，所以**必须能一眼分出哪些是人选的、哪些是机器填的** ——
+        否则校准评分（Brier）里混着人类从未做过的预测，分数就没有意义。
+        """
+        if by not in ("user", "auto"):
+            raise ValueError("确认来源只能是 user 或 auto")
         try:
             probability = round(float(probability), 2)
         except (TypeError, ValueError):
@@ -570,6 +580,7 @@ class ImpactService:
                 "opposing_evidence": candidate["opposing_evidence"],
                 "falsification": candidate["falsification"],
                 "recommended_action": candidate["recommended_action"],
+                "confirmed_by": by,
             }
         )
         candidate["confirmed_forecast_id"] = result["forecast_id"]
@@ -583,18 +594,32 @@ class ImpactService:
 
 
     def auto_confirm_all(self) -> dict:
-        """全自动确认所有未确认的L3/L4候选预测，无需用户手动操作。"""
+        """自动确认未确认的 L3/L4 候选预测。
+
+        **证据等级闸（v1.1 补）**：只对 **E2 及以上**（多来源互证）自动确认。
+        E1 是单来源线索，无论多重要都**不得**自动进入不可变账本 —— 必须由本人
+        选择概率后手动确认。
+
+        为什么必须是这一层闸：v1.0 曾用"把 E1 的告警级别从 L4 降到 L3"来阻止它
+        进账本，但本函数的筛选条件**只看 alert_level、不看证据等级**，于是降级后的
+        E1 照样被自动确认 —— **改档位不等于加闸**，那次修复实际没有生效。
+
+        证据等级用白名单（E2/E3/E4）而不是黑名单排除 E1：关联不到事件簇、
+        或 evidence_level 为空的行，同样不该自动写入不可变账本。
+        """
         confirmed = 0
         skipped = 0
         errors = []
         with self.database.connect() as connection:
             rows = connection.execute(
                 """
-                SELECT impact_id, candidate_json, alert_level
-                FROM personal_impacts
-                WHERE candidate_json IS NOT NULL AND candidate_json != ''
-                  AND alert_level IN ('L3','L4')
-                  AND user_label NOT IN ('false_positive','dismissed')
+                SELECT p.impact_id, p.candidate_json, p.alert_level
+                FROM personal_impacts p
+                JOIN event_clusters c ON c.cluster_id = p.cluster_id
+                WHERE p.candidate_json IS NOT NULL AND p.candidate_json != ''
+                  AND p.alert_level IN ('L3','L4')
+                  AND p.user_label NOT IN ('false_positive','dismissed')
+                  AND c.evidence_level IN ('E2','E3','E4')
                 """
             ).fetchall()
         for row in rows:
@@ -606,7 +631,7 @@ class ImpactService:
                 low = float(candidate.get("probability_low", 0.3))
                 high = float(candidate.get("probability_high", 0.7))
                 probability = _nearest_probability((low + high) / 2)
-                self.confirm_candidate(row["impact_id"], probability)
+                self.confirm_candidate(row["impact_id"], probability, by="auto")
                 confirmed += 1
             except Exception as exc:
                 errors.append(f"{row['impact_id']}: {exc}")

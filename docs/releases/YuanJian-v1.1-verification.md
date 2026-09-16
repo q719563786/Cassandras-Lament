@@ -1,10 +1,15 @@
 # YuanJian v1.1 verification
 
-Verified on 2026-09-14 on Windows. **This record covers unreleased work.** The
-`__version__` string in `src/yuanjian_app/__init__.py` is still `1.0.0`; bumping it,
-building a package and publishing a release are separate decisions that were **not**
-made in this pass. The version number in this filename marks the intended next
-release, not a state that has been shipped.
+Verified on 2026-09-14, released as **v1.1 on 2026-09-16**. The `__version__` string in
+`src/yuanjian_app/__init__.py` is now `1.1.0`, matching this record's filename.
+
+Note on this document's history: it was first written on 2026-09-14 while the work was
+still unreleased, and at that time it explicitly recorded that `__version__` was still
+`1.0.0`. That gap — code shipped for days while the version string and the README title
+stayed at 1.0 — is the reason `tests/test_build_config.py` now separates two concerns:
+a **format** assertion on `__version__` (so a future bump does not trip the test) and a
+**consistency** assertion that every front-end file header matches `__version__`
+(so the drift that this test was originally written for still cannot recur).
 
 ## Scope
 

@@ -1,4 +1,4 @@
-// 远见 v1.0 · hash 路由 —— #/today #/tell #/calib #/sources #/diag #/settings #/cluster/:id
+// 远见 v1.1 · hash 路由 —— #/today #/tell #/calib #/sources #/diag #/settings #/cluster/:id
 import { showLoading, showPageError } from './api.js';
 import * as today from './views/today.js';
 import * as tell from './views/tell.js';

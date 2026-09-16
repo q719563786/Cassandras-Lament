@@ -1,4 +1,4 @@
-# 远见 v1.0
+# 远见 v1.1
 
 远见是一个只在 Windows 本机运行的外部认知雷达。它持续读取公开信息，把同一事件的多篇报道合并，区分单源线索与多源证据，生成结构化判断，再在本机映射到个人利益和候选预测。
 
@@ -55,7 +55,7 @@ python -m yuanjian_app.application
 - 断网可用的本地研判，输出事实、参与者、因果链、不确定性、时间窗和反证触发器。
 - 可选 OpenAI Responses API 严格结构化输出；默认关闭，无密钥、认证失败、限流、超时或非法输出时退回本地。
 - 私人利益只在本机映射。E1 无论多重要都不得超过 L3。
-- 候选预测必须人工选择固定概率后，才能进入不可变预测账本。
+- 预测账本的每一条都标明来源：**这一条是你自己选的概率，还是系统自动填的**。自动填入只对 E2 及以上的多源证据生效；E1 单源线索无论多重要，都必须由本人确认才能进入账本。
 - 单实例后台、登录启动选项、运行状态、6小时通知节流和本地通知中心。
 - pywebview 原生桌面窗口与系统托盘；关闭窗口即安全退出（停后台监控、释放端口、退出进程），托盘菜单也可选择显示、运行认知、暂停监控或退出。
 - “立即更新判断”显示实时忙碌状态、耗时以及本次处理、研判、利益影响和提醒数量。
@@ -80,7 +80,7 @@ python -m yuanjian_app.application
 powershell -ExecutionPolicy Bypass -File build\build_windows.ps1
 ```
 
-脚本会自行创建 `.venv-build` 虚拟环境并安装上表列出的固定版本依赖，然后按 [`build/yuanjian.spec`](build/yuanjian.spec) 打包，入口为 [`build/windows_entry.py`](build/windows_entry.py)。产物输出到 `dist\YuanJian\`（onedir，约 42 MB，`YuanJian.exe` 约 6.4 MB）。
+脚本会自行创建 `.venv-build` 虚拟环境并安装上表列出的固定版本依赖，然后按 [`build/yuanjian.spec`](build/yuanjian.spec) 打包，入口为 [`build/windows_entry.py`](build/windows_entry.py)。产物输出到 `dist\YuanJian\`（onedir，约 42 MB，`YuanJian.exe` 约 6.9 MB）。
 
 **打包烟测**
 
@@ -96,8 +96,8 @@ $env:PYTHONWARNINGS='error::ResourceWarning'
 python -m unittest discover -s tests -v
 ```
 
-测试要求 `ResourceWarning` 视为错误。当前 220 个测试全部通过。当前版本的验证记录见
-[`docs/releases/YuanJian-v1.0-verification.md`](docs/releases/YuanJian-v1.0-verification.md)，
+测试要求 `ResourceWarning` 视为错误。当前 532 个测试全部通过。当前版本的验证记录见
+[`docs/releases/YuanJian-v1.1-verification.md`](docs/releases/YuanJian-v1.1-verification.md)，
 按时间线的变更摘要见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 **发布前隐私自检**
@@ -110,4 +110,18 @@ python tools\privacy_scan.py
 
 ## 变更记录要点
 
-- 2026-09-13：修复 E1 证据等级的上限。此前 `_alert_level()` 只按分数分档，E1 可以算到 L4；而 `map_judgment()` 会对 L4 候选自动确认，等于单一来源线索未经人工选择概率就写入不可变预测账本，同时从待确认列表消失。现已在 `impacts.py` 强制 E1 不得超过 L3，与本文档和 [`PRIVACY.md`](PRIVACY.md) 的声明一致。完整测试套件 207 项全部通过。
+- **v1.1（2026-09-16）**：一轮独立审计后的修复，四组。
+  ① **隐私边界**：此前远程研判会把个人近况、利益对象与关系、预测历史一并发送给所配置的
+  AI 服务，与 `PRIVACY.md` 的承诺冲突。现在远程请求**只含公开证据包**，并有队列侧剥离与
+  provider 出口剥离两道独立防线；本机个性化不受影响。
+  ② **数据完整性**：「判读不可变 / 预测账本不可变」此前并未真正强制 —— `INSERT OR REPLACE`
+  可绕过触发器（默认配置下 REPLACE 的冲突消解不触发删除触发器），且 `resolutions`
+  完全没有触发器。均已修复。
+  ③ **数据安全**：备份保留已静默退化（承诺 7 份、实际 3 份，且诊断面板指向一份旧空壳）；
+  已修复，且保留份数现在**可由用户自行调整**。
+  ④ **设置真正可改**：修了四处「值存进去但不生效」的缺陷，其中「改备份时段会把备份开关
+  悄悄关掉」后果最重。另「立即备份」按钮此前是空壳，现在真的会备份。
+- **v1.1**：外部 AI 的**每日上限可配置**（默认 2000，原写死 100），并新增**请求速率闸**
+  （两次请求至少间隔 5 秒）—— 放开配额后实测撞了服务商限流，13% 的请求被拒且退避过长，
+  净吞吐反被压住。被限流的退避同时从 15 分钟缩短到 1/2/4 分钟。
+- 2026-09-13：修复 E1 证据等级的上限。此前 `_alert_level()` 只按分数分档，E1 可以算到 L4；而 `map_judgment()` 会对 L4 候选自动确认，等于单一来源线索未经人工选择概率就写入不可变预测账本。现已在 `impacts.py` 强制 E1 不得超过 L3。**注：该次修复后来被发现并未真正生效** —— 自动确认只筛告警级别、不看证据等级，E1 降到 L3 后照样被自动确认；已在 v1.1 补上证据等级闸（E1 一律不得自动确认），并让账本标明每条的来源是人类选择还是机器填入。完整测试套件在该次改动时全部通过。

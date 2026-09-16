@@ -15,12 +15,21 @@ const HELP_HTML = `<details class="card calib-help u-mb-md">
     </div>
   </details>`;
 
-// 远见 v1.0 · 校准面板 —— KPI×4 / Brier 周序列 SVG / 按类别条形 / 候选确认 + 预测账本（AC-02/AC-08）
+// 远见 v1.1 · 校准面板 —— KPI×4 / Brier 周序列 SVG / 按类别条形 / 候选确认 + 预测账本（AC-02/AC-08）
 import { api, escapeHtml, showToast, paginationHtml, bindPagination, pageRange } from '../api.js';
 import { statusLabel, categoryLabel, formatLocalTime } from '../ui_core.js';
 
 // 无数据 / 端点未就绪：明示"样本不足"，绝不渲染 0 或假数（AC-02）
 const NO_SAMPLE = `<div class="empty"><p>样本不足——已结算的预测还太少，等远见多跑几轮再看校准。</p></div>`;
+
+// 账本每条的来源。必须能一眼看出哪些是"你选的"、哪些是系统自动填的 ——
+// 否则校准分数里混着人类从未做过的预测，那个分数就没有意义。
+function provenanceLabel(value) {
+  const key = String(value || 'unknown');
+  if (key === 'user') return '你选的';
+  if (key === 'auto') return '系统自动';
+  return '早期不明';
+}
 
 function kpiCard(label, value, dim = '') {
   return `<div class="card"><div class="kpi-label">${escapeHtml(label)}</div><div class="kpi-num ${dim}">${escapeHtml(value)}</div></div>`;
@@ -100,6 +109,7 @@ function ledgerRows(forecasts) {
       <td>${escapeHtml(String(f.statement || f.summary || '').slice(0, 80))}</td>
       <td>${escapeHtml(categoryLabel(f.category))}</td>
       <td class="num">${escapeHtml(f.probability != null ? `${(Number(f.probability) * 100).toFixed(0)}%` : '—')}</td>
+      <td>${escapeHtml(provenanceLabel(f.confirmed_by))}</td>
       <td>${escapeHtml(statusLabel(f.status))}</td>
       <td>${escapeHtml(formatLocalTime(f.created_at))}</td>
       <td class="resolve-cell">${resolveCell}</td>
@@ -161,7 +171,7 @@ export async function render(root) {
     <div id="calib-candidates">${candidatesHtml(calib?.candidates)}</div>
     <h2 class="section-title u-mt-md">预测账本（可结算）</h2>
     <section class="card"><div class="table-wrap"><table>
-      <thead><tr><th>预测</th><th>类别</th><th>概率</th><th>状态</th><th>创建</th><th>结算</th></tr></thead>
+      <thead><tr><th>预测</th><th>类别</th><th>概率</th><th>来源</th><th>状态</th><th>创建</th><th>结算</th></tr></thead>
       <tbody id="ledger-body"></tbody>
     </table></div><div id="ledger-page"></div></section>
   </div>`;

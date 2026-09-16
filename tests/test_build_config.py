@@ -10,9 +10,14 @@ from yuanjian_app import __version__
 class BuildConfigTests(unittest.TestCase):
     project = Path(__file__).resolve().parents[1]
 
-    def test_package_reports_version_100(self):
+    def test_package_version_is_a_semver_string(self):
         # v1.0：行动雷达首页 + 登高望远方法论规则引擎 + 信源分级。
-        self.assertEqual(__version__, "1.0.0")
+        # 只断言「版本号是合法的三段式 semver」，不再把版本钉死在某个数字上；
+        # 这样以后再升版（如 1.1.0）不会先撞测试。
+        self.assertTrue(
+            re.fullmatch(r"\d+\.\d+\.\d+", __version__),
+            f"__version__={__version__!r} 不是合法的三段式 semver（应为 N.N.N）",
+        )
 
     def test_source_version_labels_match_the_package_version(self):
         """源码里的「远见 vX.Y」各处必须与 __version__ 一致。

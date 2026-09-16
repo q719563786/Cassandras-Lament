@@ -1,4 +1,4 @@
-// 远见 v1.0 · API 封装 + 通用 UI 反馈 —— token 认证 / toast / loading / 错误面板 / 分页
+// 远见 v1.1 · API 封装 + 通用 UI 反馈 —— token 认证 / toast / loading / 错误面板 / 分页
 import { yjIcon } from './icons.js';
 import { pageRange } from './ui_core.js';
 

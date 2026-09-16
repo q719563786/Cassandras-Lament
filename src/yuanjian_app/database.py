@@ -62,7 +62,13 @@ class Database:
                     forecast_id TEXT PRIMARY KEY,
                     status TEXT NOT NULL,
                     window_end TEXT NOT NULL,
-                    category TEXT NOT NULL DEFAULT 'general'
+                    category TEXT NOT NULL DEFAULT 'general',
+                    -- 这条预测是怎么进账本的：'user'（本人在界面选的概率）、
+                    -- 'auto'（系统按 E2+ 多源证据自动确认）、
+                    -- 'unknown'（v1.1 之前的历史行，**来源已不可考，不要假装知道**）。
+                    -- 放在 forecasts 而不是 personal_impacts：后者是有保留期的明细表，
+                    -- 会被清理规则删掉，放那里等于来源信息会随明细一起消失。
+                    confirmed_by TEXT NOT NULL DEFAULT 'unknown'
                 );
                 CREATE TABLE IF NOT EXISTS forecast_versions(
                     forecast_id TEXT NOT NULL,
@@ -423,6 +429,9 @@ class Database:
             ("external_sources", "category", "TEXT NOT NULL DEFAULT 'general'"),
             ("external_sources", "user_managed", "INTEGER NOT NULL DEFAULT 0"),
             ("external_sources", "tier", "TEXT NOT NULL DEFAULT 'T3'"),
+            # forecasts 无不可变触发器，所以 ADD COLUMN 可用；DEFAULT 会自动填到
+            # 已有的历史行上（这正是我们要的：它们无法归因，标成 unknown）。
+            ("forecasts", "confirmed_by", "TEXT NOT NULL DEFAULT 'unknown'"),
         )
         existing_tables = {
             row[0]

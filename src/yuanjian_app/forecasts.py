@@ -105,6 +105,13 @@ def _normalized_card(data, forecast_id=None, created_at=None):
         identity = f"F-{datetime.now(timezone.utc):%Y%m%d}-{uuid4().hex[:8].upper()}"
     if not re.fullmatch(r"[A-Za-z0-9._-]{3,64}", identity):
         raise ValueError("预测编号格式无效")
+    # 这条预测怎么进账本的：user（本人选的）/ auto（系统按 E2+ 自动确认）/
+    # unknown（v1.1 之前的历史行，来源不可考）。
+    # **必须在这里显式列入返回表** —— 本函数重建 dict，不在返回表里的键会被静默丢掉，
+    # 调用方传进来的值就消失了（这个字段第一次加上时正是这样没生效的）。
+    confirmed_by = _single_line(data.get("confirmed_by", "unknown")) or "unknown"
+    if confirmed_by not in ("user", "auto", "unknown"):
+        confirmed_by = "unknown"
     return {
         "forecast_id": identity,
         "created_at": _single_line(
@@ -129,6 +136,7 @@ def _normalized_card(data, forecast_id=None, created_at=None):
         "alternatives": str(data.get("alternatives", "尚未补充。" )).strip(),
         "falsification": str(data.get("falsification", criteria)).strip(),
         "recommended_action": str(data.get("recommended_action", "继续观察并在复核日更新。" )).strip(),
+        "confirmed_by": confirmed_by,
     }
 
 
@@ -176,7 +184,7 @@ class ForecastService:
             rows = connection.execute(
                 """
                 SELECT f.forecast_id, f.status, f.window_end, f.category,
-                       v.version, v.probability, v.content
+                       f.confirmed_by, v.version, v.probability, v.content
                 FROM forecasts f
                 JOIN forecast_versions v ON v.forecast_id = f.forecast_id
                 JOIN (
@@ -195,6 +203,9 @@ class ForecastService:
                 "status": row["status"],
                 "window_end": row["window_end"],
                 "category": row["category"] or "general",
+                # 这条预测的来源：user=本人选的 / auto=系统自动确认 / unknown=历史行。
+                # 必须原样透出，界面才能把"机器填的"和"你选的"分开显示。
+                "confirmed_by": row["confirmed_by"] or "unknown",
                 "version": row["version"],
                 "probability": row["probability"],
                 "title": fields.get("title", row["forecast_id"]),
@@ -256,8 +267,14 @@ class ForecastService:
             if exists:
                 raise ForecastConflictError("预测编号已经存在")
             connection.execute(
-                "INSERT INTO forecasts(forecast_id, status, window_end, category) VALUES (?, 'open', ?, ?)",
-                (card["forecast_id"], card["window_end"], card["category"]),
+                "INSERT INTO forecasts(forecast_id, status, window_end, category,"
+                " confirmed_by) VALUES (?, 'open', ?, ?, ?)",
+                (
+                    card["forecast_id"],
+                    card["window_end"],
+                    card["category"],
+                    card.get("confirmed_by") or "unknown",
+                ),
             )
             connection.execute(
                 "INSERT INTO forecast_versions(forecast_id, version, probability, content_sha256, content) VALUES (?, 1, ?, ?, ?)",
