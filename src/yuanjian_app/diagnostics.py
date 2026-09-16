@@ -3,6 +3,11 @@
 契约（前端字段访问，缺一个就显示"未知"）：
 sources_enabled / sources_total / ai_enabled / ai_jobs_today /
 db_bytes / last_backup / backup_enabled / last_run_ms / runtime
+
+另有三个"看得见节流"的补充字段（前端按可选处理，缺失不报错）：
+ai_daily_budget / ai_min_interval_seconds / ai_rate_limit_pending
+—— 只有「今日已用 X / 上限 Y」看不出"是不是发太快了"，用户要把上限调到极限时
+没有一个反馈信号。
 """
 
 from __future__ import annotations
@@ -10,6 +15,8 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+
+from .remote_ai import REMOTE_MIN_INTERVAL_SECONDS
 
 _logger = logging.getLogger(__name__)
 
@@ -36,6 +43,9 @@ class DiagnosticsService:
             "sources_total": 0,
             "ai_enabled": False,
             "ai_jobs_today": 0,
+            "ai_daily_budget": 0,
+            "ai_min_interval_seconds": float(REMOTE_MIN_INTERVAL_SECONDS),
+            "ai_rate_limit_pending": 0,
             "db_bytes": 0,
             "last_backup": None,
             "backup_enabled": False,
@@ -66,6 +76,10 @@ class DiagnosticsService:
             except Exception:
                 payload["ai_jobs_today"] = 0
         try:
+            payload["ai_rate_limit_pending"] = int(self._read_rate_limit_pending())
+        except Exception:
+            payload["ai_rate_limit_pending"] = 0
+        try:
             payload["db_bytes"] = int(self.database.path.stat().st_size)
         except OSError:
             payload["db_bytes"] = 0
@@ -84,6 +98,22 @@ class DiagnosticsService:
         except Exception:
             payload["last_run_ms"] = 0
         return payload
+
+    def _read_rate_limit_pending(self) -> int:
+        """当前有多少远程作业正卡在"限流退避"里（429 专用）。
+
+        定义刻意取**瞬时值**而不是"今日被限流几次"：`judgment_jobs` 只保留最近一次
+        失败原因，没有逐次尝试的历史，按天累计只能靠估算。而"现在有几个作业正因为
+        429 在等"恰好回答了用户真正要问的那句——**是不是我调太快了**：这个数持续
+        大于 0，就说明 12 次/分钟的节流上限仍然高于对端实际能吃的速率。
+        """
+        with self.database.connect() as connection:
+            return int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM judgment_jobs"
+                    " WHERE provider!='local' AND status='retry' AND last_error='rate_limit'"
+                ).fetchone()[0]
+            )
 
     def _read_backup_enabled(self) -> bool:
         with self.database.connect() as connection:

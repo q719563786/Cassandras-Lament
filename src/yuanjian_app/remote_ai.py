@@ -34,10 +34,17 @@ DAILY_REMOTE_BUDGET = 2000
 """每日远程研判上限的**默认值**（2026-09-15 由 100 提到 2000）。
 
 定 2000 的依据：Agnes AI 免费版对文本模型限的是 **20 RPM**（每分钟请求数），
-**没有每日配额**；而远见是顺序请求、单次调用十来秒，结构上到不了 20 RPM。
-所以真正的稀缺资源是"每天总共做多少件"，不是"峰值多快"——旧值 100 天/天
-把用户卡在了每天精确 100 条（真库 judgment_jobs 9/5–9/8 每天停在 100），
-而配额其实是白给的。用户可在设置页覆盖（0~100000，0 = 关闭远程）。
+**没有每日配额**；所以真正的稀缺资源是"每天总共做多少件"，不是"峰值多快"——
+旧值 100 天/天把用户卡在了每天精确 100 条（真库 judgment_jobs 9/5–9/8 每天停在
+100），而配额其实是白给的。用户可在设置页覆盖（0~100000，0 = 关闭远程）。
+
+**2026-09-16 的安装后真库数据推翻了这里原来的另一半推断**（原文写"顺序请求、
+单次十来秒，结构上到不了 20 RPM"）：15 小时里 succeeded 152 / rate_limit 23，
+**13% 的请求被 429 打回**，且那 100 个作业是 6 秒内排进队列、由 `run_due` 一轮
+里背靠背连发出去的。顺序请求 ≠ 低瞬时速率——只要单次响应快（`agnes-2.0-flash`
+就是秒级），一轮 25 个就能在几秒内把 20 RPM 冲破。所以"每日总量"之外还必须有
+**瞬时速率闸**：`REMOTE_MIN_INTERVAL_SECONDS`。两道闸管的不是同一件事，
+**不要合并，也不要拿一个去替代另一个**（详见该常量的说明）。
 """
 
 MIN_DAILY_BUDGET = 0
@@ -50,6 +57,50 @@ AGNES_AI_BASE_URL = "https://apihub.agnes-ai.com/v1"
 AGNES_AI_CHAT_ENDPOINT = f"{AGNES_AI_BASE_URL}/chat/completions"
 AGNES_AI_DEFAULT_MODEL = "agnes-2.0-flash"
 AGNES_AI_RPM_LIMIT = 20  # 免费版实际可执行 RPM
+
+REMOTE_MIN_INTERVAL_SECONDS = 5.0
+"""远程请求的**最小间隔**（秒）= 12 次/分钟的瞬时速率闸。
+
+**为什么是 12 而不是 20**：Agnes 上限是 20 RPM，取六成是给三类"计划外"请求留余量：
+① 429 之后的短退避重试（见 `REMOTE_RATE_LIMIT_BACKOFF_MINUTES`）；
+② 用户刚改完设置就触发的下一轮；
+③ 同一个 key 上可能存在的其它调用方。
+贴着 20 走等于把余量吃成 0，一有抖动就又是 429 —— 而一次 429 的代价（浪费一次
+尝试、还要退避）比"每个请求多等几秒"高得多。
+
+**为什么是"补差"而不是固定 sleep 一个值**：语义是 `max(0, 间隔 - 距上次请求已过
+的时间)`。单次调用本来就慢（比如耗时 12 秒）时间隔已自然满足，补差为 0，不会再
+白等；只有请求发得太密时才真的等待。
+
+**一轮的时间预算（下一个人调大 `cognition.REMOTE_SLOTS_PER_ROUND` 前必须重算）**：
+
+    槽位数 × 最小间隔 ≤ 轮周期
+    25 × 5 秒 = 125 秒 ≤ 300 秒（`radar_scheduler` 的 5 分钟轮询）
+
+余下约 175 秒留给 bundle 构造、单次调用本身的开销与本地任务。**若把槽位调到 60 以上
+（60 × 5 = 300 秒），一轮就会顶满轮周期**，到时要么调小间隔、要么改轮周期，
+否则认知扫描会开始一轮压一轮。
+
+**它与 `daily_budget` 是两个正交的闸，不能互相替代**：这一道管**多快**（每分钟
+最多发几次），`daily_budget` 管**多少**（一天最多发几次）。
+"""
+
+REMOTE_RATE_LIMIT_BACKOFF_MINUTES = (1, 2, 4)
+"""HTTP 429（限流）专用的退避序列，按第几次尝试取值（分钟）。
+
+**为什么要与普通失败分开**：429 的语义是"你发太快了"，不是"请求本身有问题"。
+普通失败（network / timeout / http_error）用 15/30/60/120 分钟是合理的——那是在等
+对端恢复；但对 429，长退避恰恰在**加重**问题：我们本来就是发太快才被限，被推到
+15 分钟后又和积压的作业一起到期，下一轮就是一次新的突发。真库里 23 个 rate_limit
+作业正是这样被推到 +15 分钟，净吞吐反而被压住。
+
+**为什么是 1/2/4 而不是立刻重试**：① 立刻重试多半还在被限的那个 60 秒窗口里，
+只是把一次 429 变成另一次 429，白烧一次尝试（`used` 会 +1，占日预算）；
+② 仍然指数增长，配合上面的最小间隔（重试请求同样受 5 秒间距约束），
+即使整批作业同时被限也不会形成新的突发；③ 外层 `MAX_REMOTE_RETRIES = 4` 保证
+最迟第 4 次失败就降级本地，不会变成忙等——整条链路合计约 7 分钟收敛，
+而旧序列要走满 105 分钟。
+"""
 
 
 class RateLimiter:
@@ -80,6 +131,49 @@ class RateLimiter:
 
 # 模块级共享限流器：Agnes AI 免费版 20 RPM
 _agnes_ai_limiter = RateLimiter(AGNES_AI_RPM_LIMIT)
+
+
+class MinIntervalPacer:
+    """补差式最小间隔：保证相邻两次调用之间至少隔 `interval` 秒。
+
+    与 `RateLimiter` 的分工：`RateLimiter` 约束**60 秒窗口内的总次数**，允许前 20 次
+    一拥而上、之后空等；这个类约束的是**相邻两次的间距**，从第一个请求起就把突发
+    摊平。真库里的 429 不是"一小时内发多了"，而是"几秒内连着发"——所以要的是后者。
+
+    时钟与 sleep 都取模块级 `time`，因此测试可以用替身时钟整体替换
+    （`mock.patch.object(remote_ai, "time", fake)`），不会真睡。
+    """
+
+    def __init__(self, interval: float = 0.0):
+        self.interval = max(0.0, float(interval))
+        self._last_at = None
+        self._lock = threading.Lock()
+
+    def wait(self):
+        """距上次调用不足 `interval` 时补足差值；首次调用不等待，`interval<=0` 时不做任何事。"""
+        if self.interval <= 0:
+            return
+        with self._lock:
+            now = time.monotonic()
+            if self._last_at is not None:
+                need = self.interval - (now - self._last_at)
+                if need > 0:
+                    time.sleep(need)
+                    now = time.monotonic()
+            self._last_at = now
+
+
+# 模块级共享节流器：**所有**远程 HTTP 请求共用一个节奏（不限 agnes 主机）。
+#
+# 为什么挂在传输层（这里）而不是 `run_due` 的循环里：
+#   ① 这里才是真正的网络出口。将来不管多出什么调用方（单条重试、探活按钮），
+#      只要它是真的 HTTP 请求就必然经过这里，绕不过去；
+#   ② `run_due` 是"要不要发请求"的决策层，测试会给它注入假 transport。节流放在
+#      那里会让每个构造 N 个远程作业的用例都真睡 5N 秒（现有一套就多 5 分钟），
+#      测试为了跑得快只能把节流关掉——那等于把这道闸的验证一起关掉了。
+#
+# 本地研判（`LocalHeuristicProvider`）不发 HTTP，天然不受影响。
+_remote_pacer = MinIntervalPacer(REMOTE_MIN_INTERVAL_SECONDS)
 
 
 def _iso(value):
@@ -260,6 +354,10 @@ def _default_transport(url, headers, body, timeout):
         raise RemoteProviderError("network") from error
     if not addresses or any(not ipaddress.ip_address(value).is_global for value in addresses):
         raise RemoteProviderError("unsafe_endpoint")
+    # 瞬时速率闸：所有远程 HTTP 请求按最小间隔摊平（详见 REMOTE_MIN_INTERVAL_SECONDS）。
+    # 与下面那条 Agnes 专用许可一样放在地址闸**之后**：端点还没验过就先等满 5 秒，
+    # 是把配额和时间一起浪费掉。
+    _remote_pacer.wait()
     # Agnes AI 免费版有 20 RPM 限制，DNS/SSRF校验通过后再获取许可，避免无效端点浪费配额
     if host and "agnes-ai.com" in host.casefold():
         _agnes_ai_limiter.acquire()
@@ -899,7 +997,9 @@ class JudgmentQueue:
         # 关闭状态下不处理任何任务
         if self._shutdown.is_set():
             return {"succeeded": 0, "deferred": 0, "failed": 0, "shutdown": True}
-        MAX_REMOTE_RETRIES = 4  # 远程任务最多重试3次（指数退避15/30/60分钟），超过降级本地
+        # 远程任务最多重试3次（普通失败退避15/30/60分钟；429 走 1/2/4 分钟，
+        # 见 REMOTE_RATE_LIMIT_BACKOFF_MINUTES），超过降级本地
+        MAX_REMOTE_RETRIES = 4
         now = self.now().astimezone(timezone.utc)
         with self.database.connect() as connection:
             due_sql = (
@@ -1048,8 +1148,17 @@ class JudgmentQueue:
                         )
                     summary["failed"] += 1
                 elif is_remote and attempts < MAX_REMOTE_RETRIES:
-                    # 远程任务还有重试机会：指数退避后重试（最短15分钟，最长2小时）
-                    delay = min(120, 15 * (2 ** (attempts - 1)))
+                    # 远程任务还有重试机会：指数退避后重试。
+                    # 普通失败（network/timeout/http_error）是在等对端恢复，用
+                    # 15/30/60/120 分钟；**429 的语义不同**——它说的是"你发太快了"，
+                    # 长退避会把积压作业攒到同一时刻一起到期、下一轮再来一次突发，
+                    # 所以走独立且更短的 1/2/4 分钟
+                    # （见 REMOTE_RATE_LIMIT_BACKOFF_MINUTES 的完整理由）。
+                    if error.kind == "rate_limit":
+                        rates = REMOTE_RATE_LIMIT_BACKOFF_MINUTES
+                        delay = rates[min(attempts, len(rates)) - 1]
+                    else:
+                        delay = min(120, 15 * (2 ** (attempts - 1)))
                     next_attempt = _iso(now + timedelta(minutes=delay))
                     with self.database.connect() as connection:
                         connection.execute(
