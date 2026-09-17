@@ -925,7 +925,7 @@ def create_server(host, port, token, services):
             try:
                 self._json(
                     services.impacts.confirm_candidate(
-                        impact_id, payload.get("probability")
+                        impact_id, payload.get("probability"), by="user"
                     ),
                     201,
                 )
@@ -1000,6 +1000,10 @@ def create_server(host, port, token, services):
             self._json(services.mobile_export.export(dashboard), 201)
 
         def _post_forecasts(self, services, params, parsed, payload):
+            # 用户手撰预测：来源可追溯为用户本人，标 confirmed_by='user' 以计入
+            # 校准（区别于 v1.1 之前遗留、来源不可考的历史行）。
+            payload = dict(payload)
+            payload["confirmed_by"] = "user"
             self._json(services.forecasts.create_forecast(payload), 201)
 
         def _post_forecast_versions(self, services, params, parsed, payload):

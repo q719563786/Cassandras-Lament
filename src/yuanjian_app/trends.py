@@ -101,11 +101,68 @@ class TrendService:
                 )
         return snapshots
 
+    def _last_captured_at(self, at):
+        """最近一次（早于 at）已落盘的采样时刻，用于口径对比；无则返回 None。"""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT MAX(captured_at) FROM trend_snapshots WHERE captured_at < ?",
+                (_iso(at),),
+            ).fetchone()
+        return row[0] if row else None
+
+    def _prior_category_set(self, prior_at):
+        """上次采样覆盖的检测源类别集合。"""
+        if not prior_at:
+            return set()
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT category FROM trend_snapshots WHERE captured_at = ?",
+                (prior_at,),
+            ).fetchall()
+        return {row["category"] for row in rows}
+
+    def _detect_sampling_shift(self, at, snapshots):
+        """采样口径护栏（v1.1 第一波）。
+
+        检测源集合相对上次采样发生变化时返回 (True, reason)，否则 (False, "")。
+        两类触发：① 检测源启用/停用导致类别集合增减；② 断网恢复或回填导致距
+        上次采样的间隔异常拉长。两种情况都会让 baseline 口径不可比，界面应提示
+        「采样口径有变动，解读需谨慎」。
+        """
+        prior_at = self._last_captured_at(at)
+        current = {s["category"] for s in snapshots}
+        if prior_at is None:
+            return False, ""  # 首次采样，无口径可比
+        prior = self._prior_category_set(prior_at)
+        added = sorted(current - prior)
+        removed = sorted(prior - current)
+        reasons = []
+        if added or removed:
+            parts = []
+            if added:
+                parts.append("新增检测源类别：" + "、".join(added))
+            if removed:
+                parts.append("停用检测源类别：" + "、".join(removed))
+            reasons.append("；".join(parts))
+        # 断网恢复 / 回填：间隔超过 2 天即视为异常
+        try:
+            gap_hours = (at - _parse(prior_at)).total_seconds() / 3600
+        except Exception:
+            gap_hours = 0
+        if gap_hours > 2 * 24:
+            reasons.append("采样中断后恢复：距上次采样约 %.0f 小时" % gap_hours)
+        if reasons:
+            return True, "采样口径有变动——" + "；".join(reasons)
+        return False, ""
+
     def capture(self, at: datetime) -> dict:
         if at.tzinfo is None:
             raise ValueError("趋势时间必须包含时区")
         at = at.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
         snapshots = self._calculate(at)
+        # 采样口径护栏：检测源集合变化 / 采样中断恢复时标注 sampling_shift，
+        # 提示界面「采样口径有变动，解读需谨慎」。
+        sampling_shift, sampling_shift_reason = self._detect_sampling_shift(at, snapshots)
         with self.database.connect() as connection:
             for snapshot in snapshots:
                 identity = (
@@ -136,7 +193,12 @@ class TrendService:
                         snapshot["status"],
                     ),
                 )
-        return {"captured_at": _iso(at), "snapshots": self._public(snapshots)}
+        return {
+            "captured_at": _iso(at),
+            "snapshots": self._public(snapshots),
+            "sampling_shift": sampling_shift,
+            "sampling_shift_reason": sampling_shift_reason,
+        }
 
     def summary(self, at: datetime) -> list[dict]:
         return self.capture(at)["snapshots"]

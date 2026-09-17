@@ -136,6 +136,10 @@ def _normalized_card(data, forecast_id=None, created_at=None):
         "alternatives": str(data.get("alternatives", "尚未补充。" )).strip(),
         "falsification": str(data.get("falsification", criteria)).strip(),
         "recommended_action": str(data.get("recommended_action", "继续观察并在复核日更新。" )).strip(),
+        # 命题四要素里的"阈值或可观测事实"。**必须列进这张返回表** ——
+        # 本函数重建 dict，不在表里的键会被静默丢弃（v1.1 的 confirmed_by 就是这样
+        # 第一版完全没生效的）。丢了它，命题在核对时就无法机械判定可结算性。
+        "observable_signals": str(data.get("observable_signals", "")).strip(),
         "confirmed_by": confirmed_by,
     }
 
@@ -156,6 +160,7 @@ alert_level: {card['alert_level']}
 next_review_at: {card['next_review_at']}
 model_version: {card['model_version']}
 privacy_level: {card['privacy_level']}
+observable_signals: {card.get('observable_signals', '')}
 ---
 ## 因果链
 {card['causal_chain']}
@@ -378,18 +383,62 @@ class ForecastService:
         return {"forecast_id": forecast_id, "outcome": outcome, "brier_score": brier}
 
     def score_summary(self):
-        """Return aggregate binary calibration statistics."""
+        """Return aggregate binary calibration statistics.
+
+        判据与 `calibration_summary` 一致：**命题可结算**才进 Brier 平均。
+        不用 `confirmed_by != 'unknown'` —— 那个字段默认就是 'unknown'，
+        会把新建的正常预测也一并误排除。
+        """
         with self.database.connect() as connection:
-            row = connection.execute(
-                "SELECT COUNT(*), AVG(brier_score) FROM resolutions WHERE brier_score IS NOT NULL"
-            ).fetchone()
+            rows = connection.execute(
+                """
+                SELECT r.brier_score,
+                       (SELECT v.content FROM forecast_versions v
+                         WHERE v.forecast_id = f.forecast_id
+                         ORDER BY v.version DESC LIMIT 1) AS latest_content
+                FROM resolutions r
+                JOIN forecasts f ON f.forecast_id = r.forecast_id
+                WHERE r.brier_score IS NOT NULL
+                """
+            ).fetchall()
+        usable = [r for r in rows if self._calibratable(r)]
+        row = (
+            len(usable),
+            (sum(float(r["brier_score"]) for r in usable) / len(usable)) if usable else None,
+        )
         return {
             "resolved_binary": row[0],
             "brier_score": None if row[1] is None else round(row[1], 10),
         }
 
+    def _calibratable(self, row) -> bool:
+        """这条已结算预测能不能进 Brier 平均。
+
+        判据是**命题是否可结算**，不是 `confirmed_by != 'unknown'`。
+        后者看着合理、其实方向是错的：`confirmed_by` 是 v1.1 才加的列，
+        DEFAULT 就是 'unknown'（本意是标"历史行来源不可考"），于是任何没有
+        经过 confirm_candidate 落库的预测都会被误排除，连新建的正常预测也算。
+        改用与入账闸同一把尺子：旧口径那种"是否产生实际影响"的模糊命题
+        自然不合格、被排除；四要素齐全的新命题自然合格、被计入。
+        """
+        fields = parse_frontmatter(row["latest_content"] or "")
+        from .impacts import _settlement_ready  # 局部导入，避免模块级循环依赖
+
+        ok, _reason = _settlement_ready(
+            {
+                "title": fields.get("title", ""),
+                "resolution_criteria": fields.get("resolution_criteria", ""),
+                "observable_signals": fields.get("observable_signals", ""),
+            }
+        )
+        return ok
+
     def calibration_summary(self):
         """Flat calibration payload consumed by the calibration panel.
+
+        口径（v1.2 起）：`resolved_total` 是**已结算总数**（不过滤），
+        Brier 只用**命题可结算**的那些；被排除的数量单独给出，
+        面板上分开显示，不含混。
 
         Philosophy: never fabricate conclusions — denominators of zero
         produce null instead of 0.
@@ -398,20 +447,26 @@ class ForecastService:
             rows = connection.execute(
                 """
                 SELECT f.forecast_id, f.category, r.outcome, r.resolved_at,
-                       r.probability, r.brier_score
+                       r.probability, r.brier_score,
+                       (SELECT v.content FROM forecast_versions v
+                         WHERE v.forecast_id = f.forecast_id
+                         ORDER BY v.version DESC LIMIT 1) AS latest_content
                 FROM forecasts f
                 JOIN resolutions r ON r.forecast_id = f.forecast_id
                 """
             ).fetchall()
+        resolved_total = len(rows)
+        scored_rows = [row for row in rows if self._calibratable(row)]
+        excluded_total = resolved_total - len(scored_rows)
         binary = [
             dict(row)
-            for row in rows
+            for row in scored_rows
             if row["outcome"] in {"occurred", "not_occurred"}
         ]
         confident = [row for row in binary if float(row["probability"]) >= 0.5]
         hits = [row for row in confident if row["outcome"] == "occurred"]
         miss = [row for row in confident if row["outcome"] == "not_occurred"]
-        scored = [row for row in rows if row["brier_score"] is not None]
+        scored = [row for row in scored_rows if row["brier_score"] is not None]
         overall_brier = (
             round(sum(float(row["brier_score"]) for row in scored) / len(scored), 10)
             if scored
@@ -448,6 +503,11 @@ class ForecastService:
                 )
         return {
             "resolved_total": len(rows),
+            # 已结算但命题不可结算、因此不进 Brier 的条数。
+            # 面板要把它和 resolved_total 分开显示 —— 用户看到的应该是
+            # "已结算 12 条，其中 9 条可用于校准，3 条是旧口径已排除"，
+            # 而不是一个被静默缩小的总数。
+            "excluded_total": excluded_total,
             "resolved_binary": len(binary),
             "open_total": self._open_total(),
             "hit_rate": round(len(hits) / len(confident), 10) if confident else None,

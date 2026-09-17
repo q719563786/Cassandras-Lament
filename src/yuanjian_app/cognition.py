@@ -1002,7 +1002,11 @@ class CognitionController:
 
     def risk_dashboard(self, source_states=None, limit=3):
         """Project internal judgments into a personal decision workload."""
-        # 全自动模式：加载首页前自动确认所有待确认候选，无需用户手动操作
+        # 全自动模式：加载首页前自动确认所有待确认候选，无需用户手动操作。
+        # 注意：auto_confirm_all 是「读路径写库」调用——它扫描待确认候选并按证据
+        # 等级把可结算命题写进不可变 forecasts 账本（E1/L4 与未过结算性闸的命题
+        # 会被跳过，留待用户手动确认）。此处的 try/except 仅为防御单次写入异常，
+        # 不掩盖「命题确实进了账本」的事实。
         try:
             self.impacts.auto_confirm_all()
         except Exception:

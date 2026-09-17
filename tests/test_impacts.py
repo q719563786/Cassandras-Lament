@@ -139,34 +139,46 @@ class ImpactServiceTests(unittest.TestCase):
         serialized = json.dumps(after, ensure_ascii=False)
         self.assertNotIn(self.health["name"], serialized)
 
-    def test_candidate_auto_confirm_with_nearest_fixed_probability(self):
-        """P1 引入自动确认行为：map_judgment 生成新候选预测后，
-        用概率区间中值（0.55+0.78）/2=0.665 → 最近固定档位 0.65 自动确认。
-        后续再次 confirm 同一 impact 会幂等返回已存在的 forecast。"""
+    def test_l4_candidate_waits_for_the_user_instead_of_auto_confirming(self):
+        """v1.2 用户决策：**L4 一律不自动确认**，必须由本人选概率。
+
+        旧行为（P1 引入）是 map_judgment 阶段就用概率区间中值自动入账 ——
+        用户从未选过概率，账本里却留下了一条"已确认"记录。
+        审计指出这与 README「候选预测必须人工选择固定概率后，才能进入不可变
+        预测账本」的承诺直接冲突，用户选择只对 L4 恢复人工门槛。
+        """
         cluster_id, judgment_id = self.add_judgment("candidate", "E3")
         impact = self.service.map_judgment(cluster_id, judgment_id)[0]
 
-        candidate = self.service.candidate_forecast(impact["impact_id"])
+        # 夹具必须产出 L4，否则这条测试验的不是 L4 的人工门槛。
+        self.assertEqual(
+            impact["alert_level"], "L4",
+            "夹具应产出 L4 才能验证本条；若这里是 L3，说明删除范围过宽",
+        )
 
-        # 自动确认后 forecast 表已有一条记录，概率为最近固定档位 0.65。
-        # list_forecasts() 返回 (result_list, total) 元组。
-        forecasts, total = self.forecasts.list_forecasts()
-        self.assertEqual(total, 1)
-        self.assertEqual(len(forecasts), 1)
-        self.assertEqual(forecasts[0]["probability"], 0.65)
-        self.assertEqual(forecasts[0]["version"], 1)
+        candidate = self.service.candidate_forecast(impact["impact_id"])
         self.assertEqual(candidate["probability_low"], 0.55)
         self.assertEqual(candidate["probability_high"], 0.78)
         self.assertTrue(candidate["resolution_criteria"])
 
-        # confirm_candidate 仍要求固定档位；非法档位抛 ValueError。
+        # 映射阶段**不**自动入账（这是本次行为变更的核心）。
+        forecasts, total = self.forecasts.list_forecasts()
+        self.assertEqual(total, 0, "L4 候选不得在映射阶段自动进入账本")
+        self.assertEqual(forecasts, [])
+
+        # 手动确认仍然可用：固定档位、幂等。
         with self.assertRaisesRegex(ValueError, "固定档位"):
             self.service.confirm_candidate(impact["impact_id"], 0.73)
 
-        # 重复 confirm 同一档位 → 幂等返回已存在的 forecast（不创建新版本）。
+        # 首次确认走 create_forecast，返回 {forecast_id, version, duplicate}；
+        # 概率要从账本读，不要假定返回值里有 probability。
         confirmed = self.service.confirm_candidate(impact["impact_id"], 0.65)
         self.assertEqual(confirmed["version"], 1)
-        self.assertEqual(confirmed["probability"], 0.65)
+        rows, _ = self.forecasts.list_forecasts()
+        self.assertEqual(rows[0]["probability"], 0.65)
+        # 二次确认走幂等分支（返回已存在的那条）。
+        again = self.service.confirm_candidate(impact["impact_id"], 0.65)
+        self.assertEqual(again["version"], 1, "重复确认同一档位应幂等")
         _, total_after = self.forecasts.list_forecasts()
         self.assertEqual(total_after, 1)
 

@@ -372,10 +372,17 @@ class CalibrationSummaryTests(unittest.TestCase):
         self.assertEqual(summary["by_category"], {})
 
     def test_resolved_forecasts_feed_the_summary(self):
+        # 夹具必须是**可结算命题**（v1.2 起 Brier 只用可结算命题）。
+        # 旧夹具的 resolution_criteria 写的是「可以核验」—— 没有日期、没有可观测
+        # 事实、没有判定依据，属于"永远不会错"的表述，会被证伪性闸排除出校准。
         data = {
             "forecast_id": "F-1",
-            "title": "测试预测",
-            "resolution_criteria": "可以核验",
+            "title": "截至 2026-08-10：某泵类采购公告是否发布",
+            "resolution_criteria": (
+                "截至 2026-08-10，以主管部门公告为判定依据；"
+                "公告中出现泵类采购条目即记为发生，否则记为未发生。"
+            ),
+            "observable_signals": "主管部门网站出现泵类采购公告",
             "window_start": "2026-08-01",
             "window_end": "2026-08-10",
             "probability": 0.80,
@@ -393,6 +400,41 @@ class CalibrationSummaryTests(unittest.TestCase):
         self.assertEqual(summary["hit_rate"], 1.0)
         self.assertAlmostEqual(summary["brier"], 0.040000000000000036)
         self.assertEqual(summary["by_category"], {"finance": 1.0})
+        self.assertEqual(summary["excluded_total"], 0, "可结算命题不应被排除")
+
+    def test_vague_proposition_is_counted_but_excluded_from_brier(self):
+        """v1.2：命题不可结算时，仍计入「已结算总数」，但不进 Brier。
+
+        用户要的是两个数**分开显示** ——「已结算 12 条，其中 9 条可用于校准，
+        3 条是旧口径已排除」，而不是一个被静默缩小的总数。
+        这也是账本里那些 v1.1 之前的历史条目的处置方式（不清理，只排除）。
+        """
+        vague = {
+            "forecast_id": "F-VAGUE",
+            "title": "某事件将在观察期内影响某利益",
+            "resolution_criteria": "判断该事件是否对某利益产生实际影响",
+            "window_start": "2026-08-01",
+            "window_end": "2026-08-10",
+            "probability": 0.80,
+            "confidence": "medium",
+            "alert_level": "L2",
+            "privacy_level": "P2",
+            "category": "finance",
+        }
+        self.service.create_forecast(vague)
+        self.service.resolve("F-VAGUE", "occurred", "2026-08-10", "发生")
+
+        summary = self.service.calibration_summary()
+
+        # 账本仍然"看得见"它 —— 不清理、不隐藏。
+        self.assertEqual(summary["resolved_total"], 1)
+        self.assertEqual(summary["excluded_total"], 1)
+        # 但它不参与校准。
+        self.assertIsNone(summary["brier"], "不可结算命题不得进入 Brier 平均")
+        self.assertEqual(summary["resolved_binary"], 0)
+        # 反证：账本行本身没被删掉（不可变承诺）。
+        _, total = self.service.list_forecasts()
+        self.assertEqual(total, 1)
 
 
 if __name__ == "__main__":

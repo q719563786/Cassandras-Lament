@@ -21,6 +21,57 @@ def _nearest_probability(value: float) -> float:
     value = max(0.0, min(1.0, value))
     return min(_ALLOWED_PROB_LIST, key=lambda p: abs(p - value))
 
+
+# 证伪性闸：命题要能进不可变账本，必须满足四要素——日期 / 至少一条可观测条件 /
+# 判定依据 / 无禁用虚词。含虚词的命题无法在截止日机械核验，写进账本只会污染
+# 校准分（Brier），所以一律停在待补充、不进 forecasts。
+_BANNED_PHRASES = (
+    "产生实际影响", "实际影响", "尚未补充", "待补充",
+    "后续官方公告", "执行进展通报", "视情况", "一定程度上",
+    "可能影响", "需持续观察",
+)
+
+
+def _extract_observable_signals(judgment):
+    """从判断内容里抽取可观测信号（领先指标 / 触发条件），作为命题的
+    “阈值或可观测事实”要素。空则命题不具备结算性。"""
+    signals = []
+    gyw = judgment.get("gyw") or {}
+    leading = (gyw.get("leading_indicators") or "").strip()
+    if leading:
+        leading = re.sub(r"^领先指标[:：]\s*", "", leading).strip()
+        if leading and leading not in ("待补充", "尚未补充"):
+            signals.append(leading)
+    for trig in (judgment.get("up_triggers") or []) + (judgment.get("down_triggers") or []):
+        trig = (trig or "").strip()
+        if trig and trig not in ("待补充", "尚未补充", ""):
+            signals.append(trig)
+    seen, out = set(), []
+    for s in signals:
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return "；".join(out)
+
+
+def _settlement_ready(candidate):
+    """证伪性闸（机械检查）：不合格停在待补充、不进账本。返回 (ok, reason)。"""
+    title = candidate.get("title", "") or ""
+    criteria = candidate.get("resolution_criteria", "") or ""
+    signals = (candidate.get("observable_signals", "") or "").strip()
+    blob = title + "\n" + criteria
+    if not re.search(r"\d{4}-\d{2}-\d{2}", blob):
+        return False, "命题缺少可核验日期"
+    if not signals or signals in ("待补充", "尚未补充"):
+        return False, "命题缺少可观测条件"
+    if not re.search(r"(核验|官方|公告|文件|记录|来源)", criteria):
+        return False, "命题缺少判定依据"
+    hit = next((p for p in _BANNED_PHRASES if p in blob), None)
+    if hit:
+        return False, f"命题含不可结算表述：{hit}"
+    return True, ""
+
+
 # GYW framework fallback templates (mirror of LocalHeuristicProvider._GYW_TEMPLATES).
 # Used by pending_candidates to backfill gyw for legacy judgments that
 # pre-date the GYW schema, without rewriting historical judgment rows.
@@ -211,15 +262,29 @@ class ImpactService:
     def _candidate(self, cluster, judgment, interest, impact_id):
         now = self.now().astimezone(timezone.utc)
         end = now + timedelta(days=_window_days(judgment.get("horizons", [])))
+        end_date = end.date().isoformat()
+        # 命题四要素：对象 / 方向 / 阈值或可观测事实 / 判定依据。
+        # 旧版只写“是否产生实际影响”（含虚词），不可结算；
+        # 新版必须给出可观测信号 + 可核验依据，否则证伪性闸会拒掉。
+        observable = _extract_observable_signals(judgment)
+        object_name = interest["name"]
+        title = (
+            f"截至{end_date}：「{object_name}」是否因「{cluster['title']}」"
+            f"受到可观测影响（看点：{observable or '待补充'}）"
+        )
+        resolution_criteria = (
+            f"判定依据：截至 {end_date}，对照以下可观测事实逐条核验——"
+            f"{observable or '待补充'}；"
+            f"任一事实在该日期前发生即记为“发生”，否则记为“未发生”。"
+            f"核验以官方公告、主管部门文件及本地可核验记录为准。"
+        )
         return {
             "impact_id": impact_id,
-            "title": f"{cluster['title']}将在观察期内影响{interest['name']}",
-            "resolution_criteria": (
-                f"截至{end.date().isoformat()}，依据公开执行信息或本地可核验记录，"
-                f"判断该事件是否对{interest['name']}产生实际影响"
-            ),
+            "title": title,
+            "resolution_criteria": resolution_criteria,
+            "observable_signals": observable,
             "window_start": now.date().isoformat(),
-            "window_end": end.date().isoformat(),
+            "window_end": end_date,
             "probability_low": float(judgment["probability_low"]),
             "probability_high": float(judgment["probability_high"]),
             "causal_chain": "\n".join(judgment.get("causal_chain", [])),
@@ -337,20 +402,9 @@ class ImpactService:
                         now,
                     ),
                 )
-            # P1: L4高影响候选自动确认——用概率区间中值映射到最近固定档位；
-            # L3及以下留待用户校准，避免中低影响事件被批量自动确认。
-            if alert == "L4" and not candidate.get("confirmed_forecast_id"):
-                try:
-                    midpoint = (
-                        float(candidate.get("probability_low", 0.5))
-                        + float(candidate.get("probability_high", 0.7))
-                    ) / 2
-                    nearest = _nearest_probability(midpoint)
-                    forecast = self.confirm_candidate(impact_id, nearest)
-                    candidate["confirmed_forecast_id"] = forecast["forecast_id"]
-                    candidate["confirmed_probability"] = nearest
-                except Exception:
-                    pass  # 自动确认失败不阻断映射流程，候选仍保留为待确认状态
+            # v1.1 第一波：L4 一律不再自动确认（原 P1 的 L4 自动确认块已删除）。
+            # 高影响事件必须由用户在界面手动选概率确认（confirmed_by='user'）；
+            # 只有 E2+ 的 L3 才由 auto_confirm_all 按证据等级自动确认。
             results.append(
                 {
                     "impact_id": impact_id,
@@ -562,6 +616,13 @@ class ImpactService:
         candidate = self.candidate_forecast(impact_id)
         if candidate.get("confirmed_forecast_id"):
             return self.forecast_service.get_forecast(candidate["confirmed_forecast_id"])
+        # 证伪性闸：命题不具结算性（缺日期/可观测条件/判定依据，或含虚词）则
+        # 不允许进不可变账本，停在待补充状态由用户补全。
+        ready, reason = _settlement_ready(candidate)
+        if not ready:
+            raise ValueError(
+                f"命题不具备结算性，无法记入账本：{reason}（请补齐可观测条件与判定依据）"
+            )
         # 使用正常的F-前缀格式，不传入forecast_id让create_forecast自动生成
         result = self.forecast_service.create_forecast(
             {
@@ -594,11 +655,12 @@ class ImpactService:
 
 
     def auto_confirm_all(self) -> dict:
-        """自动确认未确认的 L3/L4 候选预测。
+        """自动确认未确认的 L3 候选预测（L4 一律交由用户在界面手动确认）。
 
         **证据等级闸（v1.1 补）**：只对 **E2 及以上**（多来源互证）自动确认。
         E1 是单来源线索，无论多重要都**不得**自动进入不可变账本 —— 必须由本人
         选择概率后手动确认。
+        **证伪性闸**：命题不具结算性的候选同样不自动进账本，停在待补充。
 
         为什么必须是这一层闸：v1.0 曾用"把 E1 的告警级别从 L4 降到 L3"来阻止它
         进账本，但本函数的筛选条件**只看 alert_level、不看证据等级**，于是降级后的
@@ -617,7 +679,7 @@ class ImpactService:
                 FROM personal_impacts p
                 JOIN event_clusters c ON c.cluster_id = p.cluster_id
                 WHERE p.candidate_json IS NOT NULL AND p.candidate_json != ''
-                  AND p.alert_level IN ('L3','L4')
+                  AND p.alert_level IN ('L3')
                   AND p.user_label NOT IN ('false_positive','dismissed')
                   AND c.evidence_level IN ('E2','E3','E4')
                 """
@@ -627,6 +689,12 @@ class ImpactService:
                 candidate = json.loads(row["candidate_json"] or "{}")
                 if candidate.get("confirmed_forecast_id"):
                     skipped += 1
+                    continue
+                # 证伪性闸：命题不具结算性的候选不自动进账本。
+                ready, reason = _settlement_ready(candidate)
+                if not ready:
+                    skipped += 1
+                    errors.append(f"{row['impact_id']}: 命题未过结算性闸——{reason}")
                     continue
                 low = float(candidate.get("probability_low", 0.3))
                 high = float(candidate.get("probability_high", 0.7))
