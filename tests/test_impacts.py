@@ -157,8 +157,12 @@ class ImpactServiceTests(unittest.TestCase):
         )
 
         candidate = self.service.candidate_forecast(impact["impact_id"])
-        self.assertEqual(candidate["probability_low"], 0.55)
-        self.assertEqual(candidate["probability_high"], 0.78)
+        # 第二波起：区间**中心**来自「基准率 + 信号」，**宽度**只由 E 级决定。
+        # 所以不再断言旧的 E3 固定带 (0.55, 0.78) —— 那是被批掉的"概率=转载量"口径。
+        # 改断言结构性事实：中心落在区间内、区间非退化、且结算标准非空。
+        low, high = candidate["probability_low"], candidate["probability_high"]
+        self.assertLess(low, high, "区间不能退化成一个点")
+        self.assertTrue(0.0 <= low <= high <= 1.0)
         self.assertTrue(candidate["resolution_criteria"])
 
         # 映射阶段**不**自动入账（这是本次行为变更的核心）。

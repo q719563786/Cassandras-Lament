@@ -390,17 +390,43 @@ class CalibrationSummaryTests(unittest.TestCase):
             "alert_level": "L2",
             "privacy_level": "P2",
         }
+        # 第二波起，进 Brier 需要**基准率**，而基准率来自账本自身的历史结算记录
+        # （同类别样本 >= 5 才给）。所以先种 5 条同类别已结算记录，
+        # 让 F-1 在建库时拿得到基准率 —— 否则它会被正确地排除出校准。
+        for index in range(5):
+            seeded = f"F-SEED-{index}"
+            self.service.create_forecast(
+                {
+                    **data,
+                    "forecast_id": seeded,
+                    "category": "finance",
+                    "probability": 0.80,
+                }
+            )
+            self.service.resolve(
+                seeded,
+                "occurred" if index < 4 else "not_occurred",
+                "2026-08-10",
+                "seed",
+            )
+
         self.service.create_forecast({**data, "category": "finance"})
         self.service.resolve("F-1", "occurred", "2026-08-10", "发生")
 
         summary = self.service.calibration_summary()
 
-        self.assertEqual(summary["resolved_total"], 1)
+        # 6 条已结算（5 条种子 + F-1）。种子那 5 条在建库时类别里还没有基准率，
+        # 所以只有 F-1 进 Brier —— 这正是"当时没有基准率就不参与校准"的直接结果。
+        self.assertEqual(summary["resolved_total"], 6)
+        self.assertEqual(summary["excluded_total"], 5)
         self.assertEqual(summary["resolved_binary"], 1)
         self.assertEqual(summary["hit_rate"], 1.0)
         self.assertAlmostEqual(summary["brier"], 0.040000000000000036)
         self.assertEqual(summary["by_category"], {"finance": 1.0})
-        self.assertEqual(summary["excluded_total"], 0, "可结算命题不应被排除")
+        # 种子那 5 条在**创建当时**类别里还没有基准率（样本 < 5），故被排除；
+        # F-1 建库时已有 5 条历史 → 拿到基准率 → 进入校准。
+        # 这不是过度排除，而是当时没有基准率就不参与校准的直接结果。
+        self.assertEqual(summary["excluded_total"], 5)
 
     def test_vague_proposition_is_counted_but_excluded_from_brier(self):
         """v1.2：命题不可结算时，仍计入「已结算总数」，但不进 Brier。

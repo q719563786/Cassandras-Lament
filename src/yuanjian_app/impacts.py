@@ -72,6 +72,48 @@ def _settlement_ready(candidate):
     return True, ""
 
 
+# ---- 第二波：概率中心来自 base_rate + 信号，区间宽度只由 E 级决定 ----
+# 审计批的点：旧映射把「多少家转载」直接当概率中心，来源越多概率越高，且与
+# 事件本身、与「条件是否埋下」完全无关。修复是**拆开**这两件事——中心走账本
+# 自身的基准率 + 实质信号，宽度才看证据等级（证据越弱越宽，E1 最宽、E4 最窄）。
+# 顺序不能反：先基准、后信号。
+_INTERVAL_WIDTH = {"E1": 0.18, "E2": 0.14, "E3": 0.10, "E4": 0.07}
+
+
+def _interval_width(evidence_level: str) -> float:
+    """E 级只决定区间宽度，不参与中心。"""
+    return _INTERVAL_WIDTH.get(evidence_level, _INTERVAL_WIDTH["E1"])
+
+
+def _signal_adjustment(judgment) -> float:
+    """把「与来源多少无关」的真实信号折算成中心偏移（约 ±0.2）。
+
+    只用：紧迫性(horizons) + 是否有可观测的领先指标/触发条件。
+    **不**用 confidence、也**不**用来源数量——那正是审计在批的失真来源。
+    """
+    urgency = _urgency(judgment.get("horizons", ()))
+    triggers = (judgment.get("up_triggers") or []) + (judgment.get("down_triggers") or [])
+    concrete = 1.0 if any(
+        t and str(t).strip() not in ("", "待补充", "尚未补充") for t in triggers
+    ) else 0.0
+    leading = (judgment.get("gyw") or {}).get("leading_indicators", "")
+    has_leading = 1.0 if leading and str(leading).strip() not in ("", "待补充", "尚未补充") else 0.0
+    raw = urgency * 0.5 + (concrete + has_leading) / 2 * 0.5  # 0..1
+    delta = (raw - 0.5) * 0.4
+    return max(-0.2, min(0.2, delta))
+
+
+def _probability_center(base_rate, judgment) -> float:
+    """概率中心 = 基准率 + 信号调整。
+
+    - base_rate 有值：中心随基准率走，再叠信号。
+    - base_rate 为 None（样本不足）：用**中性先验 0.5**，而非编造一个基准率；
+      信号调整照常。二者是两件事：前者如实报 None，后者仍给个有锚的猜测。
+    """
+    prior = base_rate if base_rate is not None else 0.5
+    return max(0.05, min(0.95, prior + _signal_adjustment(judgment)))
+
+
 # GYW framework fallback templates (mirror of LocalHeuristicProvider._GYW_TEMPLATES).
 # Used by pending_candidates to backfill gyw for legacy judgments that
 # pre-date the GYW schema, without rewriting historical judgment rows.
@@ -267,6 +309,14 @@ class ImpactService:
         # 旧版只写“是否产生实际影响”（含虚词），不可结算；
         # 新版必须给出可观测信号 + 可核验依据，否则证伪性闸会拒掉。
         observable = _extract_observable_signals(judgment)
+        # 基准率：同类别历史结算命中率（账本自身 resolutions）。样本不足时返回
+        # (None, n)，_probability_center 退化为中性先验 0.5，但 base_rate 字段
+        # 如实记 None（不编造）。
+        base_rate, base_rate_sample = self.forecast_service.base_rate_for_category(
+            interest["category"]
+        )
+        center = _probability_center(base_rate, judgment)
+        width = _interval_width(cluster.get("evidence_level", "E1"))
         object_name = interest["name"]
         title = (
             f"截至{end_date}：「{object_name}」是否因「{cluster['title']}」"
@@ -285,8 +335,12 @@ class ImpactService:
             "observable_signals": observable,
             "window_start": now.date().isoformat(),
             "window_end": end_date,
-            "probability_low": float(judgment["probability_low"]),
-            "probability_high": float(judgment["probability_high"]),
+            # 概率：中心 = base_rate + 信号调整；宽度只由 E 级决定（证据越弱越宽）。
+            # 不再用「多少家转载」抬中心——那是审计批的失真源。
+            "probability_low": round(max(0.0, center - width), 2),
+            "probability_high": round(min(1.0, center + width), 2),
+            "base_rate": base_rate,
+            "base_rate_sample": base_rate_sample,
             "causal_chain": "\n".join(judgment.get("causal_chain", [])),
             "supporting_evidence": "\n".join(judgment.get("supporting_source_ids", [])),
             "opposing_evidence": "\n".join(judgment.get("uncertainties", [])),

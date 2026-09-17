@@ -515,13 +515,17 @@ class LocalHeuristicProvider:
         return None
 
     def analyze(self, bundle: EvidenceBundle) -> JudgmentResult:
-        levels = {
-            "E1": (0.25, 0.55, 0.30),
-            "E2": (0.40, 0.65, 0.50),
-            "E3": (0.55, 0.78, 0.70),
-            "E4": (0.65, 0.85, 0.82),
-        }
-        low, high, confidence = levels[bundle.evidence_level]
+        # 区间宽度：仅由证据等级决定（证据越弱越宽）。区间**中心**不再由 E 级决定——
+        # 那是审计批的「来源越多概率越高」失真源；中心在 impacts._candidate 里由
+        # base_rate + 信号调整给出。这里 low/high 只是围绕中性先验 0.5 的占位带，
+        # 最终由 _candidate 用 base_rate 重算。confidence 仍随证据增强而提高。
+        width_by_level = {"E1": 0.18, "E2": 0.14, "E3": 0.10, "E4": 0.07}
+        width = width_by_level[bundle.evidence_level]
+        low = round(max(0.0, 0.5 - width), 2)
+        high = round(min(1.0, 0.5 + width), 2)
+        confidence = {"E1": 0.30, "E2": 0.50, "E3": 0.70, "E4": 0.82}[
+            bundle.evidence_level
+        ]
 
         # 合并所有文本用于实体提取与事件分类
         text = " ".join(

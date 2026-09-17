@@ -112,6 +112,20 @@ def _normalized_card(data, forecast_id=None, created_at=None):
     confirmed_by = _single_line(data.get("confirmed_by", "unknown")) or "unknown"
     if confirmed_by not in ("user", "auto", "unknown"):
         confirmed_by = "unknown"
+    # 基准率：来自账本自身统计，这里只做归一化与边界守卫。样本不足时调用方传
+    # None（绝不编造）。只接受 None 或 [0,1] 浮点，其它一律当 None。
+    base_rate = data.get("base_rate", None)
+    if base_rate is not None:
+        try:
+            base_rate = float(base_rate)
+            if not (0.0 <= base_rate <= 1.0):
+                base_rate = None
+        except (TypeError, ValueError):
+            base_rate = None
+    try:
+        base_rate_sample = int(data.get("base_rate_sample", 0) or 0)
+    except (TypeError, ValueError):
+        base_rate_sample = 0
     return {
         "forecast_id": identity,
         "created_at": _single_line(
@@ -141,6 +155,8 @@ def _normalized_card(data, forecast_id=None, created_at=None):
         # 第一版完全没生效的）。丢了它，命题在核对时就无法机械判定可结算性。
         "observable_signals": str(data.get("observable_signals", "")).strip(),
         "confirmed_by": confirmed_by,
+        "base_rate": base_rate,
+        "base_rate_sample": base_rate_sample,
     }
 
 
@@ -161,6 +177,8 @@ next_review_at: {card['next_review_at']}
 model_version: {card['model_version']}
 privacy_level: {card['privacy_level']}
 observable_signals: {card.get('observable_signals', '')}
+base_rate: {('null' if card['base_rate'] is None else card['base_rate'])}
+base_rate_sample: {card['base_rate_sample']}
 ---
 ## 因果链
 {card['causal_chain']}
@@ -260,9 +278,48 @@ class ForecastService:
         draft.update(parse_sections(versions[-1]["content"]))
         return {**items[0], "versions": versions, "draft": draft}
 
+    def base_rate_for_category(self, category: str):
+        """同类别历史结算命中率（来自账本自身 resolutions）。
+
+        返回 (rate: float|None, sample: int)。样本 < 5 时 rate 为 None——
+        **绝不编造默认值顶上**。命中率 = outcome='occurred' 的占比。
+        样本 = 同类别**所有已结算且结果为二元**的预测。
+
+        ⚠ 曾经这里写过 ，是错的：该字段 DEFAULT
+        就是 'unknown'（v1.1 加它时本意是标历史行来源不可考），于是**任何不经
+        confirm_candidate 落库的预测都会被排除**，样本永远为 0，基准率永远拿不到 ——
+        机制自己把自己锁死。同一个模式在本文件出现过三次（confirmed_by、校准口径、
+        以及 observable_signals 被白名单吞掉）。
+        真正的质量闸是 ：它已保证该条有过**二元**结果，
+        模糊到无法判定的命题（outcome=indeterminate）本来就被排除在外。
+        基准率是**经验频率**，来源可不可考不改变频率本身。
+        """
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS n,
+                       SUM(CASE WHEN r.outcome='occurred' THEN 1 ELSE 0 END) AS hits
+                FROM resolutions r
+                JOIN forecasts f ON f.forecast_id = r.forecast_id
+                WHERE f.category = ?
+                  AND r.brier_score IS NOT NULL
+                  AND r.outcome IN ('occurred','not_occurred')
+                """,
+                (category or "general",),
+            ).fetchone()
+        sample = row["n"] if row else 0
+        if sample < 5:
+            return (None, sample)
+        return (round(row["hits"] / sample, 4), sample)
+
     def create_forecast(self, card_data):
         """Create a validated forecast and its first immutable version."""
         card = _normalized_card(card_data)
+        # 基准率以创建时刻的同类别历史为准（不反推、不编造）。即便调用方传入
+        # base_rate，也以实时统计覆盖，保证账本里记的是可核验的来源。
+        base_rate, base_rate_sample = self.base_rate_for_category(card["category"])
+        card["base_rate"] = base_rate
+        card["base_rate_sample"] = base_rate_sample
         content = _render_card(card)
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
         with self.database.connect() as connection:
@@ -273,12 +330,15 @@ class ForecastService:
                 raise ForecastConflictError("预测编号已经存在")
             connection.execute(
                 "INSERT INTO forecasts(forecast_id, status, window_end, category,"
-                " confirmed_by) VALUES (?, 'open', ?, ?, ?)",
+                " confirmed_by, base_rate, base_rate_sample)"
+                " VALUES (?, 'open', ?, ?, ?, ?, ?)",
                 (
                     card["forecast_id"],
                     card["window_end"],
                     card["category"],
                     card.get("confirmed_by") or "unknown",
+                    card.get("base_rate"),
+                    card.get("base_rate_sample", 0),
                 ),
             )
             connection.execute(
@@ -393,6 +453,7 @@ class ForecastService:
             rows = connection.execute(
                 """
                 SELECT r.brier_score,
+                       f.base_rate,
                        (SELECT v.content FROM forecast_versions v
                          WHERE v.forecast_id = f.forecast_id
                          ORDER BY v.version DESC LIMIT 1) AS latest_content
@@ -412,15 +473,24 @@ class ForecastService:
         }
 
     def _calibratable(self, row) -> bool:
-        """这条已结算预测能不能进 Brier 平均。
+        """这条已结算预测能不能进 Brier 平均。两条硬门槛，任一不满足即排除：
 
-        判据是**命题是否可结算**，不是 `confirmed_by != 'unknown'`。
-        后者看着合理、其实方向是错的：`confirmed_by` 是 v1.1 才加的列，
-        DEFAULT 就是 'unknown'（本意是标"历史行来源不可考"），于是任何没有
-        经过 confirm_candidate 落库的预测都会被误排除，连新建的正常预测也算。
-        改用与入账闸同一把尺子：旧口径那种"是否产生实际影响"的模糊命题
-        自然不合格、被排除；四要素齐全的新命题自然合格、被计入。
+        1) 有基准率（base_rate 非 NULL）。基准率缺失（样本 < 5）的预测，其概率
+           没有「你过去在这个类别上的实际命中率」做锚，进 Brier 只会用无锚的概率
+           污染校准分。这与第一波「不可校准」口径一致：校准只用**可结算 + 有基准率**
+           的命题。基准率来自账本自身 resolutions（见 base_rate_for_category），
+           **绝不由 probability 反推**。
+        2) 命题可结算（四要素齐备，过 _settlement_ready 闸）。模糊命题自然不合格。
+
+        base_rate 直接从 forecasts 表列读取（SELECT 已带上），不依赖版本内容解析——
+        版本内容里即便渲染了 base_rate，也以表列为准，避免解析口径漂移。
         """
+        # 门槛 1：无基准率 → 不可校准。
+        # ⚠ row 是 sqlite3.Row —— **它没有 .get() 方法**，写成 row.get(...) 会抛
+        # AttributeError 把整个校准面板打崩（本轮已实际发生过一次，被组 C 的断言抓住）。
+        # 用 keys() 判断列是否存在；缺列时保守判为不可校准，宁可少算也不误算。
+        if "base_rate" not in row.keys() or row["base_rate"] is None:
+            return False
         fields = parse_frontmatter(row["latest_content"] or "")
         from .impacts import _settlement_ready  # 局部导入，避免模块级循环依赖
 
@@ -447,7 +517,7 @@ class ForecastService:
             rows = connection.execute(
                 """
                 SELECT f.forecast_id, f.category, r.outcome, r.resolved_at,
-                       r.probability, r.brier_score,
+                       r.probability, r.brier_score, f.base_rate,
                        (SELECT v.content FROM forecast_versions v
                          WHERE v.forecast_id = f.forecast_id
                          ORDER BY v.version DESC LIMIT 1) AS latest_content

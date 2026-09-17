@@ -68,7 +68,11 @@ class Database:
                     -- 'unknown'（v1.1 之前的历史行，**来源已不可考，不要假装知道**）。
                     -- 放在 forecasts 而不是 personal_impacts：后者是有保留期的明细表，
                     -- 会被清理规则删掉，放那里等于来源信息会随明细一起消失。
-                    confirmed_by TEXT NOT NULL DEFAULT 'unknown'
+                    confirmed_by TEXT NOT NULL DEFAULT 'unknown',
+                    -- 基准率：同类别历史结算命中率（来自账本自身 resolutions）。
+                    -- 样本 < 5 时为 NULL，绝不编造默认值顶上。
+                    base_rate REAL,
+                    base_rate_sample INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS forecast_versions(
                     forecast_id TEXT NOT NULL,
@@ -432,6 +436,9 @@ class Database:
             # forecasts 无不可变触发器，所以 ADD COLUMN 可用；DEFAULT 会自动填到
             # 已有的历史行上（这正是我们要的：它们无法归因，标成 unknown）。
             ("forecasts", "confirmed_by", "TEXT NOT NULL DEFAULT 'unknown'"),
+            # 基准率：同类别历史结算命中率。REAL 可空（样本不足即 NULL）。
+            ("forecasts", "base_rate", "REAL"),
+            ("forecasts", "base_rate_sample", "INTEGER NOT NULL DEFAULT 0"),
         )
         existing_tables = {
             row[0]
