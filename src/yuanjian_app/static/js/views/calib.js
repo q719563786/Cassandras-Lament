@@ -15,7 +15,7 @@ const HELP_HTML = `<details class="card calib-help u-mb-md">
     </div>
   </details>`;
 
-// 远见 v1.1 · 校准面板 —— KPI×4 / Brier 周序列 SVG / 按类别条形 / 候选确认 + 预测账本（AC-02/AC-08）
+// 远见 v1.2 · 校准面板 —— KPI×4 / Brier 周序列 SVG / 按类别条形 / 候选确认 + 预测账本（AC-02/AC-08）
 import { api, escapeHtml, showToast, paginationHtml, bindPagination, pageRange } from '../api.js';
 import { statusLabel, categoryLabel, formatLocalTime } from '../ui_core.js';
 

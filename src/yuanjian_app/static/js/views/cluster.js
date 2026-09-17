@@ -1,4 +1,4 @@
-// 远见 v1.1 · 事件详情页
+// 远见 v1.2 · 事件详情页
 // 展示GYW六步分析、多路径推演、领先指标、个人影响、证据来源
 import { api, escapeHtml, showLoading, showPageError } from '../api.js';
 
