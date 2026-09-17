@@ -49,7 +49,17 @@ class ClusteringTests(unittest.TestCase):
 
         self.assertFalse(should_merge(left, right).merge)
 
-    def test_items_more_than_72_hours_apart_do_not_merge(self):
+    # ⚠ v1.3 有意变更（审计 2.12：72 小时聚类切断"势头"）
+    #
+    # 旧契约：超过 72 小时一律不合并，原因恒为 outside_time_window。
+    #   后果：同一件事的后续报道被切成 N 个独立事件，各自进账本、各自算概率，
+    #   "势头"在数据层就断了。
+    # 新契约：72 小时之外**只对近重复**放行（score≥0.85，或有共同数字且 score≥0.70），
+    #   原因记为 continued_subject（落进 event_cluster_items.merge_reason，可审计）；
+    #   不是近重复的仍然不合并；超过 30 天一律不合并。
+    #
+    # 下面把三条边界都钉住。
+    def test_near_duplicate_story_beyond_72_hours_merges_as_continued_subject(self):
         observed_at = datetime(2026, 8, 1, tzinfo=timezone.utc)
         left = ClusterText("广东医保报销比例升至70%", "政策实施", observed_at)
         right = ClusterText(
@@ -60,8 +70,45 @@ class ClusteringTests(unittest.TestCase):
 
         decision = should_merge(left, right)
 
+        self.assertTrue(decision.merge)
+        self.assertEqual(decision.reason, "continued_subject")
+
+    def test_unrelated_items_more_than_72_hours_apart_do_not_merge(self):
+        observed_at = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        left = ClusterText("广东发布教育规划", "新增学校学位", observed_at)
+        right = ClusterText(
+            "广东发布黄金消费数据", "金价与销量变化", observed_at + timedelta(hours=73)
+        )
+
+        decision = should_merge(left, right)
+
         self.assertFalse(decision.merge)
         self.assertEqual(decision.reason, "outside_time_window")
+
+    def test_同一件事超过三十天之后不再合并(self):
+        observed_at = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        left = ClusterText("广东医保报销比例升至70%", "政策实施", observed_at)
+        right = ClusterText(
+            "广东医保报销比例升至70%",
+            "政策实施",
+            observed_at + timedelta(days=40),
+        )
+
+        decision = should_merge(left, right)
+
+        self.assertFalse(decision.merge)
+        self.assertEqual(decision.reason, "outside_time_window")
+
+    def test_七十二小时以内规则完全没变(self):
+        """延长合并不能顺带改动原窗口内的行为。"""
+        observed_at = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        left = ClusterText("广东发布教育规划", "新增学校学位", observed_at)
+        right = ClusterText("广东发布黄金消费数据", "金价与销量变化", observed_at)
+
+        decision = should_merge(left, right)
+
+        self.assertFalse(decision.merge)
+        self.assertEqual(decision.reason, "insufficient_agreement")
 
     def test_text_features_are_cached_across_repeated_comparisons(self):
         """同一段文本在聚类里会被反复比对，特征提取必须命中缓存。

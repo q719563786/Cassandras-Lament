@@ -67,16 +67,18 @@ assert.equal(ui.regionLabel(''), '未分区');
     def test_risk_mapping_keeps_three_user_facing_levels(self):
         self.run_ui_core(
             """
-assert.equal(ui.riskLabel('L4'), '高风险');
-assert.equal(ui.riskLabel('L3'), '中风险');
-assert.equal(ui.riskLabel('L2'), '低风险');
-assert.equal(ui.riskLabel('L1'), '低风险');
+// v1.3（审计 2.11）：L 档算的是"关注度"不是损失量级，文案随之改名
+assert.equal(ui.riskLabel('L4'), '重点关注');
+assert.equal(ui.riskLabel('L3'), '需要关注');
+assert.equal(ui.riskLabel('L2'), '低优先');
+assert.equal(ui.riskLabel('L1'), '低优先');
 assert.equal(ui.riskClass('L4'), 'high');
 assert.equal(ui.riskClass('L3'), 'mid');
 assert.equal(ui.riskClass('L2'), 'low');
-assert.equal(ui.riskTag('L4'), '<span class="tag tag-high">HIGH</span>');
-assert.equal(ui.riskTag('L3'), '<span class="tag tag-mid">MID</span>');
-assert.equal(ui.riskTag('L1'), '<span class="tag tag-low">LOW</span>');
+// v1.3：标签文案同步改为关注度口径（L 档是关注度，不是风险量级）
+assert.equal(ui.riskTag('L4'), '<span class="tag tag-high">重点</span>');
+assert.equal(ui.riskTag('L3'), '<span class="tag tag-mid">关注</span>');
+assert.equal(ui.riskTag('L1'), '<span class="tag tag-low">低</span>');
 """
         )
 
@@ -116,9 +118,9 @@ assert.equal(
   ui.summarizeRun({backfill: {processed: 0}, queued: 0, judgments: {succeeded: 0}, mapped_impacts: 0, notifications_created: 0, elapsed_ms: 9}),
   '运行完成（0.0秒）。尚无新增待处理信息——去源管理启用几个与你相关的信息源，或把新情况直接告诉远见。'
 );
-assert.deepEqual(ui.inputResult({alert_level: 'L4', recommended_action: '马上联系医院'}), {advice: '马上联系医院', risk: '高风险'});
-assert.deepEqual(ui.inputResult({alert_level: 'L3', recommended_action: '先保留现金'}), {advice: '先保留现金', risk: '中风险'});
-assert.deepEqual(ui.inputResult({alert_level: 'L2', recommended_action: ''}), {advice: '先记录事实，暂不做不可逆决定。', risk: '低风险'});
+assert.deepEqual(ui.inputResult({alert_level: 'L4', recommended_action: '马上联系医院'}), {advice: '马上联系医院', risk: '重点关注'});
+assert.deepEqual(ui.inputResult({alert_level: 'L3', recommended_action: '先保留现金'}), {advice: '先保留现金', risk: '需要关注'});
+assert.deepEqual(ui.inputResult({alert_level: 'L2', recommended_action: ''}), {advice: '先记录事实，暂不做不可逆决定。', risk: '低优先'});
 assert.equal(ui.formatBytes(512), '512 B');
 assert.equal(ui.formatBytes(2048), '2.0 KB');
 assert.equal(ui.formatBytes(5 * 1024 * 1024), '5.0 MB');

@@ -1,4 +1,4 @@
-// 远见 v1.2 · 今日远见 · 行动雷达模式
+// 远见 v1.3 · 今日远见 · 行动雷达模式
 // 首页 = L4 立即行动 + L3 准备观察 + 今日低后悔动作 + 预测进度 KPI + 告诉远见
 import { api, escapeHtml } from '../api.js';
 import { tellBoxHtml, bindTellBox } from './tell.js';
@@ -77,7 +77,8 @@ function actionCardHtml(item, isL4) {
   const action = escapeHtml(item.action || item.advice || '');
   const direction = item.direction || '没有明显变化';
   const dirClass = directionClass(direction);
-  const riskLabel = escapeHtml(item.risk_label || '');
+  const riskLabel = escapeHtml(item.attention_label || '');
+  const magnitude = escapeHtml(item.magnitude || '');
   const confirmed = item.candidate_confirmed;
   const source = escapeHtml(item.source || '');
   const eventTime = formatEventTime(item.event_time);
@@ -96,6 +97,7 @@ function actionCardHtml(item, isL4) {
     <div class="ac-main" data-action="open-detail">
       <div class="ac-header">
         <span class="badge badge-alert-${isL4 ? 'l4' : 'l3'}">${riskLabel}</span>
+        ${magnitude ? `<span class="badge badge-window">${magnitude}</span>` : ''}
         <span class="ac-window">窗口：${window}</span>
         <span class="ac-direction ${dirClass}">${escapeHtml(direction)}</span>
       </div>

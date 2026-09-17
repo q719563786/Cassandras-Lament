@@ -1,4 +1,4 @@
-// 远见 v1.2 · 纯逻辑核心（零 DOM，可 Node 独立验证）
+// 远见 v1.3 · 纯逻辑核心（零 DOM，可 Node 独立验证）
 // 继承旧 ui_core.js / cognition_ui.js / risk_ui.js 的全部纯函数逻辑，改 ES Module 导出
 
 const evidence = Object.freeze({
@@ -47,15 +47,21 @@ export function tierLabel(value) {
   return sourceTiers[value] || String(value);
 }
 
-// 风险三档映射：L4→高 / L3→中 / L1-L2→低（对用户呈现中文档位 + 方角标签）
+// 关注度三档映射：L4→重点 / L3→需要关注 / L1-L2→低优先（对用户呈现中文档位 + 方角标签）
+//
+// ⚠ 口径说明（v1.3，审计 2.11）：L 档出自
+//   证据×.25 + 置信×.20 + 我在乎×.25 + 领域相关×.20 + 紧迫×.10
+// —— 其中"我在乎""领域相关"衡量的是**与我有多相关**，不是损失规模。
+// 所以它只能叫「关注度」。要说"这事有多大"，看量级那一行
+// （证据里没有金额/数量时它写「未量化」，不编数字）。
 export function riskClass(level) {
   return ({L4: 'high', L3: 'mid'})[level] || 'low';
 }
 export function riskLabel(level) {
-  return ({L4: '高风险', L3: '中风险'})[level] || '低风险';
+  return ({L4: '重点关注', L3: '需要关注'})[level] || '低优先';
 }
 export function riskTag(level) {
-  const text = ({L4: 'HIGH', L3: 'MID'})[level] || 'LOW';
+  const text = ({L4: '重点', L3: '关注'})[level] || '低';
   return `<span class="tag tag-${riskClass(level)}">${text}</span>`;
 }
 
@@ -126,7 +132,8 @@ export function summarizeRun(result) {
 // 手动输入结果解读（继承 risk_ui.inputResult）
 export function inputResult(signal) {
   const item = signal || {};
-  const risk = ({L4: '高风险', L3: '中风险', L2: '低风险', L1: '低风险'})[item.alert_level] || '待判断';
+  // 「关注度」而非「风险」：见文件上方 riskLabel 的口径说明
+  const risk = ({L4: '重点关注', L3: '需要关注', L2: '低优先', L1: '低优先'})[item.alert_level] || '待判断';
   return {
     advice: item.recommended_action || '先记录事实，暂不做不可逆决定。',
     risk

@@ -139,7 +139,12 @@ class GywV2ContractTests(unittest.TestCase):
             (EvidenceItem("s1", "t", "sum", "d.com", "https://d.com", "2026-01-01"),),
         )
         result = provider.analyze(bundle)
-        self.assertEqual(len(result.gyw), 12)
+        # v1.3：本机研判额外附加了 5 个键（scenario_paths / power_structure /
+        # risk_signal_hit / leading_indicator_hits / leading_boost /
+        # historical_parallel_source / source_domains 中的新增项）。
+        # 这些在 schema 校验**之后**附加，不进远程 AI 的输出契约。
+        # 旧值 12 → 17。
+        self.assertEqual(len(result.gyw), 17)
         self.assertEqual(result.gyw["beneficiaries"], [])
         self.assertIsNone(result.gyw["historical_parallel"])
         self.assertGreaterEqual(len(result.gyw["observable_signals"]), 2)

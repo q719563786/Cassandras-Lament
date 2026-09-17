@@ -320,11 +320,13 @@ class RiskDashboardTests(unittest.TestCase):
         self.assertTrue(all("原始新闻标题" not in item["title"] for item in dashboard["items"]))
         first = dashboard["items"][0]
         self.assertEqual(first["interest_category"], "cashflow")
-        self.assertEqual(first["risk_label"], "高风险")
+        # v1.3 有意变更（审计 2.11）：这个档位算的是**关注度**不是风险量级，
+        # 所以文案从"高风险"改为"重点关注"，字段名同步改为 attention_label。
+        self.assertEqual(first["attention_label"], "重点关注")
         self.assertIn("留足对应现金", first["advice"])
         self.assertNotIn("预测账本", first["advice"])
         self.assertEqual(first["reason"], "第6项外部变化可能压缩可用资金")
-        self.assertEqual(dashboard["items"][2]["risk_label"], "中风险")
+        self.assertEqual(dashboard["items"][2]["attention_label"], "需要关注")
 
     def test_dashboard_calls_thirty_day_l3_a_low_risk_watch(self):
         self.add_risk(2, "L3", ["30天内"], 0.65)
@@ -334,7 +336,7 @@ class RiskDashboardTests(unittest.TestCase):
         )
 
         self.assertEqual(dashboard["items"][0]["mode"], "watch")
-        self.assertEqual(dashboard["items"][0]["risk_label"], "低风险")
+        self.assertEqual(dashboard["items"][0]["attention_label"], "低优先")
 
     def test_dashboard_reports_verifying_and_never_calls_blind_monitoring_stable(self):
         self.add_risk(1, "L3", ["30天内"], pending=True)

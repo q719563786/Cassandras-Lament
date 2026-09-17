@@ -1099,11 +1099,17 @@ class CognitionController:
                     interest_category, candidate.get("recommended_action")
                 )
             short_fact = _short_fact(fact_summary)
-            risk_label = (
-                "高风险"
+            # v1.3（审计 2.11）：这个档位出自
+            #   证据×.25 + 置信×.20 + **我在乎**×.25 + 领域相关×.20 + 紧迫×.10
+            # 里面有两项是"对我有多相关"，所以它是**关注度**，不是风险量级。
+            # 旧文案写"高/中/低风险"会被读成损失规模。
+            attention_label = (
+                "重点关注"
                 if row["alert_level"] == "L4"
-                else "中风险" if mode == "action" else "低风险"
+                else "需要关注" if mode == "action" else "低优先"
             )
+            # 量级：候选卡里带的是可核验表述，没数字就是"未量化"（绝不编）
+            magnitude = candidate.get("magnitude_line") or ""
             items.append(
                 {
                     "cluster_id": row["cluster_id"],
@@ -1111,7 +1117,9 @@ class CognitionController:
                     "mode": mode,
                     "alert_level": row["alert_level"],
                     "risk_level": "需要行动" if mode == "action" else "继续观察",
-                    "risk_label": risk_label,
+                    "attention_label": attention_label,
+                    "magnitude": magnitude,
+                    "risk_signal_keywords": candidate.get("risk_signal_hit") or [],
                     "interest_name": interest_name,
                     "interest_category": interest_category,
                     "title": f"{interest_name}：{fact_summary}",

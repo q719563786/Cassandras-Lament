@@ -1,4 +1,4 @@
-/* 远见 v1.2 · 视图样式 —— 干净克制 */
+/* 远见 v1.3 · 视图样式 —— 干净克制 */
 
 /* === 区域标题 === */
 .section-h {
@@ -650,3 +650,279 @@
   font-weight: 600;
 }
 .l4-btn-done:hover { background: var(--l4-bg); }
+
+
+/* ══════════════════════════════════════════════════════════════
+   事件详情页（#/cluster/…）
+   ══════════════════════════════════════════════════════════════
+   v1.3 补：这一页此前用到 53 个类，而 CSS 里**一个都没定义** ——
+   于是「登高望远六步分析」「多路径推演」「个人影响」全是裸 HTML。
+   以下类只做排版与语义色，不引入新令牌。
+*/
+
+/* —— 页面骨架 —— */
+.page-nav { margin-bottom: var(--s-3); }
+.btn-text {
+  background: none;
+  border: none;
+  color: var(--amber);
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: var(--s-1) 0;
+  text-decoration: none;
+}
+.btn-text:hover { color: var(--amber-dim); }
+
+/* —— 卡片标题 —— */
+.section-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 var(--s-3) 0;
+  padding-bottom: var(--s-2);
+  border-bottom: 1px solid var(--border);
+}
+
+/* —— 详情页头部 —— */
+.detail-header { display: flex; flex-direction: column; gap: var(--s-2); }
+.detail-badges { display: flex; flex-wrap: wrap; gap: var(--s-2); }
+.detail-title {
+  font-size: 1.15rem;
+  line-height: 1.5;
+  color: var(--text-primary);
+  margin: var(--s-2) 0 0 0;
+}
+.detail-summary {
+  font-size: 0.88rem;
+  line-height: 1.7;
+  color: var(--text-secondary);
+  margin: 0;
+}
+.detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+/* —— 关注度/证据/置信度标签（badge-alert-L* 由 JS 动态拼） —— */
+.badge-alert-L4 { background: var(--l4-bg); color: var(--l4); }
+.badge-alert-L3 { background: var(--l3-bg); color: var(--l3); }
+.badge-alert-L2,
+.badge-alert-L1,
+.badge-alert- { background: var(--blue-bg); color: var(--blue); }
+.badge-evidence { background: var(--blue-bg); color: var(--blue); }
+.badge-conf { background: var(--bg-elevated); color: var(--text-secondary); }
+.badge-window { background: var(--bg-surface); color: var(--text-muted); }
+.badge-confirmed { background: var(--green-bg); color: var(--green); }
+.badge-pending { background: var(--amber-bg); color: var(--amber); }
+
+/* —— 通用小标签 —— */
+.tag {
+  display: inline-block;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  padding: 1px var(--s-2);
+  border-radius: var(--r-sm);
+  vertical-align: middle;
+}
+.tag-high { background: var(--green-bg); color: var(--green); }
+.tag-mid { background: var(--orange-bg); color: var(--orange); }
+.tag-low { background: var(--bg-elevated); color: var(--text-muted); }
+.text-warn { color: var(--orange); }
+
+/* —— 事实摘要 / 因果链 —— */
+.fact-summary {
+  font-size: 0.88rem;
+  line-height: 1.7;
+  color: var(--text-secondary);
+  margin-bottom: var(--s-3);
+}
+.fact-actors {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+.actor-tag {
+  display: inline-block;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 1px var(--s-2);
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+.fact-chain { margin-top: var(--s-3); }
+.fact-chain h4 {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  margin: 0 0 var(--s-2) 0;
+  font-weight: 500;
+}
+.fact-chain ol {
+  margin: 0;
+  padding-left: var(--s-6);
+  font-size: 0.85rem;
+  line-height: 1.8;
+  color: var(--text-secondary);
+}
+.triggers { margin-top: var(--s-3); display: flex; flex-direction: column; gap: var(--s-2); }
+.trigger-up,
+.trigger-down {
+  font-size: 0.82rem;
+  line-height: 1.6;
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-sm);
+  border-left: 2px solid var(--border-medium);
+}
+.trigger-up { background: var(--red-bg); color: var(--text-secondary); border-left-color: var(--red); }
+.trigger-down { background: var(--green-bg); color: var(--text-secondary); border-left-color: var(--green); }
+
+/* —— 六步分析网格 —— */
+.gyw-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--s-3);
+}
+.gyw-item {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+}
+.gyw-item h4 {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--amber);
+  margin: 0 0 var(--s-2) 0;
+}
+.gyw-item p {
+  font-size: 0.85rem;
+  line-height: 1.7;
+  color: var(--text-secondary);
+  margin: 0 0 var(--s-1) 0;
+}
+.gyw-item p:last-child { margin-bottom: 0; }
+.gyw-wide { grid-column: 1 / -1; }
+.gyw-list {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+  font-size: 0.85rem;
+  line-height: 1.7;
+  color: var(--text-secondary);
+}
+.gyw-list li { margin-bottom: var(--s-2); }
+
+/* —— 多路径推演 —— */
+.scenario-list { display: flex; flex-direction: column; gap: var(--s-2); }
+.scenario-item {
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--border-medium);
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+  background: var(--bg-surface);
+}
+.scenario-most { border-left-color: var(--amber); }
+.scenario-secondary { border-left-color: var(--blue); }
+.scenario-swan { border-left-color: var(--text-faint); }
+.scenario-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--s-2);
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  margin-bottom: var(--s-2);
+}
+.scenario-prob { font-size: 0.78rem; color: var(--text-muted); }
+.scenario-desc {
+  font-size: 0.85rem;
+  line-height: 1.7;
+  color: var(--text-secondary);
+  margin: 0 0 var(--s-2) 0;
+}
+.scenario-watch {
+  font-size: 0.8rem;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  padding-top: var(--s-2);
+  border-top: 1px solid var(--border);
+}
+
+/* —— 个人影响 —— */
+.impact-list { display: flex; flex-direction: column; gap: var(--s-3); }
+.impact-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--s-3);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+}
+.impact-main { flex: 1; min-width: 0; }
+.impact-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  margin-bottom: var(--s-2);
+}
+.impact-name { font-size: 0.85rem; color: var(--text-primary); font-weight: 600; }
+.impact-title {
+  font-size: 0.85rem;
+  line-height: 1.7;
+  color: var(--text-secondary);
+  margin-bottom: var(--s-2);
+}
+.impact-action {
+  font-size: 0.83rem;
+  line-height: 1.7;
+  color: var(--amber);
+  margin-bottom: var(--s-2);
+}
+.impact-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+/* —— 证据来源 —— */
+.source-evidence-list { display: flex; flex-direction: column; gap: var(--s-3); }
+.evidence-item {
+  border-left: 2px solid var(--border-medium);
+  padding-left: var(--s-3);
+}
+.evidence-title { font-size: 0.85rem; line-height: 1.6; }
+.evidence-title a { color: var(--text-primary); text-decoration: none; }
+.evidence-title a:hover { color: var(--amber); text-decoration: underline; }
+.evidence-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  margin-top: var(--s-1);
+}
+.evidence-summary {
+  font-size: 0.8rem;
+  line-height: 1.7;
+  color: var(--text-muted);
+  margin-top: var(--s-1);
+}
+.evidence-more {
+  font-size: 0.78rem;
+  color: var(--text-faint);
+  text-align: center;
+  padding-top: var(--s-2);
+}

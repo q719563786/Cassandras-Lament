@@ -32,26 +32,63 @@ _BANNED_PHRASES = (
 )
 
 
+# 可观测信号的长度与条数上限。
+# 为什么要有：命题是拿去**机械核验**的（"到那天看什么新闻能判定真假"），
+# 塞进去的程序内部记账文本既不可观测，也会把标题撑长到读不下去。
+MAX_OBSERVABLE_SIGNAL_CHARS = 60
+MAX_OBSERVABLE_SIGNALS = 4
+
+# 本机规则引擎写在领先指标尾部的内部标注。它不是"可观测事实"，要剥掉。
+_ENGINE_ANNOTATION = re.compile(r"[｜|]?\s*规则引擎命中[:：].*$", re.S)
+
+
+def _clean_signal(value) -> str:
+    """把一个候选信号洗成"人能用一条新闻去对照"的短句。"""
+    text = str(value or "").strip()
+    if not text or text in ("待补充", "尚未补充"):
+        return ""
+    text = _ENGINE_ANNOTATION.sub("", text).strip(" ；;｜|")
+    if not text:
+        return ""
+    if len(text) > MAX_OBSERVABLE_SIGNAL_CHARS:
+        text = text[:MAX_OBSERVABLE_SIGNAL_CHARS].rstrip(" ，,；;、") + "…"
+    return text
+
+
 def _extract_observable_signals(judgment):
-    """从判断内容里抽取可观测信号（领先指标 / 触发条件），作为命题的
-    “阈值或可观测事实”要素。空则命题不具备结算性。"""
+    """从判断内容里抽取可观测信号，作为命题的“阈值或可观测事实”要素。
+    空则命题不具备结算性。
+
+    v1.3 起**优先取 `gyw.observable_signals`**：那是校验器唯一强制过
+    "具体到能被一条未来新闻证伪"的字段（还带引用约束），可结算性最好。
+    它缺失时才退回 `leading_indicators` + 上下调触发条件。
+    旧版把顺序反了，于是最好的一路数据被排在最差的两路之后。
+    """
     signals = []
     gyw = judgment.get("gyw") or {}
+    structured = gyw.get("observable_signals") or []
+    if isinstance(structured, str):
+        structured = [structured]
+    for item in structured:
+        item = _clean_signal(item)
+        if item:
+            signals.append(item)
     leading = (gyw.get("leading_indicators") or "").strip()
     if leading:
         leading = re.sub(r"^领先指标[:：]\s*", "", leading).strip()
-        if leading and leading not in ("待补充", "尚未补充"):
+        leading = _clean_signal(leading)
+        if leading:
             signals.append(leading)
     for trig in (judgment.get("up_triggers") or []) + (judgment.get("down_triggers") or []):
-        trig = (trig or "").strip()
-        if trig and trig not in ("待补充", "尚未补充", ""):
+        trig = _clean_signal(trig)
+        if trig:
             signals.append(trig)
     seen, out = set(), []
     for s in signals:
         if s not in seen:
             seen.add(s)
             out.append(s)
-    return "；".join(out)
+    return "；".join(out[:MAX_OBSERVABLE_SIGNALS])
 
 
 def _settlement_ready(candidate):
@@ -85,22 +122,118 @@ def _interval_width(evidence_level: str) -> float:
     return _INTERVAL_WIDTH.get(evidence_level, _INTERVAL_WIDTH["E1"])
 
 
-def _signal_adjustment(judgment) -> float:
-    """把「与来源多少无关」的真实信号折算成中心偏移（约 ±0.2）。
+# 领先指标对概率中心的影响上限（与 knowledge_base.MAX_LEADING_BOOST 同一件事）。
+# 上限之所以必需：8 条模式可以同时命中（"降息+专项债+试点"很常见），
+# 不封顶就有 0.87 的推力，那就退化成"关键词越多概率越高"。
+MAX_LEADING_BOOST = 0.20
 
-    只用：紧迫性(horizons) + 是否有可观测的领先指标/触发条件。
+
+def _signal_adjustment(judgment) -> float:
+    """把「与来源多少无关」的真实信号折算成中心偏移。
+
+    只用三样：
+      1. 紧迫性（horizons）
+      2. 是否有具体的可观测领先指标 / 触发条件
+      3. **命中的领先指标规则及其 risk_boost**（v1.3 起真正参与运算）
+
     **不**用 confidence、也**不**用来源数量——那正是审计在批的失真来源。
+
+    v1.3 修正：`risk_boost` 此前只被拼进一句展示文本（"风险上调 +15%"），
+    从未进过任何公式 —— 用户看到"风险上调 15%"，而那个数字是装饰。
+    现在它按 knowledge_base 给出的权重**真实折进中心**，合计封顶
+    MAX_LEADING_BOOST，并作为独立一段写进候选卡（可核对）。
     """
     urgency = _urgency(judgment.get("horizons", ()))
     triggers = (judgment.get("up_triggers") or []) + (judgment.get("down_triggers") or [])
     concrete = 1.0 if any(
         t and str(t).strip() not in ("", "待补充", "尚未补充") for t in triggers
     ) else 0.0
-    leading = (judgment.get("gyw") or {}).get("leading_indicators", "")
+    gyw = judgment.get("gyw") or {}
+    leading = gyw.get("leading_indicators", "")
     has_leading = 1.0 if leading and str(leading).strip() not in ("", "待补充", "尚未补充") else 0.0
     raw = urgency * 0.5 + (concrete + has_leading) / 2 * 0.5  # 0..1
     delta = (raw - 0.5) * 0.4
-    return max(-0.2, min(0.2, delta))
+    boost = _leading_boost(judgment)
+    # 上限比单项宽：领先信号是"条件已埋下"的直接证据，配得上独立的一段推力。
+    return max(-0.2, min(0.30, delta + boost))
+
+
+def _leading_boost(judgment) -> float:
+    """取本次研判的领先指标合计权重（已封顶）。来源优先级：
+    gyw.leading_boost（本地研判写入）> gyw.leading_indicator_hits（重算）。"""
+    gyw = judgment.get("gyw") or {}
+    try:
+        value = float(gyw.get("leading_boost") or 0.0)
+    except (TypeError, ValueError):
+        value = 0.0
+    if value <= 0:
+        hits = gyw.get("leading_indicator_hits") or []
+        value = sum(
+            float(item.get("risk_boost") or 0.0)
+            for item in hits
+            if isinstance(item, dict)
+        )
+    return max(0.0, min(MAX_LEADING_BOOST, value))
+
+
+# 量级：从证据文本里抽可核验的数量级数字。
+# 为什么必须有它（审计 2.11）：L1–L4 的分数是
+#   证据×.25 + 置信×.20 + **我在乎**×.25 + 领域相关×.20 + 紧迫×.10
+# ——里面有两项是"对我有多相关"，所以它算出来的是**关注度**，不是风险量级。
+# 界面此前把它翻成"高/中/低风险"，等于把关注度当成损失规模。既不能改名糊过去
+# （用户仍需要知道"这事大不大"），也不能编数字，所以**如实标注"未量化"**。
+_NUMBER_RE = re.compile(
+    r"\d+(?:\.\d+)?\s*(?:%|亿元|万亿|万元|元|个百分点|bp|BP|万|亿|"
+    r"吨|万吨|万人|万户|万立方米|立方米|公里|亩|平方米|亩产)"
+)
+_MAGNITUDE_SCOPE = {
+    "central_direct": "全国（中央发文）",
+    "vertical_agency": "全国（垂直系统）",
+    "ministry_lead": "全国/行业",
+    "local_lead": "地方/区域",
+}
+
+
+def _magnitude(judgment, cluster) -> dict:
+    """给出「这件事的量级」的**可核验**表述，没有就明说没有。"""
+    texts = [
+        str(cluster.get("summary") or ""),
+        str(judgment.get("fact_summary") or ""),
+        " ".join(str(x) for x in (judgment.get("causal_chain") or [])),
+        str((judgment.get("gyw") or {}).get("constraints") or ""),
+    ]
+    numbers: list[str] = []
+    for text in texts:
+        for match in _NUMBER_RE.finditer(text):
+            value = match.group(0).strip()
+            if value not in numbers:
+                numbers.append(value)
+    numbers = numbers[:5]
+
+    power = (judgment.get("gyw") or {}).get("power_structure") or {}
+    scope = _MAGNITUDE_SCOPE.get(str(power.get("rule") or ""), "未判定")
+
+    if numbers:
+        level = "有数字，但未折算成本/收益量级"
+        basis = (
+            "证据里出现了这些数量：" + "、".join(numbers)
+            + "。它们说明事件有可核验的规模线索，但**尚未折算成对你本人的成本或收益**，"
+            "所以不能当成量级结论。"
+        )
+    else:
+        level = "未量化"
+        basis = (
+            "证据中没有任何金额/数量/规模数字，因此**无法给出量级**。"
+            "这不是「小」，是「不知道」——不要用看起来严重的词替代没有的数字。"
+        )
+    return {"scope": scope, "level": level, "numbers": numbers, "basis": basis}
+
+
+def magnitude_line(magnitude) -> str:
+    """把量级对象压成一行可落库的文本。"""
+    if not isinstance(magnitude, dict):
+        return ""
+    return f"范围 {magnitude.get('scope', '未判定')}；量级 {magnitude.get('level', '未量化')}"
 
 
 def _probability_center(base_rate, judgment) -> float:
@@ -196,6 +329,11 @@ CATEGORY_EXPOSURE = {
 
 def _iso(value):
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _elevate(level):
+    """告警等级上调一档（L1→L2→L3→L4，L4 封顶）。"""
+    return {"L1": "L2", "L2": "L3", "L3": "L4", "L4": "L4"}.get(level, level)
 
 
 def _alert_level(score):
@@ -301,7 +439,7 @@ class ImpactService:
             default=0.0,
         )
 
-    def _candidate(self, cluster, judgment, interest, impact_id):
+    def _candidate(self, cluster, judgment, interest, impact_id, alert_level=None):
         now = self.now().astimezone(timezone.utc)
         end = now + timedelta(days=_window_days(judgment.get("horizons", [])))
         end_date = end.date().isoformat()
@@ -328,11 +466,23 @@ class ImpactService:
             f"任一事实在该日期前发生即记为“发生”，否则记为“未发生”。"
             f"核验以官方公告、主管部门文件及本地可核验记录为准。"
         )
+        magnitude = _magnitude(judgment, cluster)
+        gyw = judgment.get("gyw") or {}
         return {
             "impact_id": impact_id,
             "title": title,
             "resolution_criteria": resolution_criteria,
             "observable_signals": observable,
+            # 真实告警等级（confirm_candidate 此前硬编码 L3，把等级信息丢了）
+            "alert_level": alert_level,
+            # 量级：没有数字就明说"未量化"（审计 2.11）
+            "magnitude": magnitude,
+            "magnitude_line": magnitude_line(magnitude),
+            # 「慷慨激昂」命中词：界面要显示"因为哪个词"，否则无从判断
+            "risk_signal_hit": list(gyw.get("risk_signal_hit") or []),
+            "power_structure_rule": (gyw.get("power_structure") or {}).get("rule"),
+            "delay_risk": (gyw.get("power_structure") or {}).get("delay_risk"),
+            "leading_boost": _leading_boost(judgment),
             "window_start": now.date().isoformat(),
             "window_end": end_date,
             # 概率：中心 = base_rate + 信号调整；宽度只由 E 级决定（证据越弱越宽）。
@@ -418,10 +568,19 @@ class ImpactService:
             components["personal_relevance"] = relevance
             score = round(max(0.0, min(base_score * relevance, 1.0)), 6)
             alert = _alert_level(score)
+            # 「慷慨激昂 = 内心已感知风险」→ **上调告警等级**。
+            # v1.3 修正：旧代码在本地研判里做的是 `confidence += 0.08`，方向反了
+            # （越慷慨激昂，系统越自信）。规则引擎的判断本该落在风险侧，这里落地。
+            risk_hits = list((judgment.get("gyw") or {}).get("risk_signal_hit") or [])
+            if risk_hits:
+                alert = _elevate(alert)
+                components["risk_signal_keywords"] = risk_hits
+                components["alert_before_risk_signal"] = _alert_level(score)
             # E1 是单一来源线索，未经互证。README 与 PRIVACY.md 对外承诺
             # 「E1 无论多重要都不得超过 L3」，此处是该承诺的强制点：只有 E2 及以上
             # （同域转载不算互证）才允许进入 L4 立即行动。证据等级缺失或无法识别时
             # 与 EVIDENCE_WEIGHTS 的兜底权重一致，按 E1 处理，宁可保守。
+            # ⚠ 顺序要求：**在上调之后**执行这道封顶，否则风险信号会把 E1 顶上 L4。
             if alert == "L4" and evidence <= EVIDENCE_WEIGHTS["E1"]:
                 alert = "L3"
             with self.database.connect() as connection:
@@ -433,7 +592,9 @@ class ImpactService:
                     (cluster_id, judgment_id, interest["object_id"]),
                 ).fetchone()
                 impact_id = existing["impact_id"] if existing else "P-" + uuid.uuid4().hex
-                candidate = self._candidate(cluster, judgment, interest, impact_id)
+                candidate = self._candidate(
+                    cluster, judgment, interest, impact_id, alert_level=alert
+                )
                 if existing:
                     old_candidate = json.loads(existing["candidate_json"] or "{}")
                     if old_candidate.get("confirmed_forecast_id"):
@@ -710,6 +871,18 @@ class ImpactService:
                 "falsification": candidate["falsification"],
                 "recommended_action": candidate["recommended_action"],
                 "confirmed_by": by,
+                # ⚠ 以下五项此前**一个都没传**。后果是：证伪性闸在入账那一刻
+                # 用 observable_signals 判过命题是否可结算，而**落进账本时它被丢了**
+                # —— 到期核对时账本里没有"阈值或可观测事实"这一要素，命题实际不可核。
+                # base_rate / base_rate_sample 同理：第二波加了字段，却从未落过库。
+                # 这是同一个"字段静默丢失"病的第 4 次发作（前三次：confirmed_by、
+                # observable_signals、base_rate）。**加字段时先查它有没有进这条链。**
+                "observable_signals": candidate.get("observable_signals", ""),
+                "base_rate": candidate.get("base_rate"),
+                "base_rate_sample": candidate.get("base_rate_sample", 0),
+                "magnitude": candidate.get("magnitude_line", ""),
+                "risk_signal_keywords": "、".join(candidate.get("risk_signal_hit") or []),
+                "alert_level": candidate.get("alert_level") or "L3",
             }
         )
         candidate["confirmed_forecast_id"] = result["forecast_id"]

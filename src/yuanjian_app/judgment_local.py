@@ -7,10 +7,12 @@ import re
 from .judgment_models import EvidenceBundle, JudgmentResult
 from .judgment_validation import validate_judgment
 from .knowledge_base import (
+    MAX_LEADING_BOOST,
     analyze_power_structure,
     detect_leading_indicators,
     detect_risk_signals,
     generate_scenario_paths,
+    total_leading_boost,
 )
 
 
@@ -56,14 +58,28 @@ class LocalHeuristicProvider:
     )
 
     # ── 历史事件映射表（关键词 → (事件名, 相似点, 不同点)）──
+    # v1.3 三处修正（审计七步#7）：
+    #   a) **去重**：原表有三对完全重复的条目（裁员/失业、房地产、人民币汇率各两次），
+    #      重复条目会因"首个命中即返回"而把另一条永远挡在后面。
+    #   b) **改为打分匹配**：原先是 for-首个命中-即返回，而关键词大量交叠
+    #      （"降息"同时出现在第 1、2、15 条），结果第 15 条（美联储）永远到不了。
+    #      现在按 (命中条数, 关键词总长) 取最佳匹配。
+    #   c) **补本地领域**：原表全部是宏观金融，与本人实际用途（地方水务/招投标/
+    #      产业园区/督察）几乎不重叠，于是绝大多数条目拿到 None。
+    # 另：所有条目都是**手写的模板类比，不是检索结果**。返回时会显式标注这一点，
+    # 不允许它冒充"查到的历史"。
     _HISTORICAL_PARALLELS = [
-        (("LPR", "利率", "降息", "降准"), "2024年LPR下调与5年期以上利率一次性降25bp",
+        (("LPR", "中期借贷便利", "MLF", "逆回购", "公开市场操作", "利率走廊"),
+         "2024年LPR下调与5年期以上利率一次性降25bp",
          "同样是货币政策宽松周期中的利率调整，市场关注对房贷和企业融资成本的传导",
          "当前经济周期位置、房地产市场温度和外部汇率约束与2024年不同"),
-        (("降准", "存款准备金"), "2023年两次降准共释放长期资金超万亿",
+        (("降准", "存款准备金率"), "2023年两次降准共释放长期资金超万亿",
          "同样通过释放银行体系流动性支持实体经济，信号意义大于实际规模",
          "当前银行净息差压力和地方债务化解需求更为突出"),
-        (("房地产", "楼市", "房价", "限购"), "2014-2015年房地产去库存周期",
+        (("美联储", "联邦基金利率", "鲍威尔"), "2022年美联储激进加息周期",
+         "同样是美联储货币政策转向对全球资本流动和新兴市场的冲击",
+         "当前通胀位置、美国经济韧性和各国货币政策空间不同"),
+        (("房地产", "楼市", "房价", "限购", "房贷"), "2014-2015年房地产去库存周期",
          "同样面临库存高企、销售低迷和政策转向宽松的组合，政策从紧缩转向刺激",
          "当前人口结构、城镇化率和居民杠杆率与2014年有本质差异"),
         (("地方债", "专项债", "化债"), "2015年地方政府债务置换",
@@ -72,66 +88,80 @@ class LocalHeuristicProvider:
         (("CPI", "通胀", "通缩", "物价"), "2012-2013年CPI低位徘徊期",
          "同样面临需求不足导致的物价低迷，政策关注点从防通胀转向稳增长",
          "当前外部环境、地产周期和人口结构与2012年不同"),
-        (("PMI", "制造业", "工业"), "2018-2019年制造业PMI持续低于荣枯线",
+        (("PMI", "制造业景气", "工业增加值"), "2018-2019年制造业PMI持续低于荣枯线",
          "同样是外需走弱叠加内部转型压力，制造业景气度承压",
          "当前产业链位置和新能源等新动能占比与2018年不同"),
         (("关税", "贸易战", "贸易摩擦"), "2018-2019年中美贸易摩擦",
          "同样是大国博弈在贸易领域的具体化，关税手段反复升级",
          "当前全球供应链重构程度和双方依赖度已发生变化"),
-        (("制裁", "出口管制"), "2022年半导体出口管制升级",
+        (("制裁", "出口管制", "实体清单"), "2022年半导体出口管制升级",
          "同样是通过技术管制遏制对手产业升级，影响全球供应链",
          "当前受影响领域和反制手段可能不同"),
-        (("人民币", "汇率", "贬值", "升值"), "2015年811汇改",
+        (("人民币", "汇率", "贬值", "升值", "外汇"),
+         "2015年811汇改",
          "同样面临汇率波动与资本流动管理的平衡，市场预期管理是关键",
          "当前外汇储备充足度和资本项目开放程度与2015年不同"),
         (("社融", "信贷", "贷款"), "2022年社融增速持续下行",
          "同样是有效需求不足导致的信贷疲软，政策试图宽货币向宽信用传导",
          "当前房地产和地方政府融资约束与2022年不同"),
-        (("裁员", "失业", "就业"), "2022年互联网行业裁员潮",
+        (("裁员", "就业", "失业", "失业率"), "2022年互联网行业裁员潮",
          "同样是行业调整期的就业压力，传导至消费和社会预期",
          "当前涉及行业范围和政策托底力度可能不同"),
-        (("新能源", "光伏", "电动车", "电池"), "2018年光伏531政策",
+        (("新能源", "光伏", "电动车", "动力电池"), "2018年光伏531政策",
          "同样是新兴产业在快速扩张后面临政策调整和产能过剩压力",
          "当前产业成熟度、全球市场份额和技术迭代速度与2018年不同"),
-        (("疫情", "公共卫生"), "2020年初新冠疫情爆发",
+        (("疫情", "公共卫生", "传染病"), "2020年初新冠疫情爆发",
          "同样是突发公共卫生事件对经济和社会运行的冲击",
          "当前病毒特性、防控经验和医疗资源准备与2020年不同"),
-        (("IPO", "上市", "注册制"), "2019年科创板设立与注册制试点",
+        (("IPO", "注册制", "上市辅导"), "2019年科创板设立与注册制试点",
          "同样是资本市场制度改革，影响企业融资渠道和市场估值体系",
          "当前市场环境、投资者结构和退市机制完善程度不同"),
-        (("美联储", "加息", "降息"), "2022年美联储激进加息周期",
-         "同样是美联储货币政策转向对全球资本流动和新兴市场的冲击",
-         "当前通胀位置、美国经济韧性和各国货币政策空间不同"),
-        (("就业", "裁员", "失业", "失业率"), "2022年互联网行业裁员潮",
-         "同样是行业调整期的就业压力，传导至消费和社会预期",
-         "当前涉及行业范围和政策托底力度可能不同"),
-        (("房地产", "楼市", "房价", "限购", "房贷"), "2014-2015年房地产去库存周期",
-         "同样面临库存高企、销售低迷和政策转向宽松的组合",
-         "当前人口结构、城镇化率和居民杠杆率与2014年有本质差异"),
-        (("基建", "基础设施", "投资", "项目"), "2008年四万亿刺激计划",
+        (("基建", "基础设施", "重大工程", "重点项目"), "2008年四万亿刺激计划",
          "同样是通过基建投资拉动总需求，短期见效快但长期影响债务结构",
          "当前地方债务负担、产能过剩程度和政策空间与2008年不同"),
-        (("消费", "内需", "零售", "补贴"), "2009年家电下乡与汽车购置税减免",
+        (("消费", "内需", "社会消费品零售", "以旧换新"),
+         "2009年家电下乡与汽车购置税减免",
          "同样是通过财政补贴刺激消费，短期拉动效果明显但退出后可能回落",
          "当前居民收入预期、消费倾向和政策工具与2009年不同"),
-        (("汇率", "人民币", "贬值", "升值", "外汇"), "2015年811汇改",
-         "同样面临汇率波动与资本流动管理的平衡，市场预期管理是关键",
-         "当前外汇储备充足度和资本项目开放程度与2015年不同"),
         (("能源", "原油", "石油", "天然气", "电价"), "2022年欧洲能源危机",
          "同样是能源价格剧烈波动对通胀和产业链的冲击",
          "当前能源结构、战略储备和地缘政治格局不同"),
-        (("粮食", "农业", "农产品", "耕地", "种业"), "2007-2008年全球粮食危机",
+        (("粮食", "耕地", "种业", "农产品"), "2007-2008年全球粮食危机",
          "同样是粮食价格上涨对通胀和社会稳定的压力",
          "当前粮食储备、自给率和国际供应链环境不同"),
-        (("人口", "出生", "老龄化", "生育"), "2016年全面二孩政策",
+        (("老龄化", "生育", "出生人口", "人口结构"), "2016年全面二孩政策",
          "同样是人口政策调整试图逆转长期趋势，短期效果有限",
          "当前生育意愿、养育成本和社会观念与2016年不同"),
-        (("科技", "芯片", "半导体", "人工智能", "AI"), "2018年中兴事件与半导体管制升级",
+        (("芯片", "半导体", "人工智能", "算力"), "2018年中兴事件与半导体管制升级",
          "同样是技术管制推动国产替代和产业链重构",
          "当前技术成熟度、国内市场规模和反制能力与2018年不同"),
-        (("环保", "碳达峰", "碳中和", "减排", "能耗"), "2021年运动式减碳与限电",
+        (("碳达峰", "碳中和", "减排", "能耗双控"), "2021年运动式减碳与限电",
          "同样是环保政策执行中出现一刀切和运动式推进，引发短期冲击",
          "当前政策执行精细化程度和能源保供能力不同"),
+        # ── 以下为本人的实际用途领域（v1.3 补，此前完全无覆盖）──
+        (("水务", "供水", "污水处理", "自来水", "水厂", "管网"),
+         "2015年《水污染防治行动计划》（水十条）后的污水处理提标改造周期",
+         "同样是自上而下的水质目标推动地方集中上项目、改工艺、补管网",
+         "当前地方财政状况、水价调整空间和支付能力与2015年不同"),
+        (("水利", "引水", "水库", "防洪", "堤防", "灌区"),
+         "2014年确定的172项节水供水重大水利工程集中开工期",
+         "同样是水利投资作为稳增长抓手，项目从立项到开工有明确节点",
+         "当前地方配套资金到位率、征地节奏和专项债额度与当年不同"),
+        (("招标", "投标", "中标", "采购公告", "政府采购", "公开招标"),
+         "2000年《招标投标法》施行后的工程建设招投标体系建立期",
+         "同样是从「关系定标」转向「程序定标」，流程刚性和留痕要求显著上升",
+         "当前电子招投标、评定分离改革和监管强度与当年不同"),
+        (("产业园", "开发区", "工业园区", "园区"),
+         "2000年代各地开发区、工业园区的集中建设期",
+         "同样是地方以园区为载体重资产招商，先基建后招商、以地换项目",
+         "当前土地指标、债务约束和招商竞争格局与当年不同"),
+        (("乡村振兴", "帮扶", "脱贫", "农村人居环境"),
+         "2015-2020年脱贫攻坚期的项目集中下达",
+         "同样是自上而下压任务、限期完成、以考核推动地方落地",
+         "当前考核力度、资金来源和基层执行能力与攻坚期不同"),
+        (("督察", "巡视", "整改", "问责"), "2016年起中央环境保护督察常态化",
+         "同样是督察组进驻、限期整改、地方集中关停与补手续",
+         "当前督察频次、整改标准和地方承受能力与首轮不同"),
     ]
 
     # ── 事件类型 → 典型阻力方 ──────────────────────────────────
@@ -227,10 +257,18 @@ class LocalHeuristicProvider:
         resistance_str = "、".join(resistance[:3])
 
         # 力量对比：基于推动方级别
-        central_markers = ("国务院", "中央", "全国人大", "央行", "财政部", "发改委", "国家")
+        # v1.3：原 markers 含裸"国家"，且用单字"省"/"市"做子串匹配 ——
+        # 而"国家统计局/国家重点"到处都是、"市场/城市"都含"市"。
+        # 改成只认明确机构全称。
+        central_markers = (
+            "国务院", "中共中央", "中央办公厅", "中央政治局", "全国人大",
+            "全国政协", "国资委",
+        )
         if any(marker in pusher for marker in central_markers):
             balance = f"{pusher}处于强势主导地位，政策自上而下推进；阻力方分散且缺乏否决能力，但执行层的变通和拖延可能削弱实际效果"
-        elif any(marker in pusher for marker in ("省", "市", "地方")):
+        elif re.search(r"省|市|自治区|自治州|县|区|旗", pusher) and re.search(
+            r"政府|管委会|局|厅|委|办公室|办|部|署", pusher
+        ):
             balance = f"{pusher}在辖区内有执行力，但需上级政策配套和财政支持；跨区域协调能力有限"
         elif any(marker in pusher for marker in ("公司", "集团", "企业")):
             balance = f"{pusher}作为市场主体有商业决策自主权，但受监管、市场竞争和股东约束"
@@ -507,12 +545,39 @@ class LocalHeuristicProvider:
         ])
         return signals[:5]
 
-    def _find_historical_parallel(self, text: str) -> str | None:
+    # 模板类比的显式标注。**不允许它冒充"查到的历史"。**
+    PARALLEL_SOURCE_LABEL = "本机模板类比（不是检索结果，需自行核验）"
+
+    @classmethod
+    def _best_historical_parallel(cls, text: str):
+        """按 (命中关键词条数, 关键词总长) 取最佳匹配。
+
+        v1.3 改打分匹配的原因：原先是首个命中即返回，而关键词大量交叠
+        （"降息"同时属于第 1、2、15 条），导致后面的条目永远到不了。
+        打分后"美联储加息"能正确落到美联储那条，而不是落到"利率调整"那条。
+        """
+        best = None
+        for keywords, name, similarity, difference in cls._HISTORICAL_PARALLELS:
+            hits = [kw for kw in keywords if kw in text]
+            if not hits:
+                continue
+            score = (len(hits), sum(len(kw) for kw in hits))
+            if best is None or score > best[0]:
+                best = (score, hits, name, similarity, difference)
+        return best
+
+    @classmethod
+    def _find_historical_parallel(cls, text: str) -> str | None:
         """基于关键词匹配历史事件（对应方法论 4.1：历史的周期律）。"""
-        for keywords, name, similarity, difference in self._HISTORICAL_PARALLELS:
-            if any(kw in text for kw in keywords):
-                return f"可比事件：{name}。相似点：{similarity}。不同点：{difference}"
-        return None
+        found = cls._best_historical_parallel(text)
+        if found is None:
+            return None
+        _score, hits, name, similarity, difference = found
+        return (
+            f"可比事件：{name}｜**{cls.PARALLEL_SOURCE_LABEL}**。"
+            f"匹配关键词：{'、'.join(hits)}。"
+            f"相似点：{similarity}。不同点：{difference}"
+        )
 
     def analyze(self, bundle: EvidenceBundle) -> JudgmentResult:
         # 区间宽度：仅由证据等级决定（证据越弱越宽）。区间**中心**不再由 E 级决定——
@@ -552,17 +617,25 @@ class LocalHeuristicProvider:
 
         # P1 规则引擎：用登高望远方法论的结构化规则增强研判
         # 1) 领先指标检测：从证据文本中匹配已知的领先信号模式（试点/预算/人事/草案/数据/利率等）
+        #    v1.3：risk_boost 不再只是拼在文本里的装饰 —— 它由
+        #    impacts._signal_adjustment 折进概率中心，真正参与运算。
         detected_indicators = detect_leading_indicators(bundle.title, bundle.summary)
+        leading_boost = total_leading_boost(detected_indicators)
         if detected_indicators:
             extra = "；".join(
-                f"{m['signal']}（风险上调 +{m['risk_boost']:.0%}）"
+                f"{m['signal']}（领先信号权重 +{m['risk_boost']:.0%}）"
                 for m in detected_indicators
             )
-            leading_indicators = f"{leading_indicators}｜规则引擎命中：{extra}"
-        # 2) 风险信号检测：慷慨激昂 = 内心已感知风险，命中则上调置信度
+            leading_indicators = (
+                f"{leading_indicators}｜规则引擎命中：{extra}"
+                f"｜合计权重 +{leading_boost:.0%}（已计入概率中心，合计封顶 "
+                f"{MAX_LEADING_BOOST:.0%}）"
+            )
+        # 2) 风险信号检测：慷慨激昂 = 内心已感知风险。
+        #    ⚠ v1.3 修正方向：旧代码在这里做 `confidence += 0.08` ——
+        #    越慷慨激昂，系统越自信。而方法论说的是**风险更高**，不是"我们判断得更准"。
+        #    现在：不动 confidence，改为把命中词记下来，由 impacts 上调**告警等级**。
         risk_signal_hit = detect_risk_signals(bundle.title, bundle.summary)
-        if risk_signal_hit:
-            confidence = min(0.95, confidence + 0.08)
         # 3) 多路径推演：最可能 / 次可能 / 黑天鹅（方法论要求不能只给最小阻力路径）
         scenario_paths = generate_scenario_paths(event_type, institutions, text)
         # 4) 权力结构分析：谁有否决权、执行层会不会拖延
@@ -572,7 +645,13 @@ class LocalHeuristicProvider:
         urgent = any(word in text for word in ("今日", "本月", "立即", "生效", "实施", "紧急", "突发"))
         horizons = ("未来7天", "未来30天") if urgent else ("未来30天", "未来90天")
 
-        actors = tuple(dict.fromkeys(item.domain for item in bundle.items if item.domain))
+        # v1.3 修正 actors 语义（审计 4.3）：字段名是 actors（参与方），
+        # 旧代码填的却是**来源域名** —— 于是界面把"某网站"当成了"当事方"。
+        # 现在 actors = 从证据里提取到的机构名；域名另存 source_domains 供来源区块用。
+        source_domains = tuple(
+            dict.fromkeys(item.domain for item in bundle.items if item.domain)
+        )
+        actors = tuple(institutions) if institutions else source_domains
         source_ids = tuple(dict.fromkeys(item.source_id for item in bundle.items))
 
         # fact_summary：用标题 + 提取到的机构/数字丰富
@@ -617,5 +696,24 @@ class LocalHeuristicProvider:
         # （避免破坏远程 AI provider 的输出契约）。
         result.gyw["scenario_paths"] = scenario_paths
         result.gyw["power_structure"] = power_structure
+        # risk_signal_hit：命中词列表（空列表=未命中）。前端要显示"因为哪个词"，
+        # 否则用户看到"风险上调"却无从判断这句话凭什么。
         result.gyw["risk_signal_hit"] = risk_signal_hit
+        result.gyw["leading_indicator_hits"] = detected_indicators
+        result.gyw["leading_boost"] = leading_boost
+        result.gyw["historical_parallel_source"] = self.PARALLEL_SOURCE_LABEL
+        # 来源域名（与 actors 区分开：域名是"谁报道的"，actors 是"谁在事里"）
+        result.gyw["source_domains"] = list(source_domains)
+        found = self._best_historical_parallel(text)
+        result.gyw["historical_parallel_detail"] = (
+            None
+            if found is None
+            else {
+                "event": found[2],
+                "similarity": found[3],
+                "difference": found[4],
+                "matched_keywords": found[1],
+                "source": self.PARALLEL_SOURCE_LABEL,
+            }
+        )
         return result

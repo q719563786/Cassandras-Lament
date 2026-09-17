@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from urllib.parse import urlsplit
 
 from .judgment_models import (
@@ -12,6 +13,7 @@ from .judgment_models import (
     EvidenceItem,
     MAX_BUNDLE_CHARACTERS,
     MAX_EVIDENCE_SOURCES,
+    system_instruction_for,
 )
 
 
@@ -71,6 +73,12 @@ def build_public_bundle(cluster: dict, items: list[dict]) -> EvidenceBundle:
         categories=categories,
         items=tuple(evidence),
     )
+    # v1.3：认知框架块按事件内容组装（天外实体侧只在相关事件上注入）。
+    # 必须在长度裁剪**之前**设定，否则裁剪时算的不是真实体积。
+    bundle = replace(
+        bundle,
+        system_instruction=system_instruction_for(bundle.title, bundle.summary),
+    )
     while _serialized_length(bundle) > MAX_BUNDLE_CHARACTERS and bundle.items:
         longest = max(range(len(bundle.items)), key=lambda i: len(bundle.items[i].summary))
         target = bundle.items[longest]
@@ -92,6 +100,7 @@ def build_public_bundle(cluster: dict, items: list[dict]) -> EvidenceBundle:
                 bundle.evidence_level,
                 bundle.categories,
                 tuple(values),
+                bundle.system_instruction,
             )
         else:
             bundle = EvidenceBundle(
@@ -101,5 +110,6 @@ def build_public_bundle(cluster: dict, items: list[dict]) -> EvidenceBundle:
                 bundle.evidence_level,
                 bundle.categories,
                 bundle.items[:-1],
+                bundle.system_instruction,
             )
     return bundle

@@ -157,6 +157,10 @@ def _normalized_card(data, forecast_id=None, created_at=None):
         "confirmed_by": confirmed_by,
         "base_rate": base_rate,
         "base_rate_sample": base_rate_sample,
+        # 量级（v1.3）：没有数字时为「未量化」的如实表述，**不是**一个数字。
+        "magnitude": str(data.get("magnitude", "")).strip(),
+        # 「慷慨激昂」命中的词（v1.3）：让"为什么这条等级更高"在账本里可追溯。
+        "risk_signal_keywords": str(data.get("risk_signal_keywords", "")).strip(),
     }
 
 
@@ -179,6 +183,8 @@ privacy_level: {card['privacy_level']}
 observable_signals: {card.get('observable_signals', '')}
 base_rate: {('null' if card['base_rate'] is None else card['base_rate'])}
 base_rate_sample: {card['base_rate_sample']}
+magnitude: {card.get('magnitude', '')}
+risk_signal_keywords: {card.get('risk_signal_keywords', '')}
 ---
 ## 因果链
 {card['causal_chain']}
