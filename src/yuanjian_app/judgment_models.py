@@ -162,6 +162,21 @@ class JudgmentResult:
     # 结合用户个人上下文给出的"对用户本人的相关性结论 + 行动方向"。
     # 远程 AI 结合个人画像生成；本地兜底为通用保守表述（前端会按 provider 区分）。
     personal_action: str = ""
+    # 本次分析的可信度来源（**本机标记，不由 AI 产出**）：
+    #   'real'        —— provider 真的产出了分析（本机启发式 / 远程 AI 的正常输出）
+    #   'degraded'    —— 走了 repair_judgment 的**字段修补**：远程 AI 输出不合规，
+    #                    缺的字段被默认值顶上了
+    #   'placeholder' —— 走了**最小兜底**：实质内容为空，只是为了让流程不中断
+    # 为什么必须有它：兜底出来的研判此前**看起来和正常分析一模一样** ——
+    # 界面上是一份填满"待补充"的六步分析，账本上却会据此生成候选预测。
+    # 审计原话：「最危险的地方不是分析得差，是分析失败时看起来和分析成功一样。」
+    #
+    # 两个刻意的设计：
+    #   1) 带默认值 → 既有构造点（validate_judgment）无需改动；
+    #   2) **不放进 _RESULT_FIELDS** → 它不会出现在发给 AI 的结构化输出契约里，
+    #      也不会因"未知字段"被 validate_judgment 拒掉。
+    # 它随 to_dict() 自动写进 content_json，**因此不需要加表列、不碰不可变触发器**。
+    analysis_status: str = "real"
 
     def to_dict(self) -> dict:
         value = asdict(self)

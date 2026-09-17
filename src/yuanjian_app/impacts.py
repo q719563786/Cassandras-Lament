@@ -367,6 +367,20 @@ class ImpactService:
 
     def map_judgment(self, cluster_id: str, judgment_id: str) -> list[dict]:
         cluster, judgment = self._load(cluster_id, judgment_id)
+        # v1.2 第三波：**分析不成立的研判不得产生候选预测**。
+        #
+        # 候选预测会进不可变账本并参与 Brier 校准 —— 不能建立在"其实没分析"的基础上。
+        # 兜底出来的研判此前和正常分析长得一模一样，这条路是它进账本的入口。
+        #
+        # 只拦**显式**的 degraded / placeholder：
+        #   - 历史行没有这个字段（`.get()` 得到 None）→ 不拦。
+        #     不是漏判 —— 那些"兜底出来的"历史行其实**已经被第一波的证伪性闸拦住了**：
+        #     它们的 observable_signals 是占位值「后续官方公告 / 执行进展通报」，
+        #     而这两个词正在 _BANNED_PHRASES 里。两道闸互补，不是重复。
+        #   - 若这里把历史行也一并拦掉，等于把所有既有事件的候选生成一起停掉 ——
+        #     那是过度收紧，会把功能打死。
+        if judgment.get("analysis_status") in ("degraded", "placeholder"):
+            return []
         categories = tuple(judgment.get("impact_categories", ()))
         evidence = EVIDENCE_WEIGHTS.get(cluster["evidence_level"], 0.25)
         confidence = max(0.0, min(float(judgment.get("confidence", 0.0)), 1.0))

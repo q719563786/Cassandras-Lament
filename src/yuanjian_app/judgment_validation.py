@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from .judgment_models import (
     ALLOWED_IMPACT_CATEGORIES,
     InvalidJudgmentError,
@@ -190,6 +192,10 @@ def repair_judgment(raw: dict, allowed_source_ids: set[str]) -> JudgmentResult |
     if not isinstance(raw, dict):
         return None
 
+    # 本函数要记住「有没有用默认值顶过 AI 的缺失」。归一化（去空格/截断/清引用）
+    # **不算**降级 —— 只有"AI 没给出来"才算，否则几乎每条都会变成 degraded。
+    substituted = False
+
     # 1. 顶层字段修复
     top_defaults = {
         "fact_summary": "远程AI输出事实摘要缺失，已由本地修复填充",
@@ -210,20 +216,28 @@ def repair_judgment(raw: dict, allowed_source_ids: set[str]) -> JudgmentResult |
     }
     repaired: dict = {}
     for key, default in top_defaults.items():
+        if key not in raw:
+            # ⚠ 这一行是必需的： 在键**缺失**时直接返回默认值，
+            # 于是下面那些"类型不对/为空 → 用默认值顶上"的分支根本不会走到，
+            # substituted 也就永远置不上。必须在这里单独判一次。
+            substituted = True
         value = raw.get(key, default)
         if key in ("fact_summary", "personal_action"):
             if not isinstance(value, str) or not value.strip():
                 value = default
+                substituted = True
             else:
                 value = " ".join(str(value).split())[:400]
         elif key in _LIST_FIELDS:
             if not isinstance(value, list):
                 value = list(default)
+                substituted = True
             else:
                 value = [str(v) for v in value if v is not None]
         elif key in ("probability_low", "probability_high", "confidence"):
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 value = default
+                substituted = True
             else:
                 value = max(0.0, min(1.0, float(value)))
         elif key == "impact_categories":
@@ -257,10 +271,13 @@ def repair_judgment(raw: dict, allowed_source_ids: set[str]) -> JudgmentResult |
     }
     repaired_gyw: dict = {}
     for key, default in gyw_defaults.items():
+        if key not in gyw:
+            substituted = True   # 同上：键缺失时 .get 直接给默认值，不走替换分支
         value = gyw.get(key, default)
         if key in _GYW_LEGACY_STRING_FIELDS:
             if not isinstance(value, str) or not value.strip():
                 value = default
+                substituted = True
             repaired_gyw[key] = value.strip()
         elif key in ("beneficiaries", "cost_bearers"):
             mode_key = "gain" if key == "beneficiaries" else "cost"
@@ -304,6 +321,9 @@ def repair_judgment(raw: dict, allowed_source_ids: set[str]) -> JudgmentResult |
             signals = [str(s).strip() for s in value if isinstance(s, str) and s.strip()]
             if len(signals) < 2:
                 signals = (signals + ["后续官方公告", "执行进展通报"])[:2]
+                # 占位信号 —— 直白说：这两个词永远不会错，因此无法证伪。
+                # 落到这里说明 AI 根本没给出可观测的信号。
+                substituted = True
             repaired_gyw[key] = signals[:8]
     repaired["gyw"] = repaired_gyw
 
@@ -313,7 +333,11 @@ def repair_judgment(raw: dict, allowed_source_ids: set[str]) -> JudgmentResult |
 
     # 4. 尝试通过严格校验；失败时构造最小有效研判（永不返回None，避免免费AI被无谓降级）
     try:
-        return validate_judgment(repaired, allowed_source_ids)
+        result = validate_judgment(repaired, allowed_source_ids)
+        return replace(
+            result,
+            analysis_status="degraded" if substituted else "real",
+        )
     except InvalidJudgmentError:
         # 兜底：从已修复数据中提取文本字段，构造一个保证通过校验的最小有效研判
         safe_fact = str(repaired.get("fact_summary") or "远程AI研判已生成，详情请查看事件原文").strip()
@@ -352,7 +376,12 @@ def repair_judgment(raw: dict, allowed_source_ids: set[str]) -> JudgmentResult |
         # 关键修复：必须返回 JudgmentResult 而非裸 dict——队列持久化时要调 .to_dict()，
         # 返回 dict 会让整个 run_due 工作循环抛 AttributeError 中断。
         try:
-            return validate_judgment(fallback, allowed_source_ids)
+            # 最小兜底：内容实质为空，只是为了让流程不中断。**必须标出来** ——
+            # 否则它会以「一份完整的六步分析」的样子出现在界面上。
+            return replace(
+                validate_judgment(fallback, allowed_source_ids),
+                analysis_status="placeholder",
+            )
         except InvalidJudgmentError:
             # 理论不可达（fallback 已严格按 schema 构造）；再兜一层绝对最小合法研判
             minimal = {
@@ -378,4 +407,7 @@ def repair_judgment(raw: dict, allowed_source_ids: set[str]) -> JudgmentResult |
                     "observable_signals": ["后续官方公告", "执行进展通报"],
                 },
             }
-            return validate_judgment(minimal, allowed_source_ids)
+            return replace(
+                validate_judgment(minimal, allowed_source_ids),
+                analysis_status="placeholder",
+            )

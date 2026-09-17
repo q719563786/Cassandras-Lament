@@ -24,6 +24,9 @@ function renderGywSection(gyw) {
       <div class="gyw-item">
         <h4>② 利益方向</h4>
         <p>${escapeHtml(gyw.interests || '-')}</p>
+      ${(j.analysis_status === 'degraded' || j.analysis_status === 'placeholder')
+        ? `<p class="u-dim">本次未生成有效分析（来源：${escapeHtml(j.analysis_status === 'placeholder' ? '兜底占位' : '字段修补')}）——以下内容仅供占位，不要据此做判断。</p>`
+        : ''}
       </div>
       <div class="gyw-item">
         <h4>③ 结构约束</h4>
