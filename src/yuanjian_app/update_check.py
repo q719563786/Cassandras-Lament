@@ -14,8 +14,10 @@ import json
 import urllib.error
 import urllib.request
 
-DEFAULT_ENDPOINT = "https://api.github.com/repos/q719563786/Foresight/releases/latest"
-RELEASES_PAGE = "https://github.com/q719563786/Foresight/releases"
+DEFAULT_ENDPOINT = (
+    "https://api.github.com/repos/q719563786/Cassandras-Lament/releases/latest"
+)
+RELEASES_PAGE = "https://github.com/q719563786/Cassandras-Lament/releases"
 
 
 def parse_version(text):

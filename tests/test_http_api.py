@@ -1103,7 +1103,7 @@ class HttpApiTests(unittest.TestCase):
             response.close()
 
         self.assertEqual(payload["version"], __version__)
-        self.assertIn("q719563786/Foresight", payload["releases_url"])
+        self.assertIn("q719563786/Cassandras-Lament", payload["releases_url"])
 
     def test_update_check_is_unavailable_until_wired(self):
         """未装配更新检查时必须明确 503，而不是静默返回假结果。"""

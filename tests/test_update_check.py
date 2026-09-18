@@ -153,8 +153,8 @@ class UpdateCheckServiceTests(unittest.TestCase):
     def test_default_endpoint_and_page_point_at_this_repository(self):
         service = UpdateCheckService()
 
-        self.assertIn("q719563786/Foresight", service.endpoint)
-        self.assertIn("q719563786/Foresight", RELEASES_PAGE)
+        self.assertIn("q719563786/Cassandras-Lament", service.endpoint)
+        self.assertIn("q719563786/Cassandras-Lament", RELEASES_PAGE)
         self.assertTrue(RELEASES_PAGE.startswith("https://"))
 
 

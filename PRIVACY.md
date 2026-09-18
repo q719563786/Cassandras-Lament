@@ -29,7 +29,7 @@
 
 程序平时不主动外发任何数据。**唯一的例外是设置页的「检查更新」按钮**，而且只在你点击时触发：
 
-- 请求地址固定为 `https://api.github.com/repos/q719563786/Foresight/releases/latest`
+- 请求地址固定为 `https://api.github.com/repos/q719563786/Cassandras-Lament/releases/latest`（项目对外名为 Cassandra's Lament／卡珊德拉的哀歌，内部代号「远见」；仓库改名后旧地址 `q719563786/Foresight` 由 GitHub 自动跳转，此处的地址已改为新名）
 - 请求头只有固定的 `Accept` 与 `User-Agent`，**不携带版本号、路径、主机名或任何使用信息**
 - 只读取公开发布的版本号用于比较，不下载、不上报、不轮询
 - 断网、超时或返回异常时安静降级为"暂时查不到"，不会弹出错误，也不会谎报有新版本

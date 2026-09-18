@@ -1,4 +1,4 @@
-// 远见 v1.4 · 图标注册表 —— 13 枚自绘 SVG（designer-phase1.md §1 代码直用）
+// 远见 v1.4.1 · 图标注册表 —— 13 枚自绘 SVG（designer-phase1.md §1 代码直用）
 // 唯一图标来源：HTML 写 <span data-icon="ic_radar"></span>，由 yjMountIcons 注入
 // 全部 currentColor / 1.5 描边 / miter 方角；圆弧仅雷达/刷新/电源三处几何弧
 

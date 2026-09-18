@@ -1,4 +1,4 @@
-// 远见 v1.4 · 设置 —— 备份/保留/学习开关持久化 + 移动摘要导出 + 外部 AI 表单
+// 远见 v1.4.1 · 设置 —— 备份/保留/学习开关持久化 + 移动摘要导出 + 外部 AI 表单
 import { api, escapeHtml, showToast } from '../api.js';
 
 // 通用 toggle 行：GET 容错（端点未就绪显示未知）+ PUT 持久化

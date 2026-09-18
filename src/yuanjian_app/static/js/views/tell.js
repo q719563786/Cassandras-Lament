@@ -1,4 +1,4 @@
-// 远见 v1.4 · 告诉远见 —— 手动录入视图 + 上次结果卡（today 内联复用 tellBoxHtml/bindTellBox）
+// 远见 v1.4.1 · 告诉远见 —— 手动录入视图 + 上次结果卡（today 内联复用 tellBoxHtml/bindTellBox）
 import { api, escapeHtml, showToast, withBusy } from '../api.js';
 import { inputResult, riskTag, formatLocalTime } from '../ui_core.js';
 
