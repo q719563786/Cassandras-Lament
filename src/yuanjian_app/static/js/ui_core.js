@@ -1,4 +1,4 @@
-// 远见 v1.3 · 纯逻辑核心（零 DOM，可 Node 独立验证）
+// 远见 v1.4 · 纯逻辑核心（零 DOM，可 Node 独立验证）
 // 继承旧 ui_core.js / cognition_ui.js / risk_ui.js 的全部纯函数逻辑，改 ES Module 导出
 
 const evidence = Object.freeze({

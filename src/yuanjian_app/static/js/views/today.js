@@ -1,4 +1,4 @@
-// 远见 v1.3 · 今日远见 · 行动雷达模式
+// 远见 v1.4 · 今日远见 · 行动雷达模式
 // 首页 = L4 立即行动 + L3 准备观察 + 今日低后悔动作 + 预测进度 KPI + 告诉远见
 import { api, escapeHtml } from '../api.js';
 import { tellBoxHtml, bindTellBox } from './tell.js';
@@ -200,14 +200,26 @@ function progressHtml(progress) {
   const overdueBanner = overdue > 0
     ? `<div class="overdue-banner"><span class="overdue-count">${overdue}</span> 条预测已到期待结算 — <a href="#/calib">去结算</a></div>`
     : '';
+  // R-04：这两栏**只算"你亲手选过概率的"**。机器自动确认的单独分列给出、不合并 ——
+  // 并进来之后，"历史命中"就变成了系统跟自己对账。
+  const bySource = progress.by_source || {};
+  const auto = bySource.auto || {};
+  const unknown = bySource.unknown || {};
+  const otherResolved = Number(auto.resolved_binary || 0) + Number(unknown.resolved_binary || 0);
+  const otherHit = Number(auto.hit_total || 0) + Number(unknown.hit_total || 0);
+  const otherMiss = Number(auto.miss_total || 0) + Number(unknown.miss_total || 0);
+  const othersNote = otherResolved > 0
+    ? `<div class="u-dim">另有 ${otherResolved} 条系统自动确认的预测已结算（命中 ${otherHit} / 失误 ${otherMiss}），不计入上面两栏。</div>`
+    : '';
   return `<section class="card u-mb-md">
     ${overdueBanner}
     <div class="u-row">
       <div class="kpi-block"><div class="kpi-num">${String(resolved_total ?? 0)}</div><div class="kpi-label">已结算预测</div></div>
-      <div class="kpi-block"><div class="kpi-num">${String(hit_total ?? 0)}</div><div class="kpi-label">历史命中</div></div>
-      <div class="kpi-block"><div class="kpi-num">${String(miss_total ?? 0)}</div><div class="kpi-label">历史失误</div></div>
+      <div class="kpi-block"><div class="kpi-num">${String(hit_total ?? 0)}</div><div class="kpi-label">我的预测命中</div></div>
+      <div class="kpi-block"><div class="kpi-num">${String(miss_total ?? 0)}</div><div class="kpi-label">我的预测失误</div></div>
       <div class="kpi-block"><div class="kpi-num">${String(due_this_week ?? 0)}</div><div class="kpi-label">本周到期</div></div>
     </div>
+    ${othersNote}
   </section>`;
 }
 
@@ -320,7 +332,7 @@ function onboardingHtml(hasInterests, hasSources) {
   }
   return steps.length ? `<div class="radar-onboarding">
     <h3>👋 欢迎使用远见</h3>
-    <p>远见是你的个人风险雷达，帮你提前看到影响个人利益的外部变化。开始使用需要简单设置：</p>
+    <p>远见是你的个人关注度雷达，帮你提前看到影响个人利益的外部变化。开始使用需要简单设置：</p>
     <ol>${steps.join('')}</ol>
   </div>` : '';
 }
@@ -355,9 +367,12 @@ export async function render(root) {
   }
 
   if (!dashboard) {
-    sections += `<div class="radar-empty">暂时读不到风险面板，请稍后重试。</div>`;
+    sections += `<div class="radar-empty">暂时读不到关注度面板，请稍后重试。</div>`;
   } else if (state === 'stable' && !needsOnboarding) {
-    sections += `<div class="radar-empty">目前没有需要你处理的高等级风险，系统仍在后台监控。</div>`;
+    // 口径统一（R-14）：这里是用户唯一会反复读到的句子，不能再把"关注度档位"
+    // 说成"风险"—— v1.3 已把档位改成「重点关注 / 需要关注 / 低优先」，
+    // README 也写明"关注度 ≠ 风险量级"。
+    sections += `<div class="radar-empty">目前没有需要你处理的<strong>重点关注</strong>事项，系统仍在后台监控。</div>`;
   } else if (state === 'coverage_gap' && items.length === 0) {
     sections += `<div class="radar-empty">公开信息监控覆盖不足，系统正在重试。请确认已启用信源。</div>`;
   }

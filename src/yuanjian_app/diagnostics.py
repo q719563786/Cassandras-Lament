@@ -8,6 +8,11 @@ db_bytes / last_backup / backup_enabled / last_run_ms / runtime
 ai_daily_budget / ai_min_interval_seconds / ai_rate_limit_pending
 —— 只有「今日已用 X / 上限 Y」看不出"是不是发太快了"，用户要把上限调到极限时
 没有一个反馈信号。
+
+v1.4 再补两组"此前没人盯"的事实（前端同样按可选处理）：
+trend_health（R-11：rising 占可判定快照的比例，>20% 即阈值失效）、
+evidence_levels / primary_source_count / evidence_level_note
+（R-15：证据等级分布，以及"尚未标记任何官方来源 → E3/E4 不可达"的明示）。
 """
 
 from __future__ import annotations
@@ -30,12 +35,14 @@ class DiagnosticsService:
         ai_settings=None,
         judgment_queue=None,
         backup_service=None,
+        trends=None,
     ):
         self.database = database
         self.external = external
         self.ai_settings = ai_settings
         self.judgment_queue = judgment_queue
         self.backup_service = backup_service
+        self.trends = trends
 
     def snapshot(self) -> dict:
         payload = {
@@ -97,7 +104,68 @@ class DiagnosticsService:
             payload["last_run_ms"] = int(self._read_last_run_ms())
         except Exception:
             payload["last_run_ms"] = 0
+        # ---- v1.4 新增：两个"此前没人盯"的事实 ----
+        # R-11：探测器健康度（rising 占可判定快照的比例）。一个多数时间在报警的
+        # 探测器等价于没有报警，而此前界面上看不到这个比例。
+        try:
+            if self.trends is not None:
+                payload["trend_health"] = self.trends.stored_health()
+            else:
+                payload["trend_health"] = None
+        except Exception:
+            _logger.warning("诊断面板：读取趋势健康度失败", exc_info=True)
+            payload["trend_health"] = None
+        # R-15：证据等级分布与"官方来源是否标记过"。实测 E3/E4 从未出现，
+        # 因为 `primary_source` 从未在任一信息源上标记过 —— 四级体系实际只跑两级，
+        # 最窄概率区间（E4 ±0.07）不可达。这是"用户不知道为什么按钮没反应"的典型：
+        # 界面上必须说出来，而不是等他自己发现。
+        try:
+            payload["evidence_levels"] = self._read_evidence_levels()
+        except Exception:
+            payload["evidence_levels"] = {}
+        try:
+            payload["primary_source_count"] = self._read_primary_source_count()
+        except Exception:
+            payload["primary_source_count"] = 0
+        payload["evidence_level_note"] = (
+            ""
+            if payload["primary_source_count"]
+            else (
+                "尚未标记任何官方来源：E3/E4 需要先在信息源里标记「官方来源」才会出现。"
+                "当前证据体系实际只有 E1/E2 两级，最窄的概率区间（E4 ±0.07）不可达。"
+            )
+        )
         return payload
+
+    def _read_evidence_levels(self) -> dict:
+        """已识别事件簇的证据等级分布。缺失的等级补 0（而不是不出现）——
+        "E4 一条都没有"本身就是要说出来的事实。"""
+        payload = {"E1": 0, "E2": 0, "E3": 0, "E4": 0}
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT evidence_level, COUNT(*) AS n FROM event_clusters"
+                " GROUP BY evidence_level"
+            ).fetchall()
+        for row in rows:
+            key = str(row["evidence_level"] or "E1")
+            payload[key] = int(row["n"])
+        return payload
+
+    def _read_primary_source_count(self) -> int:
+        """有多少个**启用中**的信息源被标记为官方来源（`config_json.primary_source`）。"""
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT config_json FROM external_sources WHERE enabled=1"
+            ).fetchall()
+        count = 0
+        for row in rows:
+            try:
+                config = json.loads(row["config_json"] or "{}")
+            except (ValueError, TypeError):
+                continue
+            if isinstance(config, dict) and config.get("primary_source"):
+                count += 1
+        return count
 
     def _read_rate_limit_pending(self) -> int:
         """当前有多少远程作业正卡在"限流退避"里（429 专用）。

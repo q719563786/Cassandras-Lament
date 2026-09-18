@@ -60,6 +60,11 @@ class ImpactServiceTests(unittest.TestCase):
                 "least_resistance_path": "最小阻力路径：试点城市先行",
                 "counter_evidence": "反对证据：基金穿底风险",
                 "leading_indicators": "领先指标：试点城市名单",
+                # v1.4（R-08）：可观测信号**必须事件级特化** —— 至少一条要含本事件
+                # 特有的实体（机构名/地名/数字），或与事件标题共享一段 ≥4 字的连续
+                # 片段。夹具的信号原先只是类别模板短语（"试点城市名单"），
+                # 在新闸门下会被正确地拦在账本之外。这里让它指向本事件本身。
+                "observable_signals": ["医保政策调整的报销比例下调文件公布"],
             },
         }
         with self.database.connect() as connection:

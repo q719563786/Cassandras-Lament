@@ -252,6 +252,7 @@ class Application:
             ai_settings=ai_settings,
             judgment_queue=queue,
             backup_service=backup_service,
+            trends=trends,
         )
         mobile_export = MobileExportService(root / "mobile")
         scheduler = RadarScheduler(
@@ -262,6 +263,7 @@ class Application:
             backup_service=backup_service,
             retention_service=retention_service,
             learning_callback=controller.apply_feedback_learning,
+            forecasts=forecasts,
         )
         startup = (
             StartupTask(executable=Path(sys.executable))

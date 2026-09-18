@@ -263,6 +263,32 @@ class CognitionService:
         primary_sources = {
             fact["source_id"] for fact in facts if fact["primary"]
         }
+        # v1.4（R-10）：跨域同文检测 —— 方法论的直接漏洞。
+        #
+        # 条目身份此前只按 `canonical_url` 去重，而 `content_hash` 算出来**只存不用**
+        # （全仓 grep 确认它从未参与去重或合并）。于是同一篇通稿被 5 家门户全文转载 =
+        # 5 个不同 canonical URL = 5 个独立域名 → 直接进 E2（若某来源被标为官方，
+        # 甚至 E3）。README 声称"同域转载不冒充互证"，但它只防同域，而同一 URL 本来
+        # 就被去重了，那句保护几乎不产生作用 —— **真正最常见的形态（跨域通稿）
+        # 没有防**。这与"一个声音被复制成多个声音就是互证的反面"直接冲突。
+        #
+        # 规则：同一 `content_hash` 出现在多个域名时，独立域名计数**只算 1**。
+        # 做法是按内容分组，每组只"记一个声音"（组内任取一个尚未被记账的域名），
+        # 于是：3 个域名转载同一篇 → 1；3 条不同内容的不同域名 → 3；
+        # 3 条不同内容的同一域名 → 1（同域本来就不算互证）。
+        domains_by_item = {}
+        for fact in facts:
+            domains_by_item.setdefault(fact["item_id"], set()).add(fact["domain"])
+        text_groups = {}
+        for row in item_rows:
+            group = text_groups.setdefault(row["content_hash"], set())
+            group.update(domains_by_item.get(row["item_id"], set()))
+        credited = set()
+        for content_hash in sorted(text_groups):
+            fresh = text_groups[content_hash] - credited
+            if fresh:
+                credited.add(min(fresh))
+        independent_domains = len(credited) if credited else len(domains)
         evidence_payload = {
             "items": [
                 {
@@ -279,11 +305,13 @@ class CognitionService:
                 evidence_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
             ).encode("utf-8")
         ).hexdigest()
-        if primary_sources and len(domains) >= 3:
+        # E 级用的是**去重后的独立声音数**（跨域同文只算 1）。这一点很关键：
+        # E 级不只是展示，它还决定区间宽度、关注度分数里的权重、以及能否自动入账。
+        if primary_sources and independent_domains >= 3:
             level = "E4"
-        elif primary_sources and len(domains) >= 2:
+        elif primary_sources and independent_domains >= 2:
             level = "E3"
-        elif len(domains) >= 2:
+        elif independent_domains >= 2:
             level = "E2"
         else:
             level = "E1"
@@ -291,13 +319,14 @@ class CognitionService:
         connection.execute(
             """
             UPDATE event_clusters SET evidence_level=?, evidence_hash=?,
-                independent_domains=?, primary_source_count=?,
+                independent_domains=?, source_domains=?, primary_source_count=?,
                 needs_judgment=CASE WHEN ? THEN 1 ELSE needs_judgment END,
                 updated_at=? WHERE cluster_id=?
             """,
             (
                 level,
                 evidence_hash,
+                independent_domains,
                 len(domains),
                 len(primary_sources),
                 1 if changed else 0,
@@ -575,6 +604,14 @@ class CognitionService:
         result["summary"] = plain_text(result.get("summary"), max_length=2000)
         result["categories"] = json.loads(result.pop("categories_json"))
         result["needs_judgment"] = bool(result["needs_judgment"])
+        # 同文转载的来源数（R-10）= 原始来源域名数 − 去重后的独立声音数。
+        # 界面要照实写「本事件 N 个来源中 M 个为同文转载」—— 只说"来源多"而不说
+        # "其中多少是同一篇通稿"，等于把复制当成了互证。
+        result["syndicated_domains"] = max(
+            0,
+            int(result.get("source_domains") or 0)
+            - int(result.get("independent_domains") or 0),
+        )
         return result
 
 

@@ -44,7 +44,11 @@ def _settleable_forecast_dict(forecast_id, category, probability):
         "window_end": "2026-09-15",
         "probability": probability,
         "category": category,
-        "observable_signals": "主管部门公布正式文件；本地记录可核验",
+        # v1.4（R-08）：可观测信号必须**事件级特化** —— 至少一条要含本事件特有的
+        # 实体，或与该命题标题里的新闻原标题共享一段 ≥4 字的连续片段。
+        # 夹具原先写的是"主管部门公布正式文件"这类类别模板短语，在默认路径下
+        # 事件类型相同就拿到同样的措辞 —— 那正是新闸门要拦的"分类平均命题"。
+        "observable_signals": f"{category}事件的主管部门公布正式文件；本地记录可核验",
         "confirmed_by": "user",
     }
 

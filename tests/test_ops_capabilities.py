@@ -389,6 +389,10 @@ class CalibrationSummaryTests(unittest.TestCase):
             "confidence": "medium",
             "alert_level": "L2",
             "privacy_level": "P2",
+            # v1.4（R-04）：基准率只采**人工确认**（confirmed_by='user'）的二元结算。
+            # 种子不标的话会落进 'unknown' 那一列，基准率永远是"样本不足"，
+            # 而这条测试测的正是"有基准率的那条进 Brier"。
+            "confirmed_by": "user",
         }
         # 第二波起，进 Brier 需要**基准率**，而基准率来自账本自身的历史结算记录
         # （同类别样本 >= 5 才给）。所以先种 5 条同类别已结算记录，

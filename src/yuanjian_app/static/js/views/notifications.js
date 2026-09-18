@@ -1,4 +1,4 @@
-// 远见 v1.3 · 通知中心 —— 顶栏抽屉 + 未读角标同步（Spec §7：顶栏入口，不做一级路由）
+// 远见 v1.4 · 通知中心 —— 顶栏抽屉 + 未读角标同步（Spec §7：顶栏入口，不做一级路由）
 import { api, escapeHtml, showToast, paginationHtml, bindPagination, pageRange } from '../api.js';
 import { yjIcon } from '../icons.js';
 import { statusLabel, formatLocalTime } from '../ui_core.js';

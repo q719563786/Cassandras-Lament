@@ -72,7 +72,16 @@ class Database:
                     -- 基准率：同类别历史结算命中率（来自账本自身 resolutions）。
                     -- 样本 < 5 时为 NULL，绝不编造默认值顶上。
                     base_rate REAL,
-                    base_rate_sample INTEGER NOT NULL DEFAULT 0
+                    base_rate_sample INTEGER NOT NULL DEFAULT 0,
+                    -- 这条预测最后是怎么结算的：'user'（本人在界面逐条判定）/
+                    -- 'batch'（批量结算或自动归档规则）/ 'unknown'（v1.4 之前的历史行）。
+                    -- 与 confirmed_by 同构，但量的是另一件事：批量写出来的
+                    -- indeterminate 是「没来得及看」，逐条判定的才是「看了但判不了」。
+                    resolved_by TEXT NOT NULL DEFAULT 'unknown',
+                    -- 账本自己的时间轴。**历史行为 NULL，不回填**（不知道就是不知道）。
+                    -- 在它出现之前，"创建时间"只存在于渲染出来的卡片正文里，
+                    -- 渲染模板一改，历史时间轴就解析不出来 —— 这是可审计性缺口。
+                    created_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS forecast_versions(
                     forecast_id TEXT NOT NULL,
@@ -87,7 +96,14 @@ class Database:
                     outcome TEXT NOT NULL,
                     resolved_at TEXT NOT NULL,
                     probability REAL NOT NULL,
-                    brier_score REAL
+                    brier_score REAL,
+                    -- 冗余存一份 category 与 confirmed_by：父行（forecasts）在 v1.4 之前
+                    -- 可以被删，一旦删掉，`resolutions JOIN forecasts` 就整体看不到这条
+                    -- 结算，基准率与 excluded_total 都会静默变小；而 R-04 的"基准率只采
+                    -- 人工确认"又会因为拿不到 confirmed_by 把孤儿的结算一并排除 ——
+                    -- 等于修复只做了一半。冗余之后 LEFT JOIN 才真正不依赖父行存活。
+                    category TEXT NOT NULL DEFAULT '',
+                    confirmed_by TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS schema_migrations(
                     version INTEGER PRIMARY KEY,
@@ -228,6 +244,10 @@ class Database:
                     status TEXT NOT NULL DEFAULT 'active',
                     needs_judgment INTEGER NOT NULL DEFAULT 1,
                     independent_domains INTEGER NOT NULL DEFAULT 1,
+                    -- 参与本事件的**原始**来源域名数（未合并跨域同文转载）。
+                    -- independent_domains 是"合并同文转载之后"的独立声音数，
+                    -- 两者之差就是"同文转载"的条数，界面要照实写出来。
+                    source_domains INTEGER NOT NULL DEFAULT 1,
                     primary_source_count INTEGER NOT NULL DEFAULT 0,
                     latest_judgment_id TEXT,
                     created_at TEXT NOT NULL,
@@ -393,14 +413,24 @@ class Database:
                 BEFORE DELETE ON resolutions BEGIN
                     SELECT RAISE(ABORT, 'resolutions are immutable');
                 END;
-                -- forecasts 是**有意豁免**，不是漏写：它的 status 必须能从
-                -- 'open' 流转到 'resolved' / 'void'，而这一流转只能靠对
-                -- forecasts 做 UPDATE 完成（forecasts.py 的 resolve() 在写完
-                -- resolutions 之后就 `UPDATE forecasts SET status='resolved'`）。
-                -- 若在这里加 no_update，整条结算流程会被数据库直接拒绝。
-                -- 不可变性由两张内容表承担：forecast_versions（预测内容）与
-                -- resolutions（结算结果）；forecasts 本身只是"这条预测当前什么
-                -- 状态"的可变索引，不承载不可改的账本内容，所以它没有触发器。
+                -- forecasts 的 status 必须能从 'open' 流转到 'resolved' / 'void'，
+                -- 而这一流转只能靠对 forecasts 做 UPDATE 完成（forecasts.py 的
+                -- resolve() 在写完 resolutions 之后就 `UPDATE forecasts SET
+                -- status='resolved'`）。若在这里加 no_update，整条结算流程会被
+                -- 数据库直接拒绝 —— 所以**只加 no_delete，不加 no_update**。
+                --
+                -- 为什么 no_delete 是必需的（v1.4，R-12）：此前 forecasts 一个触发器
+                -- 都没有，于是 `purge_garbage_forecasts` 删父行、而子行
+                -- （forecast_versions）受触发器保护删不掉，真库实测留下 10,663 条
+                -- 永久孤儿子行（占该表 55%）。父行还能被删的第二层后果是：那条预测的
+                -- 结算记录会随着父行一起从 `resolutions JOIN forecasts` 里消失，
+                -- 基准率与 excluded_total 双双静默变小 —— v1.2 §四 承诺过"不静默
+                -- 缩小总数"，但对这类删除无效。堵住父行删除，这两个病一起好。
+                -- （存量孤儿的处置是产品决策，见 R-13，本次不碰。）
+                CREATE TRIGGER IF NOT EXISTS forecasts_no_delete
+                BEFORE DELETE ON forecasts BEGIN
+                    SELECT RAISE(ABORT, 'forecasts are immutable once recorded');
+                END;
                 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
                 VALUES (1, CURRENT_TIMESTAMP);
                 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
@@ -411,6 +441,8 @@ class Database:
                 VALUES (4, CURRENT_TIMESTAMP);
                 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
                 VALUES (5, CURRENT_TIMESTAMP);
+                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                VALUES (6, CURRENT_TIMESTAMP);
                 """
             )
             self._apply_column_migrations(connection)
@@ -439,6 +471,22 @@ class Database:
             # 基准率：同类别历史结算命中率。REAL 可空（样本不足即 NULL）。
             ("forecasts", "base_rate", "REAL"),
             ("forecasts", "base_rate_sample", "INTEGER NOT NULL DEFAULT 0"),
+            # 结算来源（v1.4）：user=逐条人工判定 / batch=批量或自动规则 /
+            # unknown=v1.4 之前的历史行。DEFAULT 填到已有行上正是我们要的：
+            # 它们无法归因，标成 unknown 而不是假装知道。
+            ("forecasts", "resolved_by", "TEXT NOT NULL DEFAULT 'unknown'"),
+            # 账本自己的时间轴（v1.4）。**故意不带 DEFAULT**：历史行保持 NULL，
+            # 不回填。不知道就是不知道 —— 这也让 `created_at IS NULL` 成为
+            # "v1.4 之前的历史行"的可靠标记。
+            ("forecasts", "created_at", "TEXT"),
+            # 结算记录冗余存 category 与来源（v1.4）：父行可能已被删除，
+            # 不冗余的话那些结算会从基准率与 excluded_total 里整体消失，
+            # 而且连"是不是人工确认的"都判不出来。
+            ("resolutions", "category", "TEXT NOT NULL DEFAULT ''"),
+            ("resolutions", "confirmed_by", "TEXT NOT NULL DEFAULT ''"),
+            # 事件簇的原始来源域名数（v1.4）：与 independent_domains 之差就是
+            # "同文转载"的条数。历史行补 1（保守：至少有一个来源）。
+            ("event_clusters", "source_domains", "INTEGER NOT NULL DEFAULT 1"),
         )
         existing_tables = {
             row[0]

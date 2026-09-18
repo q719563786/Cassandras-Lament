@@ -165,6 +165,9 @@ ROUTES = (
     Route("GET", "exact", "/api/forecasts", "_get_forecasts"),
     Route("GET", "exact", "/api/forecasts/progress", "_get_forecast_progress"),
     Route("GET", "exact", "/api/forecasts/overdue", "_get_forecast_overdue"),
+    # 批量结算预览必须排在 GET 的 "/api/forecasts/" prefix 路由之前，
+    # 否则会被当成 forecast_id 吞掉（本表的书写顺序即匹配优先级）。
+    Route("GET", "exact", "/api/forecasts/batch-targets", "_get_forecast_batch_targets"),
     Route("GET", "exact", "/api/interests", "_get_interests"),
     Route("GET", "exact", "/api/interests/objects", "_get_interest_objects"),
     Route("GET", "exact", "/api/signals", "_get_signals"),
@@ -192,6 +195,12 @@ ROUTES = (
     Route("GET", "exact", "/api/settings/backup", "_get_settings_backup"),
     Route("GET", "exact", "/api/settings/retention", "_get_settings_retention"),
     Route("GET", "exact", "/api/settings/learning", "_get_settings_learning"),
+    Route(
+        "GET",
+        "exact",
+        "/api/settings/forecast-archive",
+        "_get_settings_forecast_archive",
+    ),
     Route("GET", "exact", "/api/score", "_get_score"),
     # 前缀路由放在该方法的最后，等价于旧链里的最后几个 startswith 分支。
     Route(
@@ -289,6 +298,13 @@ ROUTES = (
         "_post_export_mobile_summary",
     ),
     Route("POST", "exact", "/api/forecasts", "_post_forecasts"),
+    # 批量结算：必须排在 "/api/forecasts/" 的 prefix_suffix 路由之前。
+    Route(
+        "POST",
+        "exact",
+        "/api/forecasts/batch-resolve",
+        "_post_forecast_batch_resolve",
+    ),
     Route(
         "POST",
         "prefix_suffix",
@@ -309,6 +325,12 @@ ROUTES = (
     Route("PUT", "exact", "/api/settings/backup", "_put_settings_backup"),
     Route("PUT", "exact", "/api/settings/retention", "_put_settings_retention"),
     Route("PUT", "exact", "/api/settings/learning", "_put_settings_learning"),
+    Route(
+        "PUT",
+        "exact",
+        "/api/settings/forecast-archive",
+        "_put_settings_forecast_archive",
+    ),
     Route(
         "PUT",
         "prefix",
@@ -640,6 +662,26 @@ def create_server(host, port, token, services):
                 return
             self._json({"overdue": services.forecasts.list_overdue()})
 
+        def _get_forecast_batch_targets(self, services, params, parsed, payload):
+            """批量结算的**只读**预览：将结算 N 条、覆盖哪段到期区间、默认结果是什么。
+
+            不可撤销的写操作前必须先看清楚按下的是多大一批。这个端点不写库。
+            """
+            if services.forecasts is None:
+                self._error(503, "unavailable", "预测能力未装配")
+                return
+            query = parse_qs(parsed.query)
+            try:
+                self._json(
+                    services.forecasts.batch_targets(
+                        categories=query.get("category", []),
+                        due_before=query.get("due_before", [""])[0],
+                        status=query.get("status", ["open"])[0],
+                    )
+                )
+            except ValueError as error:
+                self._error(400, "invalid_request", str(error))
+
         def _get_interests(self, services, params, parsed, payload):
             self._json(
                 {
@@ -801,6 +843,13 @@ def create_server(host, port, token, services):
                 self._error(503, "unavailable", "反馈学习未装配")
                 return
             self._json(services.system_settings.get_learning())
+
+        def _get_settings_forecast_archive(self, services, params, parsed, payload):
+            """到期不结算的自动归档规则（**默认关闭**，开启后按 N 天归档为无法判定）。"""
+            if services.system_settings is None:
+                self._error(503, "unavailable", "预测归档设置未装配")
+                return
+            self._json(services.system_settings.get_forecast_archive())
 
         def _get_score(self, services, params, parsed, payload):
             self._json(services.forecasts.score_summary())
@@ -1010,6 +1059,41 @@ def create_server(host, port, token, services):
             forecast_id = unquote(params["forecast_id"]).rstrip("/")
             self._json(services.forecasts.add_version(forecast_id, payload), 201)
 
+        def _post_forecast_batch_resolve(self, services, params, parsed, payload):
+            """批量结算：一次事务写入不可撤销的 `resolutions`。
+
+            三条不可妥协：
+              1. 结果由界面**显式选择**；不传也只落到 `indeterminate`
+                 （绝不用 `not_occurred` —— 那等于凭空给成百上千条命题盖上
+                 "没发生"的断言，把 Brier 与命中率彻底污染）；
+              2. 任一条失败整批回滚（服务层保证）；
+              3. 整批留一条 audit_log，记录筛选条件原文与目标/实际条数。
+            """
+            if services.forecasts is None:
+                self._error(503, "unavailable", "预测能力未装配")
+                return
+            categories = payload.get("categories") or []
+            if isinstance(categories, str):
+                categories = [categories]
+            limit = payload.get("limit")
+            try:
+                limit = None if limit in (None, "", 0) else int(limit)
+            except (TypeError, ValueError):
+                self._error(400, "invalid_request", "条数上限必须是整数")
+                return
+            result = services.forecasts.batch_resolve(
+                outcome=payload.get("outcome", ""),
+                resolved_at=payload.get("resolved_at", ""),
+                note=payload.get("note", ""),
+                categories=categories,
+                due_before=payload.get("due_before", ""),
+                status=payload.get("status", "open"),
+                limit=limit,
+                resolved_by=payload.get("resolved_by", "batch"),
+                trigger="manual",
+            )
+            self._json(result, 201)
+
         def _post_forecast_resolve(self, services, params, parsed, payload):
             forecast_id = unquote(params["forecast_id"]).rstrip("/")
             result = services.forecasts.resolve(
@@ -1036,6 +1120,11 @@ def create_server(host, port, token, services):
             if services.system_settings is None:
                 raise ValueError("反馈学习未装配")
             self._json(services.system_settings.put_learning(payload))
+
+        def _put_settings_forecast_archive(self, services, params, parsed, payload):
+            if services.system_settings is None:
+                raise ValueError("预测归档设置未装配")
+            self._json(services.system_settings.put_forecast_archive(payload))
 
         def _put_external_source(self, services, params, parsed, payload):
             source_id = unquote(params["source_id"]).rstrip("/")

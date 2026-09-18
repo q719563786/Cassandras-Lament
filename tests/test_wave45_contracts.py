@@ -106,12 +106,16 @@ class Wave45Fixture(unittest.TestCase):
         self.database.initialize()
         self.interests = InterestService(self.database)
         self.forecasts = ForecastService(self.database)
-        # importance=2 让基础分落在 L2，这样"上调一档"看得出来（若基础就是 L4，观察不到）
+        # importance=3 让基础分落在 L3。v1.4 起这个值不能是 L2：
+        #   ① R-16 不再为 L1/L2 生成候选 —— 基础 L2 的夹具会直接没有候选可测；
+        #   ② R-05 去掉了与来源数共线的 confidence 项并重定了阈值（0.45/0.60/0.68），
+        #      importance=3 时 E2 恰好落在 L3，于是"命中风险信号上调一档"仍然看得见
+        #      （若基础就是 L4，上调观察不到）。
         self.interest = self.interests.create_object(
             {
                 "name": "水泵业务现金流",
                 "category": "cashflow",
-                "importance": 2,
+                "importance": 3,
                 "privacy_level": "P3",
             }
         )

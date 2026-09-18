@@ -93,21 +93,32 @@ class CognitionServiceTests(unittest.TestCase):
         self.add_source("S-B", "b.example")
         self.add_source("S-OFFICIAL", "a.example", primary=True)
         self.add_source("S-C", "c.example")
-        base = ("广东医保报销比例升至70%", "政策本月实施")
+        # ⚠ v1.4（R-10）：四条报道必须**各自不同文**。
+        # 此前它们共用同一段 `base` 文案 —— 那等于"同一篇通稿被四家门户转载"，
+        # 而 R-10 之后这种情形**只算 1 个独立声音**，等级会（正确地）停在 E1。
+        # 本测试要测的是"独立性 + 官方来源"如何抬等级，所以每条给出各自的摘要
+        # （标题相同 → 仍聚成一个事件簇；摘要不同 → content_hash 不同）。
+        title = "广东医保报销比例升至70%"
+        reports = {
+            "E-1": (title, "政策本月实施"),
+            "E-2": (title, "省医保局确认调整方案"),
+            "E-3": (title, "本月起执行新标准"),
+            "E-4": (title, "报销比例有调整"),
+        }
 
-        self.add_item("E-1", "S-A", "a.example", *base, 0)
+        self.add_item("E-1", "S-A", "a.example", *reports["E-1"], 0)
         result = self.service.process_item("E-1")
         self.assertEqual(result["evidence_level"], "E1")
 
-        self.add_item("E-2", "S-B", "b.example", *base, 1)
+        self.add_item("E-2", "S-B", "b.example", *reports["E-2"], 1)
         result = self.service.process_item("E-2")
         self.assertEqual(result["evidence_level"], "E2")
 
-        self.add_item("E-3", "S-OFFICIAL", "a.example", *base, 2)
+        self.add_item("E-3", "S-OFFICIAL", "a.example", *reports["E-3"], 2)
         result = self.service.process_item("E-3")
         self.assertEqual(result["evidence_level"], "E3")
 
-        self.add_item("E-4", "S-C", "c.example", *base, 3)
+        self.add_item("E-4", "S-C", "c.example", *reports["E-4"], 3)
         result = self.service.process_item("E-4")
         self.assertEqual(result["evidence_level"], "E4")
 

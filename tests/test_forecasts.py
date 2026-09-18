@@ -104,6 +104,10 @@ class ForecastServiceTests(unittest.TestCase):
             "confidence": "medium",
             "alert_level": "L2",
             "privacy_level": "P2",
+            # v1.4（R-04）：`hit_total` / `miss_total` / 基准率只采**人工确认**
+            # （confirmed_by='user'）的条目，所以夹具必须显式标成人工 ——
+            # 不标的话它落进 'unknown' 那一列，不再计入"我的预测"。
+            "confirmed_by": "user",
         }
         data.update(changes)
         return data

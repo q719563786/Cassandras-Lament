@@ -40,6 +40,7 @@ class RadarScheduler:
         backup_service=None,
         retention_service=None,
         learning_callback=None,
+        forecasts=None,
         now=lambda: datetime.now(timezone.utc),
     ):
         self.service = service
@@ -52,6 +53,8 @@ class RadarScheduler:
         self.backup_service = backup_service
         self.retention_service = retention_service
         self.learning_callback = learning_callback
+        # 预测账本：只有"到期自动归档"这一条每日任务用它，且默认关闭。
+        self.forecasts = forecasts
         self.now = now
         self._stop = threading.Event()
         self._paused = threading.Event()
@@ -230,6 +233,33 @@ class RadarScheduler:
             lambda: self.retention_service.run("threshold"),
         )
 
+    def run_forecast_archive_once(self):
+        """到期不结算的自动归档（每日墙钟一次，**默认关闭**）。
+
+        开关存在 `runtime_state` 的 `settings.forecast_archive`，缺省 `enabled=False`。
+        关闭时本方法在一行都不写、一次查询都不做的意义上"不存在自动结算路径"——
+        这一点有测试守着（把时钟推后 400 天，`resolutions` 计数不变）。
+
+        为什么走"每日墙钟"而不是每次循环：这是归档，不是监控。一天一次足够，
+        而批量结算会在账本上写不可撤销的行，跑得越勤越容易在用户还没反应过来的
+        时候把一大片命题判成"无法判定"。
+        """
+        if self.paused:
+            return {"status": "paused"}
+        if self.forecasts is None:
+            return {"status": "disabled"}
+        from .system_settings import read_forecast_archive_setting
+
+        setting = read_forecast_archive_setting(self.database)
+        if not setting["enabled"]:
+            return {"status": "disabled"}
+        # 本地凌晨 3 点之后补跑一次；跨睡眠/跨天仍按日历补跑（与备份/清理同款）。
+        if not self._daily_due("forecast_archive", 3):
+            return {"status": "skipped"}
+        return self._execute(
+            "forecast_archive", lambda: self.forecasts.auto_archive_overdue(self.now())
+        )
+
     def run_learning_once(self):
         """误报反馈回灌：6 小时 monotonic 间隔（与墙钟无关）。"""
         if self.paused:
@@ -273,9 +303,10 @@ class RadarScheduler:
                 self.run_learning_once()
                 next_learning = following(6 * 3600)
             if current >= next_daily:
-                # 备份/清理只做"到期与否"检查，真正执行由墙钟判断（R6）。
+                # 备份/清理/到期归档只做"到期与否"检查，真正执行由墙钟判断（R6）。
                 self.run_backup_once()
                 self.run_retention_once()
+                self.run_forecast_archive_once()
                 next_daily = following(300)
             if current >= next_retention_check:
                 # 体积阈值检查：只读判断很便宜，但"任一表多大"要查 dbstat，

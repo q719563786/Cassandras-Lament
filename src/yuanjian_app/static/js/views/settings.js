@@ -1,4 +1,4 @@
-// 远见 v1.3 · 设置 —— 备份/保留/学习开关持久化 + 移动摘要导出 + 外部 AI 表单
+// 远见 v1.4 · 设置 —— 备份/保留/学习开关持久化 + 移动摘要导出 + 外部 AI 表单
 import { api, escapeHtml, showToast } from '../api.js';
 
 // 通用 toggle 行：GET 容错（端点未就绪显示未知）+ PUT 持久化
@@ -71,11 +71,12 @@ async function bindToggle(root, path, key, extra, options = {}) {
 }
 
 export async function render(root) {
-  // 三个设置端点均在开发中：逐个 catch 降级为"未知"，不阻塞页面
-  const [backup, retention, learning, ai, interests] = await Promise.all([
+  // 设置端点均在开发中：逐个 catch 降级为"未知"，不阻塞页面
+  const [backup, retention, learning, archive, ai, interests] = await Promise.all([
     api('/api/settings/backup').catch(() => null),
     api('/api/settings/retention').catch(() => null),
     api('/api/settings/learning').catch(() => null),
+    api('/api/settings/forecast-archive').catch(() => null),
     api('/api/settings/ai').catch(() => null),
     api('/api/interests').catch(() => null)
   ]);
@@ -126,6 +127,22 @@ export async function render(root) {
       <h2>反馈学习</h2>
       <div class="card">
         ${toggleRow({key: 'learning', name: '误报反馈学习闭环', desc: '误报标记回灌：6 小时内对相应源降权（下限 0.2）', on: Boolean(learning?.enabled)})}
+      </div>
+    </section>
+
+    <section class="set-sec">
+      <h2>预测闭环</h2>
+      <div class="card">
+        <div class="set-row">
+          <div><p class="name">到期自动归档</p><p class="desc">超过 N 天仍未结算的预测，自动记为「无法判定」并归档。<strong>默认关闭</strong>——批量写入的归档结果不可撤销，所以这个开关只能由你打开。开启后只清理积压：结果不参与命中率与 Brier 打分。</p></div>
+          <button type="button" class="toggle" role="switch" data-key="forecast-archive"
+            aria-checked="${archive?.enabled ? 'true' : 'false'}" aria-label="到期自动归档"></button>
+        </div>
+        <div class="set-row">
+          <div><p class="name">到期满多少天后归档（7–180）</p><p class="desc">${archive ? `当前 ${archive.days ?? 30} 天` : '读取中…未知'}</p></div>
+          <div class="field"><label for="archive-days" class="sr-only">天数</label>
+          <input id="archive-days" type="number" min="7" max="180" value="${escapeHtml(String(archive?.days ?? 30))}" ${archive ? '' : 'disabled'}></div>
+        </div>
       </div>
     </section>
 
@@ -331,6 +348,30 @@ export async function render(root) {
 
   // 学习开关闭环
   bindToggle(root, '/api/settings/learning', 'learning');
+
+  // 到期自动归档（**默认关闭**）：开关与天数必须一起 PUT ——
+  // 后端 write_forecast_archive_setting 要求 enabled 必填、days 落在 7–180 内，
+  // 分开提交会拿到 400。天数输入非法时用"上一次生效的值"而不是编一个。
+  const archiveDaysInput = root.querySelector('#archive-days');
+  const archiveDaysValue = () => {
+    const raw = Number(archiveDaysInput?.value);
+    if (Number.isFinite(raw) && raw >= 7 && raw <= 180) return raw;
+    showToast('归档天数需在 7–180 之间，已沿用原值', 'err');
+    return Number(archive?.days ?? 30);
+  };
+  bindToggle(root, '/api/settings/forecast-archive', 'forecast-archive', () => ({
+    days: archiveDaysValue(),
+  }));
+  archiveDaysInput?.addEventListener('change', async () => {
+    const toggle = root.querySelector('.toggle[data-key="forecast-archive"]');
+    const enabled = toggle?.getAttribute('aria-checked') === 'true';
+    try {
+      await putSetting('/api/settings/forecast-archive', {
+        enabled, days: archiveDaysValue(),
+      });
+      showToast('设置已保存');
+    } catch (e) { showToast(`保存失败：${e.message}`, 'err'); }
+  });
 
   root.querySelector('[data-export]')?.addEventListener('click', async (event) => {
     const btn = event.currentTarget;

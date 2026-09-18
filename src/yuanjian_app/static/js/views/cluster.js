@@ -1,4 +1,4 @@
-// 远见 v1.3 · 事件详情页
+// 远见 v1.4 · 事件详情页
 //
 // 这一页是**方法论产物唯一的出口**。v1.3 接上了此前"算了但没人看得到"的东西：
 //   · beneficiaries / cost_bearers（谁获利、谁承担成本）—— 用户的核心方法论
@@ -199,9 +199,22 @@ function renderImpacts(impacts, clusterId) {
       ${impacts.map(imp => {
         const c = imp.candidate || {};
         const confirmed = !!c.confirmed_forecast_id;
+        // 基准率只采**人工确认**的二元结算（R-04），所以样本构成必须写出来：
+        // 只说"样本不足"，用户既不知道差在哪，也不知道要怎么做才能补上。
+        const composition = c.base_rate_composition || {};
+        const userSample = Number(c.base_rate_sample || composition.user || 0);
+        const totalSample = Number(c.base_rate_sample_total || composition.total || userSample);
+        const sampleNote = `本类别样本 ${totalSample} 条（其中人工 ${userSample} 条）`;
         const baseRate = (c.base_rate === null || c.base_rate === undefined)
-          ? `基准率：样本不足（同类已结算 ${Number(c.base_rate_sample || 0)} 条，不足 5 条不估）`
-          : `基准率：${Math.round(Number(c.base_rate) * 100)}%（同类已结算 ${Number(c.base_rate_sample || 0)} 条）`;
+          ? `基准率：样本不足——${sampleNote}；人工样本不足 5 条就不估`
+          : `基准率：${Math.round(Number(c.base_rate) * 100)}%——${sampleNote}`;
+        // 证伪性闸的结论（R-08/R-09）：候选停在"待补充"时，把原因写在卡上，
+        // 而不是等用户点了"记录预测"才弹一个错——那会被当成 bug。
+        const gateNote = c.main_signal_preexisting
+          ? '主信号在窗口开始前已成立（零证伪风险），要换一条落在窗口内的信号才能入账。'
+          : (!c.observable_signals
+            ? '可观测信号未特化，需人工补充：至少一条要含本事件的机构名/地名/数字。'
+            : '');
         const riskHits = Array.isArray(c.risk_signal_hit) ? c.risk_signal_hit.filter(Boolean) : [];
         return `<div class="impact-row" data-impact="${imp.impact_id}">
           <div class="impact-main">
@@ -228,6 +241,9 @@ function renderImpacts(impacts, clusterId) {
             ${c.observable_signals
               ? `<div class="impact-meta u-dim"><span>结算看点：${escapeHtml(String(c.observable_signals))}</span></div>`
               : ''}
+            ${gateNote && !confirmed
+              ? `<div class="impact-meta text-warn"><span>${escapeHtml(gateNote)}</span></div>`
+              : ''}
           </div>
           ${!confirmed ? `<button class="btn-primary btn-sm" data-action="confirm-from-detail" data-impact="${imp.impact_id}" data-cluster="${clusterId}">记录预测</button>` : ''}
         </div>`;
@@ -236,14 +252,23 @@ function renderImpacts(impacts, clusterId) {
   </section>`;
 }
 
-function renderSources(items, domains) {
+function renderSources(items, domains, cluster) {
   if (!Array.isArray(items) || !items.length) return '';
   const domainLine = Array.isArray(domains) && domains.length
     ? `<div class="u-dim">来源域名：${domains.map(d => escapeHtml(String(d))).join('、')}</div>`
     : '';
+  // 同文转载（R-10）：条目身份此前只按 canonical_url 去重，于是同一篇通稿被 5 家
+  // 门户转载 = 5 个独立域名 = 直接进 E2。界面只说"来源多"而不说"其中多少是同一篇
+  // 通稿"，等于把复制当成了互证。这里照实写出来。
+  const total = Number(cluster?.source_domains || 0);
+  const syndicated = Number(cluster?.syndicated_domains || 0);
+  const syndicationLine = (total > 0 && syndicated > 0)
+    ? `<div class="text-warn">本事件 ${total} 个来源中 ${syndicated} 个为同文转载——已按 1 个独立声音计入证据等级。</div>`
+    : '';
   return `<section class="card u-mb-md">
     <h3 class="section-title">📎 证据来源（${items.length}条）</h3>
     ${domainLine}
+    ${syndicationLine}
     <div class="source-evidence-list">
       ${items.slice(0, 20).map(item => `
         <div class="evidence-item">
@@ -339,7 +364,7 @@ export async function render(root) {
       ${renderGywSection(gyw, j.analysis_status)}
       ${renderScenarios(scenarios)}
       ${renderImpacts(data.impacts, clusterId)}
-      ${renderSources(data.items, gyw.source_domains)}
+      ${renderSources(data.items, gyw.source_domains, data)}
       <div class="page-nav u-mt-md">
         <a href="#/today" class="btn-text">← 返回行动雷达</a>
       </div>
