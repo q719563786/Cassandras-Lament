@@ -168,6 +168,46 @@ class SyndicationTests(unittest.TestCase):
         self.assertEqual(detail["primary_source_count"], 1)
         self.assertNotIn(detail["evidence_level"], {"E3", "E4"})
 
+    def test_legacy_cluster_without_source_domains_reports_unknown(self):
+        """老事件簇（v1.4 之前写入）没有 `source_domains` 这一列，迁移给的是默认值 1。
+
+        于是会出现「独立声音 2 > 原始来源 1」这种自相矛盾。**不回填、也不硬算**：
+        两个数对不上就把两者一起标成未知（界面据此不显示那一行），
+        而不是印出一个 0 或负数去冒充事实。
+        """
+        self.add_source("S-A", "a.example")
+        timestamp = "2026-08-11T00:00:00Z"
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT INTO event_clusters(cluster_id,title,summary,first_seen_at,"
+                "last_seen_at,evidence_level,evidence_hash,categories_json,"
+                "independent_domains,source_domains,created_at,updated_at)"
+                " VALUES ('C-OLD','旧簇','',?,?,'E2','h-old','[\"finance\"]',2,1,?,?)",
+                (timestamp, timestamp, timestamp, timestamp),
+            )
+
+        detail = self.service.get_cluster("C-OLD")
+
+        self.assertEqual(detail["independent_domains"], 2)
+        self.assertIsNone(detail["source_domains"], "不允许把矛盾的数硬算成事实")
+        self.assertIsNone(detail["syndicated_domains"])
+
+    def test_fresh_cluster_reports_consistent_syndication_numbers(self):
+        """对照：新建的簇两个数一定自洽（证明上一条的"未知"不是把功能关掉）。"""
+        for source_id, domain in (("S-A", "a.example"), ("S-B", "b.example"),
+                                  ("S-C", "c.example")):
+            self.add_source(source_id, domain)
+        shared = ("广东医保报销比例升至70%", "政策本月实施")
+        self.add_item("E-1", "S-A", "a.example", *shared, 0)
+        self.add_item("E-2", "S-B", "b.example", *shared, 1)
+        self.add_item("E-3", "S-C", "c.example", *shared, 2)
+
+        detail = self.service.get_cluster(self.cluster_of(("E-1", "E-2", "E-3")))
+
+        self.assertEqual(detail["source_domains"], 3)
+        self.assertEqual(detail["independent_domains"], 1)
+        self.assertEqual(detail["syndicated_domains"], 2)
+
 
 # ---------------------------------------------------------------------- #
 # R-11 · 趋势阈值分位化 + 健康指标

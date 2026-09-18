@@ -607,11 +607,20 @@ class CognitionService:
         # 同文转载的来源数（R-10）= 原始来源域名数 − 去重后的独立声音数。
         # 界面要照实写「本事件 N 个来源中 M 个为同文转载」—— 只说"来源多"而不说
         # "其中多少是同一篇通稿"，等于把复制当成了互证。
-        result["syndicated_domains"] = max(
-            0,
-            int(result.get("source_domains") or 0)
-            - int(result.get("independent_domains") or 0),
-        )
+        #
+        # ⚠ v1.4 之前写入的事件簇没有这一列，迁移给的是默认值 1。于是老簇会出现
+        # 「独立声音 2 > 原始来源 1」这种自相矛盾 —— 迁移**不回填**（本仓一贯口径：
+        # 不知道就是不知道），所以这里也**不硬算**：两个数对不上就把"原始来源数"
+        # 与"同文转载数"一起标成 None，界面据此不显示那一行，而不是印出一个 0
+        # 或者负数去冒充事实。该簇下次有新条目进来时会重算并恢复正常。
+        result["syndicated_domains"] = None
+        if result.get("source_domains") is not None:
+            source_domains = max(0, int(result["source_domains"]))
+            independent = max(0, int(result.get("independent_domains") or 0))
+            if source_domains >= independent:
+                result["syndicated_domains"] = source_domains - independent
+            else:
+                result["source_domains"] = None
         return result
 
 

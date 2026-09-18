@@ -260,9 +260,16 @@ function renderSources(items, domains, cluster) {
   // 同文转载（R-10）：条目身份此前只按 canonical_url 去重，于是同一篇通稿被 5 家
   // 门户转载 = 5 个独立域名 = 直接进 E2。界面只说"来源多"而不说"其中多少是同一篇
   // 通稿"，等于把复制当成了互证。这里照实写出来。
-  const total = Number(cluster?.source_domains || 0);
-  const syndicated = Number(cluster?.syndicated_domains || 0);
-  const syndicationLine = (total > 0 && syndicated > 0)
+  //
+  // v1.4 之前写入的事件簇没有这两列（迁移不回填），两个数可能对不上 —— 后端会把
+  // 它们一起标成 null。**必须用 typeof 判数字**：写成 `Number(x || 0) > 0` 会把
+  // "未知"读成 0 而恰好不显示（结果对、理由错），一旦有人把判断改成 `>= 0`
+  // 就会印出「0 个为同文转载」这种假事实。
+  const total = cluster?.source_domains;
+  const syndicated = cluster?.syndicated_domains;
+  const syndicationLine = (
+    typeof total === 'number' && typeof syndicated === 'number' && syndicated > 0
+  )
     ? `<div class="text-warn">本事件 ${total} 个来源中 ${syndicated} 个为同文转载——已按 1 个独立声音计入证据等级。</div>`
     : '';
   return `<section class="card u-mb-md">
