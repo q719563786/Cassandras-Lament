@@ -847,7 +847,7 @@ class CognitionController:
                 rows = connection.execute(
                     """
                     SELECT j.judgment_id,j.cluster_id,j.created_at AS j_created_at,
-                           c.evidence_hash
+                           c.evidence_hash,c.evidence_level,c.independent_domains
                     FROM judgments j
                     JOIN event_clusters c ON c.latest_judgment_id=j.judgment_id
                     WHERE j.created_at > ?
@@ -859,7 +859,7 @@ class CognitionController:
                 rows = connection.execute(
                     """
                     SELECT j.judgment_id,j.cluster_id,j.created_at AS j_created_at,
-                           c.evidence_hash
+                           c.evidence_hash,c.evidence_level,c.independent_domains
                     FROM judgments j
                     JOIN event_clusters c ON c.latest_judgment_id=j.judgment_id
                     ORDER BY j.created_at
@@ -893,6 +893,8 @@ class CognitionController:
                     {
                         **impact,
                         "evidence_hash": row["evidence_hash"],
+                        "evidence_level": row["evidence_level"],
+                        "independent_domains": row["independent_domains"],
                         "action_window_hours": window_days * 24,
                     },
                     impact["reason"],
