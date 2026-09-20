@@ -52,6 +52,7 @@ STATIC_FILES = {
     "/css/layout.css": ("css/layout.css", "text/css; charset=utf-8"),
     "/css/components.css": ("css/components.css", "text/css; charset=utf-8"),
     "/css/views.css": ("css/views.css", "text/css; charset=utf-8"),
+    "/css/theme-mystique.css": ("css/theme-mystique.css", "text/css; charset=utf-8"),
     "/js/icons.js": ("js/icons.js", "text/javascript; charset=utf-8"),
     "/js/ui_core.js": ("js/ui_core.js", "text/javascript; charset=utf-8"),
     "/js/api.js": ("js/api.js", "text/javascript; charset=utf-8"),

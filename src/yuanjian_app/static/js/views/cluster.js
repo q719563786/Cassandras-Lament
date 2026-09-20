@@ -127,7 +127,7 @@ function renderHistorical(detail, plainText) {
 function renderGywSection(gyw, status) {
   if (!gyw || !gyw.stakeholders) return '';
   return `<section class="card u-mb-md">
-    <h3 class="section-title">🔍 登高望远 · 六步分析</h3>
+    <h3 class="section-title">登高望远 · 六步分析</h3>
     ${analysisNotice(status)}
     <div class="gyw-grid">
       <div class="gyw-item">
@@ -169,7 +169,7 @@ function renderGywSection(gyw, status) {
 function renderScenarios(scenarios) {
   if (!Array.isArray(scenarios) || !scenarios.length) return '';
   return `<section class="card u-mb-md">
-    <h3 class="section-title">🛤️ 多路径推演</h3>
+    <h3 class="section-title">多路径推演</h3>
     <div class="scenario-list">
       ${scenarios.map(s => {
         const label = escapeHtml(String(s.label || s.path_type || '路径'));
@@ -194,7 +194,7 @@ function renderScenarios(scenarios) {
 function renderImpacts(impacts, clusterId) {
   if (!Array.isArray(impacts) || !impacts.length) return '';
   return `<section class="card u-mb-md">
-    <h3 class="section-title">🎯 对你的个人影响</h3>
+    <h3 class="section-title">对你的个人影响</h3>
     <div class="impact-list">
       ${impacts.map(imp => {
         const c = imp.candidate || {};
@@ -224,7 +224,7 @@ function renderImpacts(impacts, clusterId) {
               ${confirmed ? '<span class="badge badge-confirmed">✓ 已记录预测</span>' : '<span class="badge badge-pending">待确认</span>'}
             </div>
             <div class="impact-title">${escapeHtml(c.title || '')}</div>
-            ${c.recommended_action ? `<div class="impact-action">💡 ${escapeHtml(c.recommended_action)}</div>` : ''}
+            ${c.recommended_action ? `<div class="impact-action">▸ ${escapeHtml(c.recommended_action)}</div>` : ''}
             <div class="impact-meta">
               ${c.window_end ? `<span>窗口期截止：${escapeHtml(c.window_end)}</span>` : ''}
               ${!confirmed ? `<span>系统估计概率：${Math.round((c.probability_low||0)*100)}% — ${Math.round((c.probability_high||0)*100)}%</span>` : ''}
@@ -273,7 +273,7 @@ function renderSources(items, domains, cluster) {
     ? `<div class="text-warn">本事件 ${total} 个来源中 ${syndicated} 个为同文转载——已按 1 个独立声音计入证据等级。</div>`
     : '';
   return `<section class="card u-mb-md">
-    <h3 class="section-title">📎 证据来源（${items.length}条）</h3>
+    <h3 class="section-title">证据来源（${items.length} 条）</h3>
     ${domainLine}
     ${syndicationLine}
     <div class="source-evidence-list">
@@ -307,7 +307,7 @@ function renderFactChain(judgment, sourceDomains) {
   // 界面把"某网站"当成了"当事方"。现在 actors = 参与方（机构/群体），
   // 域名单独列在下面。
   return `<section class="card u-mb-md">
-    <h3 class="section-title">📋 事实摘要与因果链</h3>
+    <h3 class="section-title">事实摘要与因果链</h3>
     <div class="fact-summary">${escapeHtml(judgment.fact_summary || '暂无摘要')}</div>
     ${actors.length ? `<div class="fact-actors"><strong>相关方：</strong>${actors.map(a => `<span class="actor-tag">${escapeHtml(typeof a === 'string' ? a : a.name || JSON.stringify(a))}</span>`).join('')}</div>` : ''}
     ${domains.length ? `<div class="fact-actors u-dim"><strong>来源域名：</strong>${domains.map(d => `<span class="actor-tag">${escapeHtml(String(d))}</span>`).join('')}</div>` : ''}
@@ -316,8 +316,8 @@ function renderFactChain(judgment, sourceDomains) {
       <ol>${chain.map(step => `<li>${escapeHtml(typeof step === 'string' ? step : step.description || JSON.stringify(step))}</li>`).join('')}</ol>
     </div>` : ''}
     ${up.length || down.length ? `<div class="triggers">
-      ${up.length ? `<div class="trigger-up"><strong>⬆ 概率上调信号：</strong>${escapeHtml(up.join('；'))}</div>` : ''}
-      ${down.length ? `<div class="trigger-down"><strong>⬇ 概率下调信号：</strong>${escapeHtml(down.join('；'))}</div>` : ''}
+      ${up.length ? `<div class="trigger-up"><strong>↑ 概率上调信号：</strong>${escapeHtml(up.join('；'))}</div>` : ''}
+      ${down.length ? `<div class="trigger-down"><strong>↓ 概率下调信号：</strong>${escapeHtml(down.join('；'))}</div>` : ''}
     </div>` : ''}
   </section>`;
 }

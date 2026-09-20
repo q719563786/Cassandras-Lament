@@ -83,14 +83,14 @@ function actionCardHtml(item, isL4) {
   const source = escapeHtml(item.source || '');
   const eventTime = formatEventTime(item.event_time);
   const sourceLine = (source || eventTime) ?
-    `<div class="ac-meta">${source ? `📡 ${source}` : ''}${source && eventTime ? ' · ' : ''}${eventTime ? `🕐 ${eventTime}` : ''}</div>` : '';
+    `<div class="ac-meta">${source ? `❖ ${source}` : ''}${source && eventTime ? ' · ' : ''}${eventTime ? `⊙ ${eventTime}` : ''}</div>` : '';
 
   // 未确认候选预测时显示"记录预测"按钮
   const predictBtn = !confirmed ? `
     <button class="ac-btn ac-btn-predict" data-action="predict" data-impact="${item.impact_id}"
             data-prob-low="${item.candidate_prob_low}" data-prob-high="${item.candidate_prob_high}"
             title="选择你认为的概率，记入预测账本">
-      📊 记录预测
+      ◈ 记录预测
     </button>` : '';
 
   return `<div class="action-card ${isL4 ? 'l4' : 'l3'}" data-cluster="${item.cluster_id}" data-impact="${item.impact_id}">
@@ -109,8 +109,8 @@ function actionCardHtml(item, isL4) {
     <div class="ac-actions">
       ${predictBtn}
       <button class="ac-btn" data-action="dismiss" title="已处理，不再提醒">✓ 已处理</button>
-      <button class="ac-btn" data-action="mute" title="静音7天">🔇 静音7天</button>
-      <button class="ac-btn ac-btn-warn" data-action="false_positive" title="这是误报">⚠ 误报</button>
+      <button class="ac-btn" data-action="mute" title="静音7天">◇ 静音7天</button>
+      <button class="ac-btn ac-btn-warn" data-action="false_positive" title="这是误报">△ 误报</button>
     </div>
   </div>`;
 }
@@ -129,12 +129,12 @@ function l4CardHtml(item) {
   const source = escapeHtml(item.source || '');
   const eventTime = formatEventTime(item.event_time);
   const metaLine = (source || eventTime) ?
-    `${source ? `📡 ${source}` : ''}${source && eventTime ? ' · ' : ''}${eventTime ? `🕐 ${eventTime}` : ''}` : '';
+    `${source ? `❖ ${source}` : ''}${source && eventTime ? ' · ' : ''}${eventTime ? `⊙ ${eventTime}` : ''}` : '';
 
   return `<div class="action-card l4 l4-directive-card" data-cluster="${item.cluster_id}" data-impact="${item.impact_id}">
     <div class="l4-main" data-action="open-detail">
       <div class="l4-top">
-        <span class="l4-bolt">⚡ 立即行动</span>
+        <span class="l4-bolt">立即行动</span>
         ${window ? `<span class="l4-window">窗口 · ${window}</span>` : ''}
       </div>
       <div class="l4-directive-text">${directive}</div>
@@ -149,8 +149,8 @@ function l4CardHtml(item) {
     </div>
     <div class="ac-actions l4-actions">
       <button class="ac-btn l4-btn-done" data-action="dismiss" title="已处理，不再提醒">✓ 我知道了</button>
-      <button class="ac-btn" data-action="mute" title="静音7天">🔇 静音7天</button>
-      <button class="ac-btn ac-btn-warn" data-action="false_positive" title="这是误报">⚠ 误报</button>
+      <button class="ac-btn" data-action="mute" title="静音7天">◇ 静音7天</button>
+      <button class="ac-btn ac-btn-warn" data-action="false_positive" title="这是误报">△ 误报</button>
     </div>
   </div>`;
 }
@@ -331,7 +331,7 @@ function onboardingHtml(hasInterests, hasSources) {
     steps.push(`<li>完成后，等待1-2分钟首次研判完成，行动雷达就会开始工作。</li>`);
   }
   return steps.length ? `<div class="radar-onboarding">
-    <h3>👋 欢迎使用远见</h3>
+    <h3>欢迎使用远见</h3>
     <p>远见是你的个人关注度雷达，帮你提前看到影响个人利益的外部变化。开始使用需要简单设置：</p>
     <ol>${steps.join('')}</ol>
   </div>` : '';
