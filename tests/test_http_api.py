@@ -334,14 +334,16 @@ class HttpApiTests(unittest.TestCase):
         self.assertIn("安全退出", body)
         self.assertIn('id="shutdown"', body)
 
-    def test_home_page_is_a_six_entry_terminal_shell(self):
+    def test_home_page_is_a_seven_entry_terminal_shell(self):
         with urllib.request.urlopen(self.base_url + "/", timeout=2) as response:
             body = response.read().decode("utf-8")
 
-        self.assertEqual(body.count('class="nav-item"'), 6)
-        for view in ("today", "calib", "sources", "diag", "settings", "tell"):
+        # 2026-09-20：新增「全球态势」地图视图（#/atlas），入口从 6 个变 7 个。
+        self.assertEqual(body.count('class="nav-item"'), 7)
+        for view in ("today", "atlas", "calib", "sources", "diag", "settings", "tell"):
             self.assertIn(f'data-view="{view}"', body)
         self.assertIn("今日远见", body)
+        self.assertIn("全球态势", body)
         self.assertIn("校准面板", body)
         self.assertIn("源管理", body)
         self.assertIn("诊断中心", body)
@@ -491,7 +493,8 @@ class HttpApiTests(unittest.TestCase):
             interests = json.loads(response.read().decode("utf-8"))["objects"]
 
         self.assertEqual(len(signals), 1)
-        self.assertEqual(len(interests), 7)
+        # v1.4：默认利益对象由 7 增至 8（新增默认项「前沿与天外」）。
+        self.assertEqual(len(interests), 8)
 
     def test_knowledge_api_discovers_indexes_and_lists_documents(self):
         request = urllib.request.Request(

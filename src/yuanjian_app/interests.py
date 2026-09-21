@@ -6,14 +6,20 @@ from uuid import uuid4
 
 
 ALLOWED_CATEGORIES = {"health", "cashflow", "work", "policy", "family", "assets", "opportunity"}
+# v1.4：种子改为 (object_id, name, category) 三元组，以便在同一类目(opportunity)
+# 下追加第二条默认项而不撞 object_id。既有 7 条的 object_id 保持
+# I-default-<category> 不变 —— 对已存在的库是幂等 INSERT OR IGNORE，无需迁移。
 DEFAULT_INTERESTS = (
-    ("health", "健康安全"),
-    ("cashflow", "现金流"),
-    ("work", "工作收入"),
-    ("policy", "政策权益"),
-    ("family", "家庭关系"),
-    ("assets", "资产负债"),
-    ("opportunity", "机会成长"),
+    ("I-default-health", "健康安全", "health"),
+    ("I-default-cashflow", "现金流", "cashflow"),
+    ("I-default-work", "工作收入", "work"),
+    ("I-default-policy", "政策权益", "policy"),
+    ("I-default-family", "家庭关系", "family"),
+    ("I-default-assets", "资产负债", "assets"),
+    ("I-default-opportunity", "机会成长", "opportunity"),
+    # 「前沿与天外」：承接 UAP/非人类/官方解密这一档。挂在 opportunity 类目下，
+    # **不新增类目**（新增类目会牵动 5 处白名单，本轮取最小改动接通）。
+    ("I-default-frontier", "前沿与天外", "opportunity"),
 )
 
 
@@ -26,10 +32,10 @@ class InterestService:
     def ensure_defaults(self):
         """Create non-personal filter categories without overwriting local changes."""
         with self.database.connect() as connection:
-            for category, name in DEFAULT_INTERESTS:
+            for object_id, name, category in DEFAULT_INTERESTS:
                 connection.execute(
                     "INSERT OR IGNORE INTO interest_objects(object_id, name, category, importance, privacy_level, status) VALUES (?, ?, ?, 3, 'P1', 'active')",
-                    (f"I-default-{category}", name, category),
+                    (object_id, name, category),
                 )
 
     def list_objects(self):

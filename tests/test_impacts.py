@@ -6,7 +6,7 @@ from pathlib import Path
 
 from yuanjian_app.database import Database
 from yuanjian_app.forecasts import ForecastService
-from yuanjian_app.impacts import ImpactService
+from yuanjian_app.impacts import ImpactService, recompute_personal_impacts
 from yuanjian_app.interests import InterestService
 from yuanjian_app.judgments import build_public_bundle
 
@@ -36,10 +36,49 @@ class ImpactServiceTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def add_judgment(self, suffix, evidence_level, confidence=0.9, urgent=True):
+    def add_judgment(
+        self,
+        suffix,
+        evidence_level,
+        confidence=0.9,
+        urgent=True,
+        delay_risk="高",
+        provider="local",
+        cluster_title="医保政策调整",
+    ):
         cluster_id = f"C-{suffix}"
         judgment_id = f"J-{suffix}"
         timestamp = "2026-08-11T08:00:00Z"
+        gyw = {
+            "stakeholders": "推动方：医保局；阻力方：财政、地方执行",
+            "constraints": "资源约束：医保基金、财政补贴",
+            "least_resistance_path": "最小阻力路径：试点城市先行",
+            "counter_evidence": "反对证据：基金穿底风险",
+            "leading_indicators": "领先指标：试点城市名单",
+            # v1.4（R-08）：可观测信号**必须事件级特化** —— 至少一条要含本事件
+            # 特有的实体（机构名/地名/数字），或与事件标题共享一段 ≥4 字的连续
+            # 片段。夹具的信号原先只是类别模板短语（"试点城市名单"），
+            # 在新闸门下会被正确地拦在账本之外。这里让它指向本事件本身。
+            "observable_signals": ["医保政策调整的报销比例下调文件公布"],
+            # v1.5：`judgment_local` 每条研判都会落 gyw.risk_signal_hit（未命中=空表）。
+            # 夹具保持同形，否则按新契约会被当成"缺字段"。
+            "risk_signal_hit": [],
+        }
+        if delay_risk is not None:
+            # v1.5（改动 A）：L4 现在**必须有结构性抓手**（执行摩擦或风险信号）。
+            # `judgment_local` 每条研判都会落 gyw.power_structure；夹具原先缺这一项，
+            # 在新纪律下会被正确地降为 L3 —— 而那验不到"强 E3 可达 L4"这条契约。
+            # 这里补上真实产物形状：发文在部委层（rule=ministry_lead），
+            # delay_risk 取**证据中出现的最低执行层**（默认"高"=要落到市县执行）。
+            # 传 delay_risk=None 表示"研判里没有结构化产物"，用于验证结构闸的降级路径。
+            gyw["power_structure"] = {
+                "rule": "ministry_lead",
+                "execution_layer": "省级对口部门和市县执行",
+                "veto_analysis": "省级有变通空间，市县有执行裁量权",
+                "delay_risk": delay_risk,
+                "matched_orgs": ["国家医疗保障局"],
+                "basis": "夹具：部委发文，落到市县执行；delay 取最低执行层。",
+            }
         result = {
             "fact_summary": "医保政策可能改变自付成本",
             "actors": ["主管部门"],
@@ -54,18 +93,7 @@ class ImpactServiceTests(unittest.TestCase):
             "up_triggers": ["正式生效"],
             "down_triggers": ["延期"],
             "impact_categories": ["health"],
-            "gyw": {
-                "stakeholders": "推动方：医保局；阻力方：财政、地方执行",
-                "constraints": "资源约束：医保基金、财政补贴",
-                "least_resistance_path": "最小阻力路径：试点城市先行",
-                "counter_evidence": "反对证据：基金穿底风险",
-                "leading_indicators": "领先指标：试点城市名单",
-                # v1.4（R-08）：可观测信号**必须事件级特化** —— 至少一条要含本事件
-                # 特有的实体（机构名/地名/数字），或与事件标题共享一段 ≥4 字的连续
-                # 片段。夹具的信号原先只是类别模板短语（"试点城市名单"），
-                # 在新闸门下会被正确地拦在账本之外。这里让它指向本事件本身。
-                "observable_signals": ["医保政策调整的报销比例下调文件公布"],
-            },
+            "gyw": gyw,
         }
         with self.database.connect() as connection:
             connection.execute(
@@ -78,7 +106,7 @@ class ImpactServiceTests(unittest.TestCase):
                 """,
                 (
                     cluster_id,
-                    "医保政策调整",
+                    cluster_title,
                     timestamp,
                     timestamp,
                     evidence_level,
@@ -94,7 +122,7 @@ class ImpactServiceTests(unittest.TestCase):
                 (
                     judgment_id,
                     cluster_id,
-                    "local",
+                    provider,
                     f"hash-{suffix}",
                     json.dumps(result, ensure_ascii=False),
                     timestamp,
@@ -111,11 +139,131 @@ class ImpactServiceTests(unittest.TestCase):
 
         self.assertIn(low["alert_level"], {"L1", "L2", "L3"})
         self.assertEqual(high["alert_level"], "L4")
+        # v1.5：components 新增 4 个**回溯字段**（不参与 base_score，只用于重算与回溯）：
+        # 利益侧基准 importance_base、事件侧结构强度 structural_intensity，以及结构信号
+        # 原值 structural_rule / delay_risk；v1.5 收尾再加 structure_source（结构是谁给的）。
+        # 契约变了，断言随之更新（不是放宽）。
         self.assertEqual(
             set(high["components"]),
-            {"evidence", "confidence", "importance", "exposure", "urgency", "personal_relevance"},
+            {
+                "evidence", "confidence", "importance", "exposure", "urgency",
+                "personal_relevance",
+                "importance_base", "structural_intensity",
+                "structural_rule", "delay_risk", "structure_source",
+            },
         )
         self.assertAlmostEqual(high["components"]["evidence"], 0.75)
+        # 结构信号如实进档，且 importance 是「利益侧基准 × 事件侧强度」的乘积（d=高 → 1.0）。
+        self.assertEqual(high["components"]["delay_risk"], "高")
+        self.assertAlmostEqual(high["components"]["importance_base"], 1.0)
+        self.assertAlmostEqual(high["components"]["structural_intensity"], 1.0)
+        self.assertAlmostEqual(high["components"]["importance"], 1.0)
+
+    def test_l4_requires_structural_signal(self):
+        """v1.5（改动 A）：L4 结构闸 —— 只有分数够、**且**在结构上有抓手
+        （执行摩擦 delay∈{高,中} 或已出现风险信号）才放行。
+
+        同一份强 E3 研判：有结构化产物 → L4；研判里没有结构化产物（missing）
+        → 保守降为 L3，并在 components_json 留下降级依据以便回溯。
+        """
+        with_signal = self.service.map_judgment(*self.add_judgment("s-ok", "E3"))[0]
+        missing = self.service.map_judgment(
+            *self.add_judgment("s-missing", "E3", delay_risk=None)
+        )[0]
+
+        self.assertEqual(with_signal["alert_level"], "L4")
+        self.assertEqual(missing["alert_level"], "L3")
+        self.assertNotIn("l4_downgraded_by", with_signal["components"])
+        self.assertEqual(
+            missing["components"].get("l4_downgraded_by"), "no_structural_signal"
+        )
+        self.assertIsNone(missing["components"].get("l4_gate_delay_risk"))
+        # 结构从哪来必须可回溯：本地研判自带 → 'judgment'；真的没有 → 'absent'。
+        self.assertEqual(with_signal["components"]["structure_source"], "judgment")
+        self.assertEqual(missing["components"]["structure_source"], "absent")
+
+    def test_remote_judgment_without_power_structure_is_backfilled_locally(self):
+        """③：远程 provider 的契约里没有 `power_structure`，缺了就用**本机同一个
+        规则引擎**补算 —— 否则用户花额度换来的远程升级版会被 L4 结构闸**系统性
+        降为 L3**（等于花钱买降级）。
+
+        判据必须是同一个函数：这里让证据里出现「河源市水务局」，它应当被
+        `analyze_power_structure` 认成地方执行层 → delay=高 → 结构闸放行 → L4。
+        """
+        cluster_title = "河源市水务局发布医保政策调整公告"
+        remote = self.service.map_judgment(
+            *self.add_judgment(
+                "remote", "E3", delay_risk=None,
+                provider="deepseek_chat", cluster_title=cluster_title,
+            )
+        )[0]
+
+        self.assertEqual(remote["components"]["structure_source"], "local_backfill")
+        self.assertEqual(remote["components"]["delay_risk"], "高")
+        self.assertEqual(remote["components"]["structural_rule"], "local_lead")
+        self.assertNotIn("l4_downgraded_by", remote["components"])
+        self.assertEqual(remote["alert_level"], "L4")
+        # 候选卡与定级必须看到**同一份**结构（否则"分级按补算、卡片按缺失"自相矛盾）
+        self.assertEqual(remote["candidate"]["delay_risk"], "高")
+        self.assertEqual(remote["candidate"]["power_structure_rule"], "local_lead")
+
+    def test_remote_backfill_does_not_invent_a_structure_it_cannot_see(self):
+        """补算不许编：证据里没有可识别机构时，如实回「未知」并按结构闸降为 L3。
+
+        这条闸同时挡住两种跑偏 —— "为了保住 L4 就随手给个结构"，
+        以及"远程一律降级"（这里降级是**因为它真的没有结构抓手**，不是因为它远程）。
+        """
+        remote = self.service.map_judgment(
+            *self.add_judgment("remote-nothing", "E3", delay_risk=None,
+                               provider="deepseek_chat")
+        )[0]
+
+        self.assertEqual(remote["components"]["structure_source"], "local_backfill")
+        self.assertEqual(remote["components"]["delay_risk"], "未知")
+        self.assertEqual(remote["components"]["structural_rule"], "unknown")
+        self.assertEqual(remote["alert_level"], "L3")
+        self.assertEqual(
+            remote["components"]["l4_downgraded_by"], "no_structural_signal"
+        )
+
+    def test_recompute_is_a_no_op_on_rows_written_by_map_judgment(self):
+        """回填与新事件走**同一个定级入口**，所以对新写出来的行必须一个字都不用改。
+
+        若这条失败，说明两条路已经漂移 —— 用户会看到"回填出来的档位"和"新算的
+        档位"对同一类事件给出不同答案。
+        """
+        self.service.map_judgment(*self.add_judgment("idem", "E3"))
+        self.service.map_judgment(
+            *self.add_judgment("idem-remote", "E3", delay_risk=None,
+                               provider="deepseek_chat",
+                               cluster_title="河源市水务局发布医保调整公告")
+        )
+
+        report = recompute_personal_impacts(self.database)
+
+        self.assertEqual(report["updated"], 0)
+        self.assertEqual(report["level_changed"], 0)
+        self.assertEqual(report["unchanged"], report["total"])
+        self.assertGreater(report["total"], 0)
+
+    def test_structural_intensity_makes_importance_dynamic(self):
+        """v1.5（改动 B）：importance 不再恒定 —— 同一利益对象，事件侧结构强度不同，
+        有效 importance 与最终分数随之变化（利益侧基准不变，仍可回溯）。"""
+        weak = self.service.map_judgment(
+            *self.add_judgment("d-zhong", "E3", delay_risk="中")
+        )[0]
+        strong = self.service.map_judgment(
+            *self.add_judgment("d-gao", "E3", delay_risk="高")
+        )[0]
+
+        self.assertAlmostEqual(weak["components"]["importance_base"], 1.0)
+        self.assertAlmostEqual(strong["components"]["importance_base"], 1.0)
+        self.assertAlmostEqual(weak["components"]["structural_intensity"], 0.95)
+        self.assertAlmostEqual(strong["components"]["structural_intensity"], 1.0)
+        self.assertLess(
+            weak["components"]["importance"], strong["components"]["importance"]
+        )
+        self.assertLess(weak["impact_score"], strong["impact_score"])
 
     def test_private_mapping_never_changes_public_evidence_bundle(self):
         cluster_id, judgment_id = self.add_judgment("privacy", "E3")

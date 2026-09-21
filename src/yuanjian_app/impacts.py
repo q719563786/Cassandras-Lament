@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -533,7 +534,7 @@ CATEGORY_EXPOSURE = {
     "health": {"health": 1.0, "family": 0.7, "cashflow": 0.6},
     "finance": {"cashflow": 1.0, "assets": 1.0, "work": 0.5},
     "employment": {"work": 1.0, "cashflow": 0.8, "opportunity": 0.6},
-    "policy": {"policy": 1.0, "cashflow": 0.4, "work": 0.4},
+    "policy": {"policy": 1.0, "cashflow": 0.4, "work": 0.4, "opportunity": 0.5},
     "safety": {"health": 0.9, "family": 0.9, "assets": 0.5},
     "housing": {"assets": 0.9, "family": 0.7, "cashflow": 0.6},
     "technology": {"opportunity": 0.7, "work": 0.6, "assets": 0.4},
@@ -545,6 +546,497 @@ CATEGORY_EXPOSURE = {
     "global": {"assets": 0.5, "opportunity": 0.5, "cashflow": 0.4},
     "general": {"opportunity": 0.35},
 }
+
+
+# ════════════════════════════════════════════════════════════
+# v1.5：把方法论的结构化产物接进定级（改动 A + B）
+# ════════════════════════════════════════════════════════════
+# 用的都是**已存在**的结构化产物（`gyw.power_structure` 与 `gyw.risk_signal_hit`，
+# 由 judgment_local 产出、_candidate 已落库），**不新增任何 AI 输出字段**。
+#
+# 改动 A —— L4 结构闸：L4 必须在结构上有抓手（存在执行摩擦，或已出现风险信号）。
+L4_STRUCTURAL_DELAYS = ("高", "中")
+
+# 改动 B —— 事件侧强度 s ∈ (0,1]，乘到 interest.importance 上（权重仍 1.00）。
+#   语义：**只有拿到"这件事结构性弱"的正面证据才下调**（垂直机构办事=低摩擦、
+#   部委牵头=中摩擦）；有摩擦（高）、有风险信号、以及**结构未知**都保持 1.0。
+#
+#   ⚠ "未知不降分"是刻意的，不是偷懒：真库 11.9 万条 personal_impacts 离线重算
+#   （读 judgment.gyw.power_structure）显示，delay=未知 占 52.7%；若把未知按 0.85
+#   惩罚，等于**给一半以上的库整体打折**——L3 从 16.1% 塌到 6.8%，并有 13,238 条
+#   原本 L3/L4 的事件掉回 L1/L2（R-16 下这些事件**连候选都不再生成**）。
+#   那是在"按信息缺失降分"，与"识别不到就如实说未知、不猜"的本机哲学相悖。
+#   取"未知=1.0"后：L3 保持 15.7%，掉级仅 2,619 条，而 L4/天 仍从 12 压到 4。
+STRUCTURAL_INTENSITY = {"高": 1.0, "中": 0.95, "低": 0.9}
+STRUCTURAL_INTENSITY_UNKNOWN = 1.0
+STRUCTURAL_INTENSITY_RISK = 1.0
+
+
+def _structural_intensity(delay_risk, risk_signal_hit):
+    """事件侧结构强度：(0,1]。有风险信号或执行摩擦（高）→1.0；部委牵头（中）→0.95；
+    垂直机构（低，办事阻力最小）→0.9；**结构未知/缺失 →1.0（不因信息缺失降分）**。"""
+    if risk_signal_hit:
+        return STRUCTURAL_INTENSITY_RISK
+    return STRUCTURAL_INTENSITY.get(delay_risk, STRUCTURAL_INTENSITY_UNKNOWN)
+
+
+def _has_structural_signal(delay_risk, risk_signal_hit):
+    """L4 结构闸：存在执行摩擦（delay ∈ {高,中}）或已出现风险信号才放行。"""
+    return bool(risk_signal_hit) or delay_risk in L4_STRUCTURAL_DELAYS
+
+
+def _text_list(value) -> list:
+    """把历史字段收敛成字符串列表：None / 标量 / bool 都不得让定级崩掉。
+
+    真库里存在 `risk_signal_hit: true`、`impact_categories: "health"` 这类**历史形状**
+    （字段早期只记"有没有"，或记成了标量）。存量回填要通读**全部**旧行，一行脏数据
+    不能让整批迁移失败 —— 所以统一在这里收敛，并且**保守**：认不出来就当一个空表，
+    绝不猜出内容来。
+    """
+    if value is None or isinstance(value, bool):
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, dict):
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if str(item).strip()]
+    return []
+
+
+def _risk_hits(judgment) -> list:
+    """本次研判命中的「慷慨激昂」词表（历史 bool 形状 → 空表）。"""
+    return _text_list((judgment.get("gyw") or {}).get("risk_signal_hit"))
+
+
+# 结构信号的来源标记 —— 让每一条 `delay_risk` 都能回溯"是谁给的"：
+# 让每一条 `delay_risk` 都能回溯"是谁给的"：
+#   · judgment       —— 研判自带的 `gyw.power_structure`（本地分支本来就产它）
+#   · local_backfill —— 远程研判缺这个字段，由**本机同一个规则引擎**在读时补算
+#   · absent         —— 研判里确实没有，且不该补（本地研判）→ 结构如实未知
+# 必须可区分：补算出来的结论与本地自产的结论，日后要能分开统计、分开追责。
+STRUCTURE_SOURCE_JUDGMENT = "judgment"
+STRUCTURE_SOURCE_LOCAL_BACKFILL = "local_backfill"
+STRUCTURE_SOURCE_ABSENT = "absent"
+
+
+def _needs_structure_backfill(judgment, provider):
+    """是否要为本条研判补算权力结构：**只对远程研判**，且它确实缺字段。
+
+    本地研判不补 —— 本地分支每条都产 `power_structure`，这里若缺说明它真的缺，
+    补它等于给本地分支换一套判据，超出"补齐远程缺口"的范围。
+    """
+    if str(provider or "local") == "local":
+        return False
+    return not ((judgment.get("gyw") or {}).get("power_structure"))
+
+
+def _backfill_power_structure(cluster_title, cluster_summary, judgment, entity_names=None):
+    """远程研判缺 `gyw.power_structure` 时，用**本机同一个规则引擎**补算。
+
+    为什么必须补：L4 结构闸（改动 A）要求 L4 在结构上有抓手（执行摩擦或风险信号），
+    而远程 provider 的输出契约里**根本没有** `power_structure` 字段 —— 不补的话，
+    用户花额度换来的"远程升级版"会被**系统性降为 L3**，等于花钱买降级。
+
+    判据不做第二套：直接用 `judgment_local` 产这条字段时的**同一个函数**
+    `knowledge_base.analyze_power_structure`。`institutions` 优先取事件簇的
+    `event_entities`；为空时该函数内部会对同一段文本自己抽机构名（`extract_orgs`），
+    与本地分支的口径一致 —— 这里**不另写抽取器**。
+
+    只算不写：`judgments.content_json` 是判读原文、不可变，补算结果只进本次计算路径
+    —— 落进 `components_json` 并带 `structure_source` 标记，可回溯、可区分。
+    """
+    from .knowledge_base import analyze_power_structure
+
+    institutions = [
+        str(name).strip() for name in (entity_names or []) if str(name).strip()
+    ]
+    text = " ".join(
+        [
+            str(cluster_title or ""),
+            str(cluster_summary or ""),
+            str(judgment.get("fact_summary") or ""),
+            " ".join(_text_list(judgment.get("causal_chain"))),
+        ]
+    )
+    return analyze_power_structure(institutions, text)
+
+
+def _resolve_power_structure(
+    judgment, provider, *, cluster_title="", cluster_summary="", entity_names=None
+):
+    """取本次定级要用的权力结构，并标明它从哪来（`structure_source`）。"""
+    power = (judgment.get("gyw") or {}).get("power_structure") or {}
+    if power:
+        return power, STRUCTURE_SOURCE_JUDGMENT
+    if str(provider or "local") == "local":
+        return {}, STRUCTURE_SOURCE_ABSENT
+    return (
+        _backfill_power_structure(
+            cluster_title, cluster_summary, judgment, entity_names
+        ),
+        STRUCTURE_SOURCE_LOCAL_BACKFILL,
+    )
+
+
+def _evaluate_impact(
+    *,
+    evidence_level,
+    categories,
+    interest,
+    judgment,
+    penalties,
+    power_structure,
+    structure_source=STRUCTURE_SOURCE_ABSENT,
+):
+    """**唯一的定级入口**：暴露度 → 算分 → 分档 → 风险上调 → E1 封顶 → L4 结构闸。
+
+    `map_judgment`（新事件）与 `recompute_personal_impacts`（存量回填）都走这里，
+    两条路因此不可能漂移 —— 否则"回填出来的档位"与"新算的档位"会是两套口径，
+    而用户拿它们并排看时只会看到自相矛盾。
+
+    `power_structure` / `structure_source` 由**调用方解析一次**后传入：
+    解析要查 `event_entities`（一次数据库往返），不该在每个利益对象上重算一遍。
+
+    返回 None 表示该利益对本事件的暴露度 <= 0（本就不该有候选）。
+    """
+    evidence = EVIDENCE_WEIGHTS.get(evidence_level, 0.25)
+    confidence = max(0.0, min(float(judgment.get("confidence", 0.0) or 0.0), 1.0))
+    urgency = _urgency(_text_list(judgment.get("horizons")))
+    categories = tuple(_text_list(categories))
+    exposure = max(
+        (
+            CATEGORY_EXPOSURE.get(category, {}).get(interest["category"], 0.0)
+            for category in categories
+        ),
+        default=0.0,
+    )
+    exposure = round(exposure * penalties.get(interest["category"], 1.0), 6)
+    if exposure <= 0:
+        return None
+    power_structure = power_structure or {}
+    delay_risk = power_structure.get("delay_risk")
+    structural_rule = power_structure.get("rule")
+    risk_hits = _risk_hits(judgment)
+    structural_intensity = _structural_intensity(delay_risk, risk_hits)
+    importance_base = max(1, min(int(interest["importance"]), 5)) / 5
+    # v1.5：importance 不再恒定 —— 利益侧（用户设定）**×** 事件侧结构强度。
+    # 此前同一"利益对象+类目+来源数"的事件分数恒等（importance 恒为 0.6）；
+    # 现在它随这件事本身的结构信号（执行阻力 / 风险）变化。
+    importance = importance_base * structural_intensity
+    components = {
+        "evidence": evidence,
+        # confidence 仍然留档（可回溯、可重算旧分数），但**不参与** base_score。
+        "confidence": confidence,
+        "importance": importance,
+        # v1.5 新增（可回溯）：利益侧基准 / 事件侧强度 / 结构信号原值 + 来源。
+        "importance_base": importance_base,
+        "structural_intensity": structural_intensity,
+        "structural_rule": structural_rule,
+        "delay_risk": delay_risk,
+        "structure_source": structure_source,
+        "exposure": exposure,
+        "urgency": urgency,
+    }
+    # v1.4（R-05）：`confidence` **不再进 base_score**。
+    #
+    # 为什么：在本地路径下 confidence 就是
+    # `{"E1":0.30,"E2":0.50,"E3":0.70,"E4":0.82}[E级]`（judgment_local），
+    # 而 evidence 是 `EVIDENCE_WEIGHTS[E级]` —— **两者都是"独立域名数"的
+    # 单调函数**，合计权重 0.45。同一个变量计两次，等于把"来源多"这件事
+    # 放大近一倍来驱动首页排序、通知、以及"能否被自动写进账本"。
+    # v1.2 已把**概率**与来源数解耦，但驱动关注度的分数没动，而这恰好是
+    # 用户每天看到的东西 —— 这是本次补上的那一半。
+    #
+    # 移除后权重按剩余四项**等比**放大（原合计 0.80 → 1.00）：不改各项之间的
+    # 相对关系，只去掉重复计分的那一项。`confidence` 留在 components 里只为
+    # 可回溯 —— **留在留档里不等于参与运算**。
+    base_score = (
+        evidence * 0.3125
+        + importance * 0.3125
+        + exposure * 0.25
+        + urgency * 0.125
+    )
+    # 结合AI对"用户本人相关性"的结论做升降级：判无关则压到行动板之下
+    relevance = _personal_relevance(judgment)
+    components["personal_relevance"] = relevance
+    score = round(max(0.0, min(base_score * relevance, 1.0)), 6)
+    alert = _alert_level(score)
+    # 「慷慨激昂 = 内心已感知风险」→ **上调告警等级**。
+    # v1.3 修正：旧代码在本地研判里做的是 `confidence += 0.08`，方向反了
+    # （越慷慨激昂，系统越自信）。规则引擎的判断本该落在风险侧，这里落地。
+    if risk_hits:
+        alert = _elevate(alert)
+        components["risk_signal_keywords"] = risk_hits
+        components["alert_before_risk_signal"] = _alert_level(score)
+    # E1 是单一来源线索，未经互证。README 与 PRIVACY.md 对外承诺
+    # 「E1 无论多重要都不得超过 L3」，此处是该承诺的强制点：只有 E2 及以上
+    # （同域转载不算互证）才允许进入 L4 立即行动。证据等级缺失或无法识别时
+    # 与 EVIDENCE_WEIGHTS 的兜底权重一致，按 E1 处理，宁可保守。
+    # ⚠ 顺序要求：**在上调之后**执行这道封顶，否则风险信号会把 E1 顶上 L4。
+    if alert == "L4" and evidence <= EVIDENCE_WEIGHTS["E1"]:
+        alert = "L3"
+    # v1.5（改动 A）：L4 结构闸。放在 E1 封顶**之后** —— E1 封顶是对外承诺，
+    # 先行强制；结构闸是"L4 还必须有结构性抓手"这条新纪律，只在事件仍为 L4
+    # 时发挥作用。缺结构化产物（rule/delay 缺失且无风险信号）时**视为不满足，
+    # 降为 L3**（宁可保守）。降级原因写进 components_json 以便回溯。
+    if alert == "L4" and not _has_structural_signal(delay_risk, risk_hits):
+        alert = "L3"
+        components["l4_downgraded_by"] = "no_structural_signal"
+        components["l4_gate_rule"] = structural_rule
+        components["l4_gate_delay_risk"] = delay_risk
+    return {
+        "exposure": exposure,
+        "score": score,
+        "alert": alert,
+        "components": components,
+    }
+
+
+# ── 存量回填（v1.5 口径）──────────────────────────────────────────────
+ALERT_LEVELS = ("L1", "L2", "L3", "L4")
+
+
+def _category_penalties_from_connection(connection):
+    """Feedback-learning multipliers persisted by the learning consumer."""
+    try:
+        row = connection.execute(
+            "SELECT value_json FROM runtime_state WHERE state_key=?",
+            ("learning.category_penalties",),
+        ).fetchone()
+    except Exception:
+        return {}
+    try:
+        penalties = json.loads(row["value_json"]) if row else {}
+    except (TypeError, json.JSONDecodeError):
+        penalties = {}
+    if not isinstance(penalties, dict):
+        return {}
+    return {
+        str(key): max(0.5, min(float(value), 1.0))
+        for key, value in penalties.items()
+        if isinstance(value, (int, float))
+    }
+
+
+def _alert_distribution(connection):
+    """当前 L1–L4 的条数与占比（回填前后的真值都由它读出来）。"""
+    counts = {level: 0 for level in ALERT_LEVELS}
+    for row in connection.execute(
+        "SELECT alert_level, COUNT(*) FROM personal_impacts GROUP BY alert_level"
+    ):
+        counts[str(row[0])] = int(row[1])
+    total = sum(counts.values())
+    return {
+        "total": total,
+        "counts": counts,
+        "shares": {
+            level: (round(count / total, 4) if total else 0.0)
+            for level, count in counts.items()
+        },
+    }
+
+
+def _load_impact_contexts(connection, *, entity_limit=50):
+    """回填用上下文：`{judgment_id: {...}}`，只覆盖个人影响真正引用到的研判。
+
+    ⚠ 性能是**实测**约束，不是臆测。真库（119,331 条 `personal_impacts`、79,088 条
+    `judgments`、80,245 个事件簇、463,157 条 `event_entities`）上的对照：
+
+        · 全表扫 `event_clusters` 取 18.5 万行/61,885 个簇 → 15.5s
+        · 用临时表 JOIN 只取用到的簇                      →  0.7s
+        · 全表扫 `event_entities`（46.3 万行）            → 27.1s
+        · 只对"真的需要补算"的 732 个簇 JOIN              →  亚秒
+
+    所以这里**只取用到的行**：临时表装 id，再 JOIN 回主表（走主键索引）。
+    事件簇实体更是**只为远程研判**查 —— 本地研判自带结构判定，用不上它。
+
+    库里的 `event_entities.category` 目前恒为 `shared_term`（cognition.py 写死），
+    存的是"同簇共现词片段"而**不是机构名**。仍按约定优先取它：真要出现机构名时
+    能直接用上；取不到就由 `analyze_power_structure` 对同一段文本自己抽。
+    """
+    needed = {
+        row["judgment_id"]: row["cluster_id"]
+        for row in connection.execute(
+            "SELECT DISTINCT cluster_id, judgment_id FROM personal_impacts"
+        )
+    }
+    if not needed:
+        return {}
+    cluster_ids = set(needed.values())
+    connection.execute(
+        "CREATE TEMP TABLE _yj_needed_cluster(cluster_id TEXT PRIMARY KEY)"
+    )
+    connection.executemany(
+        "INSERT OR IGNORE INTO _yj_needed_cluster VALUES (?)",
+        ((cluster_id,) for cluster_id in cluster_ids),
+    )
+    clusters = {
+        row["cluster_id"]: row
+        for row in connection.execute(
+            "SELECT c.cluster_id, c.title, c.summary, c.evidence_level"
+            " FROM event_clusters c"
+            " JOIN _yj_needed_cluster x ON x.cluster_id = c.cluster_id"
+        )
+    }
+    connection.execute(
+        "CREATE TEMP TABLE _yj_needed_judgment(judgment_id TEXT PRIMARY KEY)"
+    )
+    connection.executemany(
+        "INSERT OR IGNORE INTO _yj_needed_judgment VALUES (?)",
+        ((judgment_id,) for judgment_id in needed),
+    )
+    loaded = {}
+    entities_wanted = set()
+    for row in connection.execute(
+        "SELECT j.judgment_id, j.provider, j.content_json"
+        " FROM judgments j"
+        " JOIN _yj_needed_judgment x ON x.judgment_id = j.judgment_id"
+    ):
+        try:
+            content = json.loads(row["content_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(content, dict):
+            continue
+        provider = str(row["provider"] or "local")
+        cluster_id = needed[row["judgment_id"]]
+        if _needs_structure_backfill(content, provider):
+            entities_wanted.add(cluster_id)
+        loaded[row["judgment_id"]] = (cluster_id, provider, content)
+    entities: dict = {}
+    if entities_wanted:
+        connection.execute(
+            "CREATE TEMP TABLE _yj_need_entity(cluster_id TEXT PRIMARY KEY)"
+        )
+        connection.executemany(
+            "INSERT OR IGNORE INTO _yj_need_entity VALUES (?)",
+            ((cluster_id,) for cluster_id in entities_wanted),
+        )
+        for row in connection.execute(
+            "SELECT e.cluster_id, e.name FROM event_entities e"
+            " JOIN _yj_need_entity x ON x.cluster_id = e.cluster_id"
+            " ORDER BY e.confidence DESC"
+        ):
+            if not row["name"]:
+                continue
+            bucket = entities.setdefault(row["cluster_id"], [])
+            if len(bucket) < entity_limit:
+                bucket.append(str(row["name"]))
+    contexts = {}
+    for judgment_id, (cluster_id, provider, content) in loaded.items():
+        cluster = clusters.get(cluster_id)
+        power_structure, structure_source = _resolve_power_structure(
+            content,
+            provider,
+            cluster_title=(cluster["title"] if cluster else "") or "",
+            cluster_summary=(cluster["summary"] if cluster else "") or "",
+            entity_names=entities.get(cluster_id),
+        )
+        contexts[judgment_id] = {
+            "provider": provider,
+            "judgment": content,
+            "categories": tuple(_text_list(content.get("impact_categories"))),
+            "evidence_level": cluster["evidence_level"] if cluster else None,
+            "power_structure": power_structure,
+            "structure_source": structure_source,
+        }
+    return contexts
+
+
+def recompute_personal_impacts(database, *, batch_size=5000):
+    """存量 `personal_impacts` 一次性回填到当前（v1.5）定级口径。
+
+    **只写 `alert_level` 与 `components_json` 两列** —— 绝不删行，也绝不动
+    `interest_id` / `cluster_id` / `judgment_id` / `created_at`。
+
+    为什么必须回填：定级口径变了（事件侧结构强度 + L4 结构闸 + 风险上调 + E1 封顶），
+    存量行却仍是**旧口径**算出来的。不回填的话，用户打开程序看到的还是旧 L4，
+    会以为"修复根本没生效"。
+
+    幂等 + 可中断：同样的输入必然得到同样的输出；逐批提交，中途被打断后重跑即可
+    （迁移标记只在**整批成功后**写入，见 `Database._apply_legacy_alert_backfill`）。
+    """
+    started = time.monotonic()
+    report = {
+        "total": 0,
+        "updated": 0,
+        "unchanged": 0,
+        "skipped_no_context": 0,
+        "level_changed": 0,
+        "structure_backfilled": 0,
+        "before": {},
+        "after": {},
+        "duration_seconds": 0.0,
+    }
+    with database.connect() as connection:
+        report["before"] = _alert_distribution(connection)
+        interests = {
+            row["object_id"]: dict(row)
+            for row in connection.execute(
+                "SELECT object_id, name, category, importance, status"
+                " FROM interest_objects"
+            )
+        }
+        penalties = _category_penalties_from_connection(connection)
+        contexts = _load_impact_contexts(connection)
+        pending_since_commit = 0
+        for row in connection.execute(
+            "SELECT impact_id, judgment_id, interest_id, alert_level,"
+            " components_json FROM personal_impacts"
+        ):
+            report["total"] += 1
+            context = contexts.get(row["judgment_id"])
+            interest = interests.get(row["interest_id"])
+            if context is None or interest is None:
+                # 研判正文读不出来、或利益对象已不存在 —— 宁可不碰，也不猜。
+                report["skipped_no_context"] += 1
+                continue
+            evaluated = _evaluate_impact(
+                evidence_level=context["evidence_level"],
+                categories=context["categories"],
+                interest=interest,
+                judgment=context["judgment"],
+                penalties=penalties,
+                power_structure=context["power_structure"],
+                structure_source=context["structure_source"],
+            )
+            if evaluated is None:
+                report["skipped_no_context"] += 1
+                continue
+            level = evaluated["alert"]
+            components = evaluated["components"]
+            if context["structure_source"] == STRUCTURE_SOURCE_LOCAL_BACKFILL:
+                report["structure_backfilled"] += 1
+            try:
+                previous = json.loads(row["components_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                previous = None
+            if previous == components and level == row["alert_level"]:
+                # 已经是当前口径 —— 不写。回填因此可以反复运行而结果恒定。
+                report["unchanged"] += 1
+                continue
+            if level != row["alert_level"]:
+                report["level_changed"] += 1
+            connection.execute(
+                "UPDATE personal_impacts SET alert_level=?, components_json=?"
+                " WHERE impact_id=?",
+                (
+                    level,
+                    json.dumps(components, ensure_ascii=False, sort_keys=True),
+                    row["impact_id"],
+                ),
+            )
+            report["updated"] += 1
+            pending_since_commit += 1
+            if pending_since_commit >= batch_size:
+                connection.commit()
+                pending_since_commit = 0
+        connection.commit()
+        report["after"] = _alert_distribution(connection)
+    report["duration_seconds"] = round(time.monotonic() - started, 3)
+    return report
 
 
 def _iso(value):
@@ -656,6 +1148,11 @@ class ImpactService:
         self.now = now or (lambda: datetime.now(timezone.utc))
 
     def _load(self, cluster_id, judgment_id):
+        """读出事件簇、研判内容，以及**研判是谁产的**（provider）。
+
+        provider 必须一起返回：远程研判缺 `gyw.power_structure` 时要在本机补算，
+        而"要不要补"只由 provider 决定（见 `_needs_structure_backfill`）。
+        """
         with self.database.connect() as connection:
             cluster = connection.execute(
                 "SELECT * FROM event_clusters WHERE cluster_id=?", (cluster_id,)
@@ -666,17 +1163,25 @@ class ImpactService:
             ).fetchone()
         if cluster is None or judgment is None:
             raise KeyError(judgment_id)
-        return dict(cluster), json.loads(judgment["content_json"])
-
-    @staticmethod
-    def _exposure(categories, interest_category):
-        return max(
-            (
-                CATEGORY_EXPOSURE.get(category, {}).get(interest_category, 0.0)
-                for category in categories
-            ),
-            default=0.0,
+        return (
+            dict(cluster),
+            json.loads(judgment["content_json"]),
+            str(judgment["provider"] or "local"),
         )
+
+    def _cluster_entity_names(self, cluster_id):
+        """事件簇抽取到的实体名，优先给权力结构补算用。
+
+        取不到就返回空表 —— 补算函数会退回对同一段文本自己抽机构名（与本地分支
+        同款口径），**不会**因为这里为空就编一个结构出来。
+        """
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT name FROM event_entities WHERE cluster_id=?"
+                " ORDER BY confidence DESC",
+                (cluster_id,),
+            ).fetchall()
+        return [str(row["name"]) for row in rows if row["name"]]
 
     def _candidate(self, cluster, judgment, interest, impact_id, alert_level=None):
         now = self.now().astimezone(timezone.utc)
@@ -753,7 +1258,7 @@ class ImpactService:
             "magnitude": magnitude,
             "magnitude_line": magnitude_line(magnitude),
             # 「慷慨激昂」命中词：界面要显示"因为哪个词"，否则无从判断
-            "risk_signal_hit": list(gyw.get("risk_signal_hit") or []),
+            "risk_signal_hit": _text_list(gyw.get("risk_signal_hit")),
             "power_structure_rule": (gyw.get("power_structure") or {}).get("rule"),
             "delay_risk": (gyw.get("power_structure") or {}).get("delay_risk"),
             "leading_boost": _leading_boost(judgment),
@@ -777,21 +1282,12 @@ class ImpactService:
         """Feedback-learning multipliers persisted by the learning consumer."""
         try:
             with self.database.connect() as connection:
-                row = connection.execute(
-                    "SELECT value_json FROM runtime_state WHERE state_key=?",
-                    ("learning.category_penalties",),
-                ).fetchone()
-            penalties = json.loads(row["value_json"]) if row else {}
+                return _category_penalties_from_connection(connection)
         except Exception:
-            penalties = {}
-        return {
-            str(key): max(0.5, min(float(value), 1.0))
-            for key, value in penalties.items()
-            if isinstance(value, (int, float))
-        }
+            return {}
 
     def map_judgment(self, cluster_id: str, judgment_id: str) -> list[dict]:
-        cluster, judgment = self._load(cluster_id, judgment_id)
+        cluster, judgment, provider = self._load(cluster_id, judgment_id)
         # v1.2 第三波：**分析不成立的研判不得产生候选预测**。
         #
         # 候选预测会进不可变账本并参与 Brier 校准 —— 不能建立在"其实没分析"的基础上。
@@ -806,71 +1302,54 @@ class ImpactService:
         #     那是过度收紧，会把功能打死。
         if judgment.get("analysis_status") in ("degraded", "placeholder"):
             return []
-        categories = tuple(judgment.get("impact_categories", ()))
-        evidence = EVIDENCE_WEIGHTS.get(cluster["evidence_level"], 0.25)
-        confidence = max(0.0, min(float(judgment.get("confidence", 0.0)), 1.0))
-        urgency = _urgency(judgment.get("horizons", ()))
+        categories = tuple(_text_list(judgment.get("impact_categories")))
         penalties = self._category_penalties()
         now = _iso(self.now())
+        # v1.5：方法论的结构化产物随研判落库，这里取出来接进定级（不新增 AI 字段）。
+        # ③：远程研判的契约里没有 `power_structure`，缺了就用**本机同一个规则引擎**
+        # 在读时补算并标明来源 —— 不补的话，用户花额度换来的远程升级版会被 L4
+        # 结构闸**系统性降为 L3**（等于花钱买降级）。
+        power_structure, structure_source = _resolve_power_structure(
+            judgment,
+            provider,
+            cluster_title=cluster.get("title", ""),
+            cluster_summary=cluster.get("summary", ""),
+            entity_names=(
+                self._cluster_entity_names(cluster_id)
+                if _needs_structure_backfill(judgment, provider)
+                else None
+            ),
+        )
+        # 只改**内存副本**：让候选卡 / 量级 / 摘要看到的结构与定级用的是同一份，
+        # 免得出现"分级按补算结果、卡片却按缺失渲染"的自相矛盾。
+        # **绝不回写** `judgments.content_json`（研判不可变，原文就是原文）。
+        if not isinstance(judgment.get("gyw"), dict):
+            judgment["gyw"] = {}
+        judgment["gyw"]["power_structure"] = power_structure
         results = []
         for interest in self.interest_service.list_objects():
             if interest["status"] != "active":
                 continue
-            exposure = self._exposure(categories, interest["category"])
-            if exposure <= 0:
+            # 定级只有这一个入口（`_evaluate_impact`）：存量回填走的是同一条，
+            # 两条路因此不可能漂移。
+            evaluated = _evaluate_impact(
+                evidence_level=cluster["evidence_level"],
+                categories=categories,
+                interest=interest,
+                judgment=judgment,
+                penalties=penalties,
+                power_structure=power_structure,
+                structure_source=structure_source,
+            )
+            if evaluated is None:
                 continue
-            exposure = round(exposure * penalties.get(interest["category"], 1.0), 6)
+            exposure = evaluated["exposure"]
             # 低暴露度事件对该利益影响微弱，不生成候选预测
             if exposure < 0.3:
                 continue
-            importance = max(1, min(int(interest["importance"]), 5)) / 5
-            components = {
-                "evidence": evidence,
-                # confidence 仍然留档（可回溯、可重算旧分数），但**不参与** base_score。
-                "confidence": confidence,
-                "importance": importance,
-                "exposure": exposure,
-                "urgency": urgency,
-            }
-            # v1.4（R-05）：`confidence` **不再进 base_score**。
-            #
-            # 为什么：在本地路径下 confidence 就是
-            # `{"E1":0.30,"E2":0.50,"E3":0.70,"E4":0.82}[E级]`（judgment_local），
-            # 而 evidence 是 `EVIDENCE_WEIGHTS[E级]` —— **两者都是"独立域名数"的
-            # 单调函数**，合计权重 0.45。同一个变量计两次，等于把"来源多"这件事
-            # 放大近一倍来驱动首页排序、通知、以及"能否被自动写进账本"。
-            # v1.2 已把**概率**与来源数解耦，但驱动关注度的分数没动，而这恰好是
-            # 用户每天看到的东西 —— 这是本次补上的那一半。
-            #
-            # 移除后权重按剩余四项**等比**放大（原合计 0.80 → 1.00）：不改各项之间的
-            # 相对关系，只去掉重复计分的那一项。`confidence` 留在 components 里只为
-            # 可回溯 —— **留在留档里不等于参与运算**。
-            base_score = (
-                evidence * 0.3125
-                + importance * 0.3125
-                + exposure * 0.25
-                + urgency * 0.125
-            )
-            # 结合AI对"用户本人相关性"的结论做升降级：判无关则压到行动板之下
-            relevance = _personal_relevance(judgment)
-            components["personal_relevance"] = relevance
-            score = round(max(0.0, min(base_score * relevance, 1.0)), 6)
-            alert = _alert_level(score)
-            # 「慷慨激昂 = 内心已感知风险」→ **上调告警等级**。
-            # v1.3 修正：旧代码在本地研判里做的是 `confidence += 0.08`，方向反了
-            # （越慷慨激昂，系统越自信）。规则引擎的判断本该落在风险侧，这里落地。
-            risk_hits = list((judgment.get("gyw") or {}).get("risk_signal_hit") or [])
-            if risk_hits:
-                alert = _elevate(alert)
-                components["risk_signal_keywords"] = risk_hits
-                components["alert_before_risk_signal"] = _alert_level(score)
-            # E1 是单一来源线索，未经互证。README 与 PRIVACY.md 对外承诺
-            # 「E1 无论多重要都不得超过 L3」，此处是该承诺的强制点：只有 E2 及以上
-            # （同域转载不算互证）才允许进入 L4 立即行动。证据等级缺失或无法识别时
-            # 与 EVIDENCE_WEIGHTS 的兜底权重一致，按 E1 处理，宁可保守。
-            # ⚠ 顺序要求：**在上调之后**执行这道封顶，否则风险信号会把 E1 顶上 L4。
-            if alert == "L4" and evidence <= EVIDENCE_WEIGHTS["E1"]:
-                alert = "L3"
+            score = evaluated["score"]
+            alert = evaluated["alert"]
+            components = evaluated["components"]
             # v1.4（R-16）：**不再为 L1/L2 生成候选预测**。
             #
             # 真库实测：个人影响 118,379 条里 L2 占 108,535（92%），而首页最多显示
@@ -1200,7 +1679,9 @@ class ImpactService:
                     candidate.get("base_rate_composition") or {}
                 ).get("total", 0),
                 "magnitude": candidate.get("magnitude_line", ""),
-                "risk_signal_keywords": "、".join(candidate.get("risk_signal_hit") or []),
+                "risk_signal_keywords": "、".join(
+                    _text_list(candidate.get("risk_signal_hit"))
+                ),
                 "alert_level": candidate.get("alert_level") or "L3",
             }
         )

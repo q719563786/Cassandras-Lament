@@ -1,9 +1,20 @@
+import json
 import os
 import shutil
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+
+
+#: v7：存量 `personal_impacts` 定级口径回填（v1.5 的 L4 结构闸 / 事件侧强度）。
+#:
+#: 与 v1–v6 不同，这一版**不是**一句 `INSERT OR IGNORE` 就能算完成的迁移 ——
+#: 它要真的把存量的 `alert_level` 重算一遍。因此版本标记**不在** executescript 里
+#: 写，而是由 `_apply_legacy_alert_backfill()` 在整批成功之后才写：
+#: 中途失败/被打断 ⇒ 不记版本 ⇒ 下次启动重跑（重算幂等，结果恒定）。
+LEGACY_ALERT_BACKFILL_VERSION = 7
 
 
 @dataclass(frozen=True)
@@ -15,8 +26,14 @@ class ImportResult:
 class Database:
     """Owns the private SQLite database and one-time legacy import."""
 
-    def __init__(self, path):
+    def __init__(self, path, backup_dir=None):
         self.path = Path(path)
+        # 迁移前的备份落点（生产是 `<数据根>/backups`）。None 表示不做迁移前备份 ——
+        # 只应出现在"没有数据根目录可推断"的场合（测试直接构造 Database(path)）。
+        # 生产路径由 `application.py` 显式传入，所以"先备份再迁移"在生产里是强制的。
+        self.backup_dir = Path(backup_dir) if backup_dir is not None else None
+        # 最近一次回填的报告（诊断/排障用；不在启动路径上抛异常）。
+        self.legacy_backfill_report = None
 
     def import_legacy(self, source):
         """Copy a legacy ledger once, verify it, then apply local migrations."""
@@ -351,6 +368,38 @@ class Database:
                     source_domains_json TEXT NOT NULL DEFAULT '[]',
                     applied_json TEXT NOT NULL DEFAULT '{}'
                 );
+                -- v8：全球态势图层（地震/灾害/野火…）的**独立**存储。
+                --
+                -- 为什么不复用 external_items：USGS「今日全部地震」一天 200~400 条，
+                -- 若灌进 external_items 就会一并进入聚类、AI 研判与通知链，把成本与
+                -- 噪音一起放大。这一层是"加一层"：独立抓取路径、独立表、独立只读接口，
+                -- **不写 external_items、不进聚类、不进研判、不产生通知**。
+                --
+                -- event_id 由上游稳定标识（USGS 的 id / EONET 的 id / GDACS 的
+                -- eventid+episodeid）加来源前缀哈希而来 —— 同一事件重复抓取必须得到
+                -- 同一个 id，否则 upsert 退化成无限追加。
+                CREATE TABLE IF NOT EXISTS situation_events(
+                    event_id TEXT PRIMARY KEY,
+                    layer TEXT NOT NULL,
+                    title TEXT,
+                    summary TEXT,
+                    lat REAL,
+                    lon REAL,
+                    magnitude REAL,
+                    severity TEXT,
+                    occurred_at TEXT,
+                    updated_at TEXT,
+                    source_id TEXT NOT NULL,
+                    source_name TEXT,
+                    canonical_url TEXT,
+                    raw_json TEXT,
+                    first_seen_at TEXT,
+                    last_seen_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_situation_events_layer_occurred
+                    ON situation_events(layer, occurred_at);
+                CREATE INDEX IF NOT EXISTS idx_situation_events_occurred
+                    ON situation_events(occurred_at);
                 CREATE INDEX IF NOT EXISTS idx_feedback_events_pending
                     ON feedback_events(applied_json, occurred_at);
                 CREATE INDEX IF NOT EXISTS idx_external_sources_region
@@ -443,9 +492,93 @@ class Database:
                 VALUES (5, CURRENT_TIMESTAMP);
                 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
                 VALUES (6, CURRENT_TIMESTAMP);
+                -- v8：全球态势图层独立表（纯建表建索引，可安全放进同一个单事务）。
+                -- v7 不在这里写：它是"重算存量行"，由 _apply_legacy_alert_backfill()
+                -- 在整批成功之后才补记。
+                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                VALUES (8, CURRENT_TIMESTAMP);
                 """
             )
             self._apply_column_migrations(connection)
+        # v7 必须在 schema 事务提交之后单独跑：它是"重算存量行"，不是建表建索引，
+        # 而且要逐批提交（可中断）、开始写之前先落一份备份 —— 这些都不能塞进
+        # 上面那个单事务里。
+        self._apply_legacy_alert_backfill()
+
+    def _apply_legacy_alert_backfill(self):
+        """v7：存量 `personal_impacts` 定级回填（一次性、可重入、整批成功才记版本）。
+
+        顺序刻意如此：**先备份 → 再回填 → 最后写迁移标记**。任何一步失败，标记都不写，
+        下次启动自动重跑（回填幂等，见 `impacts.recompute_personal_impacts`）。
+
+        空表（含全部测试库）直接记版本：没有要回填的行，就没有必要留一份备份。
+        """
+        # 每次 initialize 都从"本轮没做事"起算：标记已在时本方法会提前返回，
+        # 此时 report 必须保持 None，否则会把**上一轮**的回填结果当成这一轮的。
+        self.legacy_backfill_report = None
+        with self.connect() as connection:
+            if connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE version=?",
+                (LEGACY_ALERT_BACKFILL_VERSION,),
+            ).fetchone():
+                return None
+            pending = connection.execute(
+                "SELECT COUNT(*) FROM personal_impacts"
+            ).fetchone()[0]
+        if not pending:
+            self._mark_legacy_backfill_done(None)
+            return None
+        backup = self._backup_before_migration()
+        from .impacts import recompute_personal_impacts
+
+        report = recompute_personal_impacts(self)
+        self._mark_legacy_backfill_done(backup, report)
+        self.legacy_backfill_report = report
+        return report
+
+    def _backup_before_migration(self):
+        """迁移前先落一份备份：走项目自己的备份机制与保留策略。
+
+        `backup_dir` 为 None 时不做（只有测试会这样构造）；生产由 `application.py`
+        传入 `<数据根>/backups`，因此"回填前必须先有备份"在生产路径上是强制的。
+        """
+        if self.backup_dir is None:
+            return None
+        from .backup import BackupService
+
+        return BackupService(self, self.backup_dir).run()
+
+    def _mark_legacy_backfill_done(self, backup, report=None):
+        """整批成功之后才写迁移标记；有备有据，一并落一条审计。"""
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at)"
+                " VALUES (?, CURRENT_TIMESTAMP)",
+                (LEGACY_ALERT_BACKFILL_VERSION,),
+            )
+            if report is None:
+                return
+            connection.execute(
+                "INSERT INTO audit_log(occurred_at, action, object_type, object_id,"
+                " details_json) VALUES (?, ?, ?, ?, ?)",
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    "migration.legacy_alert_backfill",
+                    "personal_impacts",
+                    None,
+                    json.dumps(
+                        {
+                            "version": LEGACY_ALERT_BACKFILL_VERSION,
+                            "backup": (backup or {}).get("path"),
+                            "updated": report.get("updated"),
+                            "level_changed": report.get("level_changed"),
+                            "before": report.get("before"),
+                            "after": report.get("after"),
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
 
     @staticmethod
     def _apply_column_migrations(connection):

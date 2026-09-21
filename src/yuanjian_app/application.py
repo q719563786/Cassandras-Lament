@@ -201,7 +201,9 @@ class Application:
     def create(cls, data_root, desktop=None, legacy_path=None):
         """Build an application without starting its blocking serve loop."""
         root = Path(data_root)
-        database = Database(root / "data" / "yuanjian.db")
+        # 传入备份目录：v7 的存量定级回填会改写 `personal_impacts`，迁移机制要求
+        # "先落一份备份再动数据"，备份落点就是项目一贯的 `<数据根>/backups`。
+        database = Database(root / "data" / "yuanjian.db", backup_dir=root / "backups")
         if legacy_path is not None and Path(legacy_path).is_file() and not database.path.exists():
             database.import_legacy(legacy_path)
         else:

@@ -1,4 +1,4 @@
-// 远见 v1.4.2 · 源表单 —— 新增 POST /api/external/sources、编辑 PUT /api/external/sources/{id}
+// 远见 v1.5.0 · 源表单 —— 新增 POST /api/external/sources、编辑 PUT /api/external/sources/{id}
 import { api, escapeHtml, showToast } from '../api.js';
 
 const KINDS = [

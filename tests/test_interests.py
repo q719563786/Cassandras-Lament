@@ -21,11 +21,14 @@ class InterestServiceTests(unittest.TestCase):
 
         items = self.service.list_objects()
 
-        self.assertEqual(len(items), 7)
+        # v1.4：新增默认项「前沿与天外」（类目 opportunity），默认项由 7 增至 8。
+        # 类目集合不变（仍复用这 7 个类目，未新增类目）。
+        self.assertEqual(len(items), 8)
         self.assertEqual(
             {item["category"] for item in items},
             {"health", "cashflow", "work", "policy", "family", "assets", "opportunity"},
         )
+        self.assertIn("前沿与天外", {item["name"] for item in items})
 
     def test_create_object_validates_category_and_importance(self):
         created = self.service.create_object(

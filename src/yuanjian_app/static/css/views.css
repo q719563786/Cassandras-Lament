@@ -1,4 +1,4 @@
-/* 远见 v1.4.2 · 视图样式 —— 干净克制 */
+/* 远见 v1.5.0 · 视图样式 —— 干净克制 */
 
 /* === 区域标题 === */
 .section-h {
@@ -926,3 +926,196 @@
   text-align: center;
   padding-top: var(--s-2);
 }
+
+/* ══════════════════════════════════════════════════════════════
+   全球态势地图（#/atlas）
+   ══════════════════════════════════════════════════════════════
+   这一页的"地图"是 canvas 自绘的（等距圆柱投影），没有地图库、没有瓦片。
+   因此这里只管版式与语义色；坐标系、缩放、命中都在 atlas.js 里。
+   颜色一律走令牌（并且地图在 JS 里也从这些令牌读色），不新增字面色值。
+*/
+.atlas-wrap {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: var(--s-4);
+  align-items: start;
+}
+.atlas-map-col { min-width: 0; }
+.atlas-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+  min-width: 0;
+}
+.atlas-panel { padding: var(--s-4); }
+
+.atlas-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--s-3);
+}
+.atlas-windows { flex-wrap: wrap; }
+.atlas-actions { gap: var(--s-3); }
+.atlas-count {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.atlas-canvas {
+  display: block;
+  width: 100%;
+  height: 460px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  cursor: grab;
+  touch-action: none;
+}
+.atlas-canvas.is-dragging { cursor: grabbing; }
+
+.atlas-readout {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin: var(--s-2) 0 0 0;
+  min-height: 1.2em;
+  font-family: var(--font-mono);
+}
+
+/* —— 图层量级口径 —— */
+.atlas-legend { display: flex; flex-direction: column; gap: 6px; }
+.atlas-legend-head {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-bottom: var(--s-1);
+}
+.atlas-legend-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: 0.78rem;
+}
+.atlas-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--atlas-color, var(--text-muted));
+}
+.atlas-legend-text { color: var(--text-secondary); flex-shrink: 0; }
+.atlas-legend-unit {
+  color: var(--text-faint);
+  font-size: 0.72rem;
+  margin-left: auto;
+  text-align: right;
+}
+
+/* —— 图层开关 —— */
+.atlas-layers { display: flex; flex-direction: column; gap: 2px; }
+.atlas-layer {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: 6px var(--s-3);
+  border-radius: var(--r-sm);
+  border: 1px solid transparent;
+  background: none;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+  text-align: left;
+  transition: all var(--dur) var(--ease);
+}
+.atlas-layer:hover { background: var(--bg-hover); color: var(--text-primary); }
+.atlas-layer[aria-pressed="true"] {
+  border-color: var(--border);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+.atlas-layer[aria-pressed="false"] { opacity: 0.45; }
+.atlas-layer-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--atlas-color, var(--text-muted));
+}
+.atlas-layer-name { flex: 1; min-width: 0; }
+.atlas-layer-count {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+/* 图层 → 语义色。只动自定义属性，颜色本体交给令牌。 */
+.atlas-layer-quake { --atlas-color: var(--red); }
+.atlas-layer-volcano { --atlas-color: var(--orange); }
+.atlas-layer-wildfire { --atlas-color: var(--orange); }
+.atlas-layer-storm { --atlas-color: var(--blue); }
+.atlas-layer-flood { --atlas-color: var(--blue); }
+.atlas-layer-drought { --atlas-color: var(--amber); }
+.atlas-layer-disaster { --atlas-color: var(--orange); }
+.atlas-layer-other { --atlas-color: var(--text-muted); }
+
+/* —— 数据新鲜度 —— */
+.atlas-fresh { display: flex; flex-direction: column; gap: var(--s-2); }
+.atlas-fresh-overall {
+  font-size: 0.76rem;
+  color: var(--text-secondary);
+  padding-bottom: var(--s-2);
+  border-bottom: 1px solid var(--border);
+}
+.atlas-fresh-item {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: 0.76rem;
+}
+.atlas-fresh-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.atlas-fresh-dot.is-ok { background: var(--green); }
+.atlas-fresh-dot.is-warn { background: var(--orange); }
+.atlas-fresh-label { color: var(--text-secondary); flex: 1; min-width: 0; }
+.atlas-fresh-state {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  text-align: right;
+}
+
+/* —— 事件详情 —— */
+.atlas-detail { display: flex; flex-direction: column; gap: var(--s-3); }
+.atlas-detail-empty {
+  font-size: 0.78rem;
+  color: var(--text-faint);
+  line-height: 1.6;
+}
+.atlas-detail-title {
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+.atlas-detail-meta { display: flex; flex-direction: column; gap: 4px; }
+.atlas-detail-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  font-size: 0.76rem;
+}
+.atlas-detail-label { color: var(--text-faint); flex-shrink: 0; }
+.atlas-detail-value { color: var(--text-secondary); }
+.atlas-detail-link {
+  font-size: 0.76rem;
+  color: var(--amber);
+  text-decoration: none;
+  align-self: flex-start;
+}
+.atlas-detail-link:hover { color: var(--amber-dim); text-decoration: underline; }

@@ -91,6 +91,16 @@ STATIC_FILES = {
         "js/views/cluster.js",
         "text/javascript; charset=utf-8",
     ),
+    "/js/views/atlas.js": (
+        "js/views/atlas.js",
+        "text/javascript; charset=utf-8",
+    ),
+    # 全球态势地图的海岸线底图（Natural Earth 110m land，127 个多边形）。
+    # 由后端投放、同源加载；不允许走 CDN/瓦片服务 —— CSP 只放行 'self'。
+    "/geo/ne_110m_land.geojson": (
+        "geo/ne_110m_land.geojson",
+        "application/geo+json; charset=utf-8",
+    ),
     "/fonts/JetBrainsMono-Regular.woff2": (
         "fonts/JetBrainsMono-Regular.woff2",
         "font/woff2",
@@ -177,6 +187,9 @@ ROUTES = (
     Route("GET", "exact", "/api/external/radar", "_get_external_radar"),
     Route("GET", "exact", "/api/external/sources", "_get_external_sources"),
     Route("GET", "exact", "/api/external/rules", "_get_external_rules"),
+    # v8：全球态势图层只读接口。**只读**：不触发外网抓取，抓取由调度器负责。
+    Route("GET", "exact", "/api/situation/layers", "_get_situation_layers"),
+    Route("GET", "exact", "/api/situation/points", "_get_situation_points"),
     Route("GET", "exact", "/api/cognition/status", "_get_cognition_status"),
     Route("GET", "exact", "/api/cognition/candidates", "_get_cognition_candidates"),
     Route("GET", "exact", "/api/risk-dashboard", "_get_risk_dashboard"),
@@ -722,6 +735,23 @@ def create_server(host, port, token, services):
 
         def _get_external_rules(self, services, params, parsed, payload):
             self._json({"rules": services.external.list_rules()})
+
+        def _get_situation_layers(self, services, params, parsed, payload):
+            self._json(services.external.situation_layers())
+
+        def _get_situation_points(self, services, params, parsed, payload):
+            query = parse_qs(parsed.query)
+            try:
+                self._json(
+                    services.external.situation_points(
+                        layer=query.get("layer", [""])[0],
+                        hours=query.get("hours", ["24"])[0],
+                        bbox=query.get("bbox", [""])[0],
+                        limit=query.get("limit", ["500"])[0],
+                    )
+                )
+            except (TypeError, ValueError) as error:
+                self._error(400, "invalid_request", str(error))
 
         def _get_cognition_status(self, services, params, parsed, payload):
             status = services.cognition_controller.status()

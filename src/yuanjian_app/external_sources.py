@@ -36,6 +36,29 @@ class ExternalItem:
     raw: dict | None = None
 
 
+@dataclass(frozen=True)
+class SituationPoint:
+    """全球态势图层的一个点事件（独立于 `ExternalItem`）。
+
+    刻意**不复用** `ExternalItem`：那一个类型会被写进 `external_items`、进而进聚类与
+    AI 研判。态势层是"加一层"，必须与那条链在**类型层面**就隔开 —— 一旦误传，
+    `_store_item` 会因为缺 `.url` 之类的字段当场报错，而不是悄悄把地震灌进研判。
+    """
+
+    event_key: str
+    layer: str
+    title: str
+    lat: float
+    lon: float
+    summary: str = ""
+    magnitude: float | None = None
+    severity: str = ""
+    occurred_at: str = ""
+    updated_at: str = ""
+    url: str = ""
+    raw: dict | None = None
+
+
 def normalize_published_at(value):
     """Normalize ISO, RFC 2822, GDELT and compact 14-digit timestamps."""
     text = str(value or "").strip()
@@ -228,6 +251,184 @@ def parse_json_api(body, source_id, source_name, config):
             )
         )
     return output
+
+
+def _pluck(root, path):
+    """通用取值器：点号路径 + 下标，支持 `*` 通配。
+
+    例：
+        `features.*.properties.title` → 每个 feature 的标题列表
+        `geometry.coordinates.0`      → 坐标数组的第 0 个（经度）
+        `categories.0.id`             → 首个类目 id
+
+    取不到一律返回 `None`（不抛），调用方据此跳过该记录 —— 三个源的结构差异
+    全部压进 `config_json`，解析器里**不硬编码任何源**。
+    """
+    if path in (None, ""):
+        return root
+    tokens = str(path).split(".")
+    current = root
+    for index, token in enumerate(tokens):
+        if token == "*":
+            if not isinstance(current, list):
+                return None
+            rest = ".".join(tokens[index + 1 :])
+            return [_pluck(item, rest) for item in current]
+        if isinstance(current, list):
+            if not token.isdigit():
+                return None
+            position = int(token)
+            if position >= len(current):
+                return None
+            current = current[position]
+        elif isinstance(current, dict):
+            if token not in current:
+                return None
+            current = current[token]
+        else:
+            return None
+    return current
+
+
+def _spec_values(root, spec):
+    if isinstance(spec, (list, tuple)):
+        return [_pluck(root, item) for item in spec]
+    return [_pluck(root, spec)]
+
+
+def _as_text(value):
+    if value is None or isinstance(value, bool):
+        return ""
+    return str(value).strip()
+
+
+def _first_text(root, spec):
+    """按顺序取第一个非空文本（用于 url/summary 这类"有首选、有兜底"的字段）。"""
+    for value in _spec_values(root, spec):
+        text = _as_text(value)
+        if text:
+            return text
+    return ""
+
+
+def _join_text(root, spec):
+    """把多个路径拼成一个稳定标识（GDACS 的 eventid + episodeid）。"""
+    return "-".join(
+        text for text in (_as_text(value) for value in _spec_values(root, spec)) if text
+    )
+
+
+def _pluck_number(root, spec):
+    for value in _spec_values(root, spec):
+        if isinstance(value, bool) or value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _epoch_to_iso(number):
+    value = float(number)
+    if value > 1e11:  # 毫秒（USGS properties.time 形如 1789918095590）
+        value /= 1000.0
+    try:
+        moment = datetime.fromtimestamp(value, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return ""
+    # 统一到秒：ISO 字符串要能直接做字典序比较（范围过滤与排序都靠它）。
+    # 若 USGS 留 6 位微秒、GDACS 留 0 位，同一秒内会因 '.'(0x2E) < 'Z'(0x5A)
+    # 而排错序 —— 地图上到秒足够，统一抹掉微秒。
+    return moment.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def normalize_situation_time(value):
+    """态势层时间归一：epoch 秒/毫秒、ISO、RFC2822 都收敛成 UTC ISO。"""
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, (int, float)):
+        return _epoch_to_iso(value)
+    text = str(value).strip()
+    if not text:
+        return ""
+    if text.isdigit() and len(text) >= 9:
+        return _epoch_to_iso(int(text))
+    return normalize_published_at(text)
+
+
+def parse_geojson(body, source_id, source_name, config):
+    """按 `config_json` 驱动解析 GeoJSON / JSON 点事件列表。
+
+    与 `parse_json_api` / `parse_gdelt` 同款：一个解析器 + 一份配置，源差异不入代码。
+    `config_json` 形如：
+        {"records_path": "features", "layer": "quake",
+         "fields": {"id": "id", "title": "properties.title",
+                    "lat": "geometry.coordinates.1", "lon": "geometry.coordinates.0",
+                    "occurred_at": "properties.time", "magnitude": "properties.mag",
+                    "severity": "properties.alert", "url": "properties.url"}}
+    或按类别派生图层：
+        {"records_path": "events", "layer_path": "categories.0.id",
+         "layer_map": {"wildfires": "wildfire"}, "default_layer": "disaster",
+         "fields": {"id": "id", "lat": "geometry.0.coordinates.1", ...}}
+
+    缺坐标、坐标非数值或越界、缺标题的记录一律**跳过**（不抛）—— 单条脏数据不该
+    让整轮抓取失败。
+    """
+    config = config or {}
+    try:
+        payload = json.loads(body.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise FetchError("parse_error", f"GeoJSON解析失败：{error}") from error
+    records = _pluck(payload, config.get("records_path", ""))
+    if records is None:
+        records = []
+    if not isinstance(records, list):
+        raise FetchError("parse_error", "GeoJSON路径未指向列表")
+    fields = config.get("fields") or {}
+    constant_layer = _as_text(config.get("layer"))
+    layer_path = _as_text(config.get("layer_path"))
+    layer_map = config.get("layer_map") or {}
+    default_layer = _as_text(config.get("default_layer")) or constant_layer or "other"
+    points = []
+    for raw in records:
+        if not isinstance(raw, dict):
+            continue
+        lat = _pluck_number(raw, fields.get("lat"))
+        lon = _pluck_number(raw, fields.get("lon"))
+        if lat is None or lon is None:
+            continue
+        if not -90 <= lat <= 90 or not -180 <= lon <= 180:
+            continue
+        title = _first_text(raw, fields.get("title"))
+        if not title:
+            continue
+        layer = constant_layer
+        if not layer and layer_path:
+            layer = _as_text(layer_map.get(_first_text(raw, layer_path), ""))
+        if not layer:
+            layer = default_layer
+        points.append(
+            SituationPoint(
+                event_key=_join_text(raw, fields.get("id")),
+                layer=layer or "other",
+                title=title,
+                lat=lat,
+                lon=lon,
+                summary=_first_text(raw, fields.get("summary")),
+                magnitude=_pluck_number(raw, fields.get("magnitude")),
+                severity=_first_text(raw, fields.get("severity")),
+                occurred_at=normalize_situation_time(
+                    _pluck(raw, fields.get("occurred_at"))
+                ),
+                updated_at=normalize_situation_time(
+                    _pluck(raw, fields.get("updated_at"))
+                ),
+                url=_first_text(raw, fields.get("url")),
+                raw=raw,
+            )
+        )
+    return points
 
 
 def _text(element, child_name):

@@ -17,7 +17,7 @@ v1.3 认知定位修正（审计 2.7「知识库把假设当事实」）
      用户 Obsidian 里本来就有这套状态机，应用侧此前没有；
   3. **不得为了让结论符合假设而裁剪证据**。
 
-**天外实体侧已移出通用注入**：它只在与 UAP / 航天 / 解密相关的事件上注入。
+**天外实体侧已移出通用注入**：它只在与 UAP / 非人类 / 官方解密相关的事件上注入。
 理由：把"外星文明"当成每次研判的默认透镜，本身就是在制造观察偏差。
 """
 
@@ -211,12 +211,37 @@ KNOWLEDGE_STATUS = {
     },
 }
 
-# 天外实体侧的相关性触发词：命中才注入（v1.3）
+# 天外实体侧的相关性触发词：命中才注入（v1.3 → v1.4 收紧）
+# v1.4：真库 79,482 个事件簇上，旧表命中 630 条、其中**零条**真与 UAP 相关，
+#   全部是误命中。据此收紧：
+#   · 删「蓝皮书」（命中广州经济/精油行业蓝皮书）、「天外」（命中"昨**天外**交部"）、
+#     「五角大楼」（76 条美军/政治新闻）、「外星」（Alienware 等品牌撞车风险）、
+#     「解密文件」（"解密"单用太泛）；
+#   · 删航天一组（航天/火箭/卫星/深空/探测器/空间站/航天器）——本知识块只讲
+#     UAP/非人类/官方解密，没有航天产业内容；那类事件属科技产业，不该套这层透镜。
+#   · 「不明飞行物」改为需与官方/UAP 语汇**共现**（否则"不明飞行物击中船只=导弹"）。
+# 只保留专名/专有组合。
 EXTRATERRESTRIAL_TRIGGERS = (
-    "uap", "不明飞行物", "不明空中现象", "非人类", "外星", "天外",
-    "罗斯威尔", "蓝皮书", "aaro", "aatip", "解密文件", "五角大楼",
-    "航天", "火箭", "卫星", "深空", "探测器", "空间站", "航天器",
+    "uap", "aaro", "aatip",
+    "不明空中现象", "不明异常现象",
+    "非人类飞行器", "非人类智能",
+    "罗斯威尔", "奥陌陌", "星际访客",
+    "蓝皮书计划",
 )
+
+# 需"共现"才命中的触发词：anchor 单独出现不算，必须同时出现任一 context 词。
+# v1.4.1：共现语境抽成一份，`不明飞行物` 与 `ufo` 共用；并补 听证/档案。
+# "不明飞行物"/"ufo" 独立出现多数是导弹/航空器目击或品牌撞车，须与官方或
+# UAP 语汇同现才算命中 —— 使"义乌卖 UFO""Uforce 轮融资"不命中，而
+# "五角大楼公布 UFO 档案"命中。
+_UAP_COOCCURRENCE_CONTEXT = (
+    "uap", "非人类", "解密", "国防部", "五角大楼", "官方", "听证", "档案",
+    "罗斯威尔", "aaro", "aatip", "不明空中现象",
+)
+EXTRATERRESTRIAL_COOCCURRENCE = {
+    "不明飞行物": _UAP_COOCCURRENCE_CONTEXT,
+    "ufo": _UAP_COOCCURRENCE_CONTEXT,
+}
 
 # 注入文本的定性抬头（v1.3 核心改动）——替换原来的「必须用以下逻辑判断」
 HYPOTHESIS_FRAMING = """═══ 你自己的认知框架（**候选假设，不是事实**）═══
@@ -289,9 +314,20 @@ ALL_KNOWLEDGE_BLOCK_NAMES = tuple(
 
 
 def extraterrestrial_relevant(title: str = "", summary: str = "") -> bool:
-    """本次事件是否与天外实体/航天相关（命中才注入那一块）。"""
+    """本次事件是否与天外实体（UAP/非人类/官方解密）相关（命中才注入那一块）。
+
+    v1.4：先查专名触发词；「不明飞行物」等需与官方/UAP 语汇**共现**才算命中，
+    避免把导弹目击、行业蓝皮书、产业航天新闻误判为天外实体事件。
+    """
     text = f"{title} {summary}".casefold()
-    return any(kw.casefold() in text for kw in EXTRATERRESTRIAL_TRIGGERS)
+    if any(kw.casefold() in text for kw in EXTRATERRESTRIAL_TRIGGERS):
+        return True
+    for anchor, context in EXTRATERRESTRIAL_COOCCURRENCE.items():
+        if anchor.casefold() in text and any(
+            kw.casefold() in text for kw in context
+        ):
+            return True
+    return False
 
 
 def hypothesis_block(title: str = "", summary: str = "") -> str:

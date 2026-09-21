@@ -58,14 +58,21 @@ class RadarSchedulerTests(unittest.TestCase):
         self.assertEqual(scheduler.run_once(), 1)
         self.assertEqual(calls, 2)
 
-    def test_repeated_failures_back_off_at_15_30_then_60_minutes(self):
+    def test_repeated_failures_back_off_exponentially_then_cap_at_360(self):
+        """失败退避：base 15 分钟、每次翻倍、封顶 360 分钟。
+
+        2026-09-20 拍板把封顶从 60 拉到 360 —— 原契约（15/30/60/60）就是这条
+        用例钉住的，现在序列延到 15/30/60/120/240/360/360：前四步仍是翻倍，
+        第六步起撞上封顶。多跑几步是为了**让封顶本身被测到**，否则"改成 720"
+        这类回归不会被发现。
+        """
         def fetcher(source):
             raise FetchError("timeout", "超时")
 
         service = self.service(fetcher)
         scheduler = RadarScheduler(service, poll_seconds=0.01)
         delays = []
-        for expected in (15, 30, 60, 60):
+        for expected in (15, 30, 60, 120, 240, 360, 360):
             self.assertEqual(scheduler.run_once(), 1)
             source = service.list_sources()[0]
             delay = parse_iso(source["next_fetch_at"]) - self.clock.value
@@ -73,7 +80,7 @@ class RadarSchedulerTests(unittest.TestCase):
             self.assertEqual(delays[-1], expected)
             self.clock.value += timedelta(minutes=expected)
 
-        self.assertEqual(delays, [15, 30, 60, 60])
+        self.assertEqual(delays, [15, 30, 60, 120, 240, 360, 360])
 
     def test_background_scheduler_stops_without_leaving_a_thread(self):
         service = self.service(lambda source: [])

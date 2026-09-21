@@ -1,4 +1,4 @@
-// 远见 v1.4.2 · 诊断中心 —— 六瓦片聚合（AC-05：从未备份且自动备份关闭 = 琥珀告警）
+// 远见 v1.5.0 · 诊断中心 —— 六瓦片聚合（AC-05：从未备份且自动备份关闭 = 琥珀告警）
 import { api, escapeHtml, showPageError } from '../api.js';
 import { yjIcon } from '../icons.js';
 import { formatBytes, formatLocalTime } from '../ui_core.js';

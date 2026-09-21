@@ -385,7 +385,7 @@ class BrowserViewRenderTests(unittest.TestCase):
     """
 
     JS_VIEWS = (
-        "today", "calib", "sources", "diag", "settings", "tell",
+        "today", "atlas", "calib", "sources", "diag", "settings", "tell",
     )
 
     def _run_view(self, view_name):

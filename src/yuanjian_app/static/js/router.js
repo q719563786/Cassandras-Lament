@@ -1,6 +1,7 @@
-// 远见 v1.4.2 · hash 路由 —— #/today #/tell #/calib #/sources #/diag #/settings #/cluster/:id
+// 远见 v1.5.0 · hash 路由 —— #/today #/atlas #/tell #/calib #/sources #/diag #/settings #/cluster/:id
 import { showLoading, showPageError } from './api.js';
 import * as today from './views/today.js';
+import * as atlas from './views/atlas.js';
 import * as tell from './views/tell.js';
 import * as calib from './views/calib.js';
 import * as sources from './views/sources.js';
@@ -10,6 +11,7 @@ import * as cluster from './views/cluster.js';
 
 const ROUTES = Object.freeze({
   today: {title: '今日远见', cap: 'DAILY BRIEF · 最高优先级', mod: today},
+  atlas: {title: '全球态势', cap: 'ATLAS · 全球事件图层', mod: atlas},
   calib: {title: '校准面板', cap: 'CALIBRATION · 预测准确率', mod: calib},
   sources: {title: '源管理', cap: 'SOURCES · 监听信道', mod: sources},
   diag: {title: '诊断中心', cap: 'DIAGNOSTICS · 系统体检', mod: diag},

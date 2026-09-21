@@ -19,6 +19,10 @@
 - 「采集运行」`external_runs`（D 层）：按 `run_days`（默认 90 天）清理。
   **这是未来保护，不是当下回收**：截至 2026-09-14 最老记录是 2026-08-06，
   尚未满 90 天，当下可删 0 行 / 0 MB。
+- 「全球态势事件」`situation_events`（F 层，2026-09-20 新增）：按固定
+  `SITUATION_KEEP_DAYS`（30 天）清理。判据与 A 层同构 —— 优先用事件自身的
+  `occurred_at`，但只在它是 ISO 形状时才用，否则退化用 `last_seen_at`。
+  这批数据可从上游（USGS/EONET/GDACS）再生，不是结论，可以清。
 - 「趋势快照」`trend_snapshots`（E 层）：按窗口降采样，`SNAPSHOT_KEEP_DAYS`
   给出每个窗口的保留天数；`window_hours=720` **永久保留**（受硬不变量保护）。
   不在 `SNAPSHOT_KEEP_DAYS` 里、也不在保护名单里的窗口一律不动。
@@ -67,6 +71,13 @@ JOB_ABSOLUTE_MAX_DAYS = 180
 DEFAULT_RUN_DAYS = 90
 MIN_RUN_DAYS = 7
 MAX_RUN_DAYS = 730
+
+# F 层：全球态势事件（v8 新表 `situation_events`）。
+# 与 A 层同属"可从上游再生的原始数据"，所以给一个**固定**窗口而不是用户设置：
+# 地图只有 24h/72h/7d 三个展示窗口，30 天足够覆盖且不至于让表无限增长。
+# 这里刻意不暴露成 `settings.retention` 的键 —— 团队 2026-09-20 拍板就是「加 30 天」，
+# 多一个用户旋钮只会多一处口径不一致。
+SITUATION_KEEP_DAYS = 30
 
 # E 层：窗口小时 -> 保留天数。不在此表、也不在保护名单里的窗口一律不动。
 SNAPSHOT_KEEP_DAYS = {6: 7, 24: 60, 168: 365}
@@ -465,7 +476,7 @@ class RetentionService:
     # -- 执行 -------------------------------------------------------------
 
     def run(self, trigger="scheduled") -> dict:
-        """按 A → B → C → D → E 顺序执行分层清理。
+        """按 A → B → C → D → E → F 顺序执行分层清理。
 
         参数
         ----
@@ -481,7 +492,7 @@ class RetentionService:
         行为约定
         --------
         - 设置为 ``enabled=False`` 时直接返回 ``status="disabled"``，不删任何东西。
-        - **单事务**：A~E 全部删除在同一个事务里完成，任一层抛异常整体回滚，
+        - **单事务**：A~F 全部删除在同一个事务里完成，任一层抛异常整体回滚，
           不留半删状态。审计行与节流时钟也在同一事务内写入。
         - **只有真的删了东西才写 audit_log**（沿用既有约定，避免每天留全零记录）；
           节流时钟与此无关，每次尝试都写。
@@ -509,6 +520,7 @@ class RetentionService:
         now_utc = self.now().astimezone(timezone.utc)
         cutoff = _iso(now_utc - timedelta(days=setting["days"]))
         cluster_cutoff = _iso(now_utc - timedelta(days=setting["cluster_days"]))
+        situation_cutoff = _iso(now_utc - timedelta(days=SITUATION_KEEP_DAYS))
 
         result = {
             "status": "ok",
@@ -518,9 +530,11 @@ class RetentionService:
             "deleted_detail": {},
             "deleted_jobs": 0,
             "deleted_runs": 0,
+            "deleted_situation": 0,
             "downsampled_snapshots": {},
             "cutoff": cutoff,
             "cluster_cutoff": cluster_cutoff,
+            "situation_cutoff": situation_cutoff,
             "db_bytes_before": 0,
             "db_bytes_after": 0,
             "free_pages_before": 0,
@@ -555,6 +569,7 @@ class RetentionService:
         detail_counts = {}
         deleted_jobs = 0
         deleted_runs = 0
+        deleted_situation = 0
         downsampled = {window: 0 for window in SNAPSHOT_KEEP_DAYS}
         db_bytes_after = db_bytes_before
         free_pages_after = free_pages_before
@@ -619,11 +634,17 @@ class RetentionService:
             # 阶段 E：趋势快照按窗口降采样
             downsampled = self._downsample_snapshots(connection, now_utc)
 
+            # 阶段 F：过期的全球态势事件（30 天，可从上游再生）
+            deleted_situation = self._purge_situation_events(
+                connection, situation_cutoff
+            )
+
             removed_total = (
                 deleted_items
                 + sum(detail_counts.values())
                 + deleted_jobs
                 + deleted_runs
+                + deleted_situation
                 + sum(downsampled.values())
             )
             db_bytes_after = self._database_bytes()
@@ -657,6 +678,8 @@ class RetentionService:
                     "job_days": setting["job_days"],
                     "deleted_runs": deleted_runs,
                     "run_days": setting["run_days"],
+                    "deleted_situation": deleted_situation,
+                    "situation_days": SITUATION_KEEP_DAYS,
                     "downsampled_snapshots": downsampled,
                     "db_bytes_before": db_bytes_before,
                     "db_bytes_after": db_bytes_after,
@@ -683,6 +706,7 @@ class RetentionService:
                 "deleted_detail": detail_counts,
                 "deleted_jobs": deleted_jobs,
                 "deleted_runs": deleted_runs,
+                "deleted_situation": deleted_situation,
                 "downsampled_snapshots": downsampled,
                 "db_bytes_before": db_bytes_before,
                 "db_bytes_after": db_bytes_after,
@@ -787,6 +811,37 @@ class RetentionService:
         if count:
             connection.execute(
                 "DELETE FROM external_runs WHERE started_at < ?", (run_cutoff,)
+            )
+        return count
+
+    def _purge_situation_events(self, connection, situation_cutoff):
+        """F 层：清理过期的全球态势事件，返回实际删除行数。
+
+        判据与 A 层**刻意同构**，因为两张表的"时间"都有同一个坑：
+
+        - `occurred_at` 可能为 NULL（上游没给时间）。
+        - 它也可能是非 ISO 形状的字符串。按字典序比会恒大于截止值而永远删不掉。
+
+        所以优先用 `occurred_at`，但**只有它是 ISO 形状时才用**；否则退化用
+        `last_seen_at`。两个都为空的行（COALESCE 得 NULL）比较结果为 NULL、
+        永不命中 —— 这是**保守方向**（宁可不删），符合"删不掉的后果只是多占点空间"。
+
+        这批数据可从上游再生，不是结论，所以进清理；但它**不是**用户自撰状态，
+        不需要像 `personal_impacts` 那样叠加"无用户标注"条件。
+        """
+        condition = """
+            COALESCE(
+                CASE WHEN occurred_at LIKE '____-__-__T%' THEN occurred_at END,
+                last_seen_at
+            ) < ?
+        """
+        count = connection.execute(
+            f"SELECT COUNT(*) FROM situation_events WHERE {condition}",
+            (situation_cutoff,),
+        ).fetchone()[0]
+        if count:
+            connection.execute(
+                f"DELETE FROM situation_events WHERE {condition}", (situation_cutoff,)
             )
         return count
 

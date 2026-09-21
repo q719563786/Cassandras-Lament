@@ -119,6 +119,18 @@ class AttentionScoreTests(unittest.TestCase):
                 "leading_indicators": "河源市水务局主页挂出泵类采购公告",
                 "observable_signals": ["河源市水务局官网挂出泵类采购公告"],
                 "risk_signal_hit": list(risk_hit),
+                # v1.5（改动 A）：L4 现在**必须有结构性抓手**（执行摩擦或风险信号）。
+                # `judgment_local` 每条研判都会落 gyw.power_structure；夹具此前缺这一项，
+                # 在 risk_hit=() 的用例里会被正确地降为 L3。补上真实产物形状：
+                # 河源市水务局=地方执行层 → delay_risk=高（结构强度 s=1.0，不改动既有分数）。
+                "power_structure": {
+                    "rule": "local_lead",
+                    "execution_layer": "基层政府和具体执行机构",
+                    "veto_analysis": "基层执行层有较大裁量权，可能变通或拖延",
+                    "delay_risk": "高",
+                    "matched_orgs": ["河源市水务局"],
+                    "basis": "夹具：地方执行机构发文并落地；delay 取最低执行层。",
+                },
             },
         }
         with self.database.connect() as connection:

@@ -128,6 +128,19 @@ class RadarScheduler:
             return {"status": "paused"}
         return self._execute("external", self.service.refresh_due_sources)
 
+    def run_situation_once(self):
+        """全球态势图层抓取（独立任务名，独立于 external）。
+
+        与 `run_external_once` 分开记录：两者的成功/失败必须能分别回看，
+        否则一次地震源抖动会把"新闻采集"的任务状态写脏。
+        """
+        if self.paused:
+            return {"status": "paused"}
+        refresh = getattr(self.service, "refresh_situation_layers", None)
+        if refresh is None:
+            return {"status": "disabled"}
+        return self._execute("situation", refresh)
+
     def run_cognition_once(self):
         if self.paused:
             return {"status": "paused"}
@@ -274,6 +287,7 @@ class RadarScheduler:
 
     def _run(self):
         next_external = 0.0
+        next_situation = 0.0
         next_cognition = 0.0
         next_trends = 0.0
         next_learning = 0.0
@@ -291,6 +305,11 @@ class RadarScheduler:
             if current >= next_external:
                 self.run_external_once()
                 next_external = following(self.poll_seconds)
+            if current >= next_situation:
+                # 态势源自身 refresh_minutes 是 20~30 分钟，这里 5 分钟查一次是否到期
+                # 即可（是否真的抓由 next_fetch_at 决定），不额外增加外网压力。
+                self.run_situation_once()
+                next_situation = following(300)
             if self.cognition is not None and current >= next_cognition:
                 self.run_cognition_once()
                 # 认知扫描间隔为5分钟（300秒），远程调用频率由 cognition._remote_due() 严格控制
@@ -313,7 +332,7 @@ class RadarScheduler:
                 # 在近 900MB 的库上单次约 1.8 秒，所以按小时而不是按分钟做。
                 self.run_retention_if_threshold()
                 next_retention_check = following(3600)
-            waits = [next_external - time.monotonic()]
+            waits = [next_external - time.monotonic(), next_situation - time.monotonic()]
             if self.cognition is not None:
                 waits.extend(
                     [next_cognition - time.monotonic(), next_trends - time.monotonic()]

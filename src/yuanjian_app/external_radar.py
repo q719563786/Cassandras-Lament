@@ -12,6 +12,7 @@ from .external_sources import (
     fetch_json,
     parse_feed,
     parse_gdelt,
+    parse_geojson,
     parse_html_list,
     parse_json_api,
     validate_public_url,
@@ -24,10 +25,52 @@ SOURCE_CATEGORIES = {
     "gov", "water", "housing", "procurement", "industry", "news",
     "finance", "general", "legacy",
 }
-SOURCE_KINDS = {"rss", "gdelt", "html_list", "json_api"}
+SOURCE_KINDS = {"rss", "gdelt", "html_list", "json_api", "geojson"}
 # P4: 信源分级——T1官方源 / T2权威媒体 / T3聚合或一般 / T4未验证
 SOURCE_TIERS = {"T1", "T2", "T3", "T4"}
 TIER_RELIABILITY = {"T1": 0.9, "T2": 0.7, "T3": 0.5, "T4": 0.3}
+
+# v8：全球态势图层的图层白名单与中文名。图层是**封闭集合** —— 接口把非法 layer
+# 当作参数错误（400）而不是"查不到就返回空"，这样拼错图层时能立刻看见，
+# 而不是以为"这个世界很太平"。`other` 兜底：解析器认不出类别时归到它。
+SITUATION_LAYER_NAMES = {
+    "quake": "地震",
+    "disaster": "灾害",
+    "wildfire": "野火",
+    "storm": "风暴",
+    "flood": "洪水",
+    "volcano": "火山",
+    "drought": "干旱",
+    "other": "其他",
+}
+#: 态势层专用来源的刷新间隔区间（分钟）。团队约定 20~30，避免一天几百条被高频重复抓。
+SITUATION_MIN_REFRESH_MINUTES = 20
+SITUATION_MAX_REFRESH_MINUTES = 30
+SITUATION_SOURCE_KIND = "geojson"
+
+# 抓取失败退避：delay = base × 2^(failures-1)，封顶 max。成功抓取即把
+# `consecutive_failures` 归零，退避自然重置（既有行为，不改）。
+#
+# 2026-09-20 拍板：原封顶 60 分钟太短。对端持续不可达时，60 分钟封顶意味着每
+# 小时都会再去撞一次；GDELT 实测 575 次抓取里 448 次是"不可达"（TLS 握手超时），
+# 其中绝大多数都是明知不可达后的无谓重试。封顶拉到 360 分钟，把重试成本按
+# 2^(failures-1) 指数拉开。**不自动停用**：源仍保持 enabled，只是抓得越来越稀。
+FAILURE_BACKOFF_BASE_MINUTES = 15
+FAILURE_BACKOFF_MAX_MINUTES = 360
+
+
+def _failure_backoff_minutes(failures: int) -> int:
+    """连续失败 `failures` 次后的重试间隔（分钟）。
+
+    单独抽成函数，是为了让"退避序列"只有一处定义 —— 采集条目路径
+    (`refresh_source`) 与态势图层路径 (`refresh_situation_source`) 共用它，
+    不会各自漂移。
+    """
+    failures = max(1, int(failures))
+    return min(
+        FAILURE_BACKOFF_MAX_MINUTES,
+        FAILURE_BACKOFF_BASE_MINUTES * (2 ** (failures - 1)),
+    )
 
 
 def utc_now():
@@ -66,6 +109,12 @@ def fetch_source(source):
         config = json.loads(source.get("config_json") or "{}")
         body = fetch_json(source["endpoint"], config.get("request_payload", {}))
         return parse_json_api(body, source["source_id"], source["name"], config)
+    if kind == SITUATION_SOURCE_KIND:
+        # 态势层：走同一套 fetch_bytes 安全网（公网/DNS 校验、10s 超时、5MB 上限），
+        # 但产出的是 SituationPoint —— 与 external_items 的写入链在类型上分离。
+        config = json.loads(source.get("config_json") or "{}")
+        body = fetch_bytes(source["endpoint"])
+        return parse_geojson(body, source["source_id"], source["name"], config)
     body = fetch_bytes(source["endpoint"])
     if kind == "rss":
         return parse_feed(body, source["source_id"], source["name"], source["endpoint"])
@@ -153,6 +202,7 @@ class ExternalRadarService:
              "kind": "gdelt",
              "endpoint": "https://api.gdeltproject.org/api/v2/doc/doc?query=China&mode=artlist&format=json&maxrecords=25&timespan=1d",
              "region": "global", "category": "general",
+             "refresh_minutes": 120,
              "reliability_weight": 0.65, "tier": "T3"},
             {"source_id": "S-YGP-HY", "name": "广东公共资源交易·河源全量公告",
              "kind": "json_api",
@@ -198,6 +248,78 @@ class ExternalRadarService:
                      "detail?noticeId={noticeId}"
                  ),
              }},
+            # ── v8：全球态势图层（独立存储，不进 external_items / 聚类 / 研判 / 通知）──
+            # 三家都是官方/半官方、无密钥、自带经纬度。category 用现有枚举里的
+            # `general`（新增类目会牵动 5 处白名单，本轮取最小改动）；region=global。
+            {"source_id": "S-USGS-QUAKE", "name": "USGS 全球地震（近一日）",
+             "kind": "geojson",
+             "endpoint": "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson",
+             "region": "global", "category": "general", "refresh_minutes": 20,
+             "reliability_weight": 0.95, "tier": "T1", "config": {
+                 "records_path": "features",
+                 "layer": "quake",
+                 "fields": {
+                     "id": "id",
+                     "title": "properties.title",
+                     "summary": "properties.place",
+                     "occurred_at": "properties.time",
+                     "updated_at": "properties.updated",
+                     "magnitude": "properties.mag",
+                     "severity": "properties.alert",
+                     "lat": "geometry.coordinates.1",
+                     "lon": "geometry.coordinates.0",
+                     "url": "properties.url",
+                 },
+             }},
+            {"source_id": "S-NASA-EONET", "name": "NASA EONET 自然事件",
+             "kind": "geojson",
+             "endpoint": "https://eonet.gsfc.nasa.gov/api/v3/events?limit=300",
+             "region": "global", "category": "general", "refresh_minutes": 30,
+             "reliability_weight": 0.9, "tier": "T1", "config": {
+                 "records_path": "events",
+                 "layer_path": "categories.0.id",
+                 "layer_map": {
+                     "wildfires": "wildfire", "severeStorms": "storm",
+                     "volcanoes": "volcano", "floods": "flood",
+                     "drought": "drought", "earthquakes": "quake",
+                 },
+                 "default_layer": "disaster",
+                 "fields": {
+                     "id": "id",
+                     "title": "title",
+                     "summary": ["description", "link"],
+                     "occurred_at": "geometry.0.date",
+                     "magnitude": "geometry.0.magnitudeValue",
+                     "lat": "geometry.0.coordinates.1",
+                     "lon": "geometry.0.coordinates.0",
+                     "url": ["sources.0.url", "link"],
+                 },
+             }},
+            {"source_id": "S-GDACS", "name": "GDACS 全球灾害告警",
+             "kind": "geojson",
+             "endpoint": "https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH",
+             "region": "global", "category": "general", "refresh_minutes": 30,
+             "reliability_weight": 0.9, "tier": "T1", "config": {
+                 "records_path": "features",
+                 "layer_path": "properties.eventtype",
+                 "layer_map": {
+                     "EQ": "quake", "TC": "storm", "FL": "flood",
+                     "VO": "volcano", "WF": "wildfire", "DR": "drought",
+                 },
+                 "default_layer": "disaster",
+                 "fields": {
+                     "id": ["properties.eventid", "properties.episodeid"],
+                     "title": "properties.name",
+                     "summary": ["properties.description", "properties.htmldescription"],
+                     "occurred_at": "properties.fromdate",
+                     "updated_at": "properties.datemodified",
+                     "magnitude": ["properties.severitydata.severity", "properties.alertscore"],
+                     "severity": "properties.alertlevel",
+                     "lat": "geometry.coordinates.1",
+                     "lon": "geometry.coordinates.0",
+                     "url": "properties.url.report",
+                 },
+             }},
         )
         legacy_ids = ("S-BBC-ZH", "S-MOHRSS-POLICY", "S-MFA-SAFETY")
         with self.database.connect() as connection:
@@ -226,6 +348,17 @@ class ExternalRadarService:
                         "UPDATE external_sources SET tier=? WHERE source_id=? AND user_managed=0",
                         (tier, source["source_id"]),
                     )
+                    # 预置源的抓取周期跟随代码默认值演进（2026-09-20：GDELT 15→120）。
+                    # 只覆盖**显式声明了周期**的预置源，且只动 user_managed=0 的行 ——
+                    # 用户自建/改过的源一律不碰。加 `!=` 条件是为了不做无意义的写入。
+                    if "refresh_minutes" in source:
+                        refresh = int(source["refresh_minutes"])
+                        connection.execute(
+                            "UPDATE external_sources SET refresh_minutes=?"
+                            " WHERE source_id=? AND user_managed=0"
+                            " AND refresh_minutes != ?",
+                            (refresh, source["source_id"], refresh),
+                        )
 
     def add_source(self, data):
         source_id = str(data.get("source_id") or f"S-{uuid.uuid4().hex[:12]}")
@@ -775,7 +908,7 @@ class ExternalRadarService:
         except FetchError as error:
             finished = self.now()
             failures = source["consecutive_failures"] + 1
-            delay = min(60, 15 * (2 ** (failures - 1)))
+            delay = _failure_backoff_minutes(failures)
             with self.database.connect() as connection:
                 connection.execute(
                     """
@@ -866,11 +999,284 @@ class ExternalRadarService:
             rows = connection.execute(
                 """
                 SELECT source_id FROM external_sources
-                WHERE enabled = 1 AND (next_fetch_at IS NULL OR next_fetch_at <= ?)
+                WHERE enabled = 1 AND kind != ?
+                  AND (next_fetch_at IS NULL OR next_fetch_at <= ?)
                 ORDER BY source_id
                 """,
-                (due_at,),
+                (SITUATION_SOURCE_KIND, due_at),
             ).fetchall()
         for row in rows:
             self.refresh_source(row["source_id"])
         return len(rows)
+
+    # ── 全球态势图层（v8）：独立抓取路径 + 独立只读查询 ──────────────────
+    def refresh_situation_layers(self):
+        """抓取到期的态势源，写入 `situation_events`。
+
+        **不走 `refresh_due_sources`**：那条路会写 `external_items`，进而进聚类/研判/
+        通知。这里只回一个"本轮抓了几个源"的计数，单源失败不抛、不影响其他源。
+        """
+        due_at = iso(self.now())
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT source_id FROM external_sources
+                WHERE enabled = 1 AND kind = ?
+                  AND (next_fetch_at IS NULL OR next_fetch_at <= ?)
+                ORDER BY source_id
+                """,
+                (SITUATION_SOURCE_KIND, due_at),
+            ).fetchall()
+        for row in rows:
+            self.refresh_situation_source(row["source_id"])
+        return len(rows)
+
+    def _situation_event_id(self, source_id, point):
+        """稳定 id：同一事件重复抓取必须得到同一个 `G-…`。
+
+        上游自带稳定标识（USGS 的 id / EONET 的 id / GDACS 的 eventid+episodeid）时用
+        它；缺失时退回"标题+坐标+发生时刻"的哈希 —— 仍比随机 uuid 稳定。
+        加 `source_id` 前缀是刻意的：态势层暂不做跨源同一事件合并，
+        前缀保证不同源的同名事件不会互相覆盖。
+        """
+        key = point.event_key or f"{point.title}|{point.lat}|{point.lon}|{point.occurred_at}"
+        digest = hashlib.sha256(f"{source_id}:{key}".encode("utf-8")).hexdigest()
+        return "G-" + digest[:24]
+
+    def _store_situation_points(self, connection, source, points, fetched_at):
+        """按 `event_id` 幂等 upsert：保留 `first_seen_at`，刷新 `last_seen_at`。"""
+        new = updated = 0
+        for point in points:
+            event_id = self._situation_event_id(source["source_id"], point)
+            # 外部文本一律清洗后再落库（与 external_items 同一条纪律）：GDACS 的
+            # htmldescription 之类带标记的字段若原样存下，Phase 2 的地图弹窗就会
+            # 渲染出外部 HTML。
+            title = plain_text(point.title, max_length=300)
+            summary = plain_text(point.summary, max_length=2000)
+            exists = connection.execute(
+                "SELECT 1 FROM situation_events WHERE event_id = ?", (event_id,)
+            ).fetchone()
+            updated_at = point.updated_at or fetched_at
+            if exists is None:
+                connection.execute(
+                    """
+                    INSERT INTO situation_events(
+                        event_id, layer, title, summary, lat, lon, magnitude,
+                        severity, occurred_at, updated_at, source_id, source_name,
+                        canonical_url, raw_json, first_seen_at, last_seen_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        point.layer,
+                        title,
+                        summary,
+                        point.lat,
+                        point.lon,
+                        point.magnitude,
+                        point.severity,
+                        point.occurred_at,
+                        updated_at,
+                        source["source_id"],
+                        source["name"],
+                        point.url,
+                        json.dumps(point.raw or {}, ensure_ascii=False),
+                        fetched_at,
+                        fetched_at,
+                    ),
+                )
+                new += 1
+            else:
+                connection.execute(
+                    """
+                    UPDATE situation_events SET
+                        layer=?, title=?, summary=?, lat=?, lon=?, magnitude=?,
+                        severity=?, occurred_at=?, updated_at=?, source_name=?,
+                        canonical_url=?, raw_json=?, last_seen_at=?
+                    WHERE event_id=?
+                    """,
+                    (
+                        point.layer,
+                        title,
+                        summary,
+                        point.lat,
+                        point.lon,
+                        point.magnitude,
+                        point.severity,
+                        point.occurred_at,
+                        updated_at,
+                        source["name"],
+                        point.url,
+                        json.dumps(point.raw or {}, ensure_ascii=False),
+                        fetched_at,
+                        event_id,
+                    ),
+                )
+                updated += 1
+        return new, updated
+
+    def refresh_situation_source(self, source_id):
+        """抓一个态势源：成功写 situation_events，失败只记状态（与 refresh_source 同款）。"""
+        source = self._source(source_id)
+        started = self.now()
+        run_id = "R-" + uuid.uuid4().hex
+        try:
+            points = self.fetcher(source)
+            fetched_at = iso(self.now())
+            with self.database.connect() as connection:
+                new_count, updated_count = self._store_situation_points(
+                    connection, source, points, fetched_at
+                )
+                next_fetch = iso(
+                    self.now() + timedelta(minutes=source["refresh_minutes"])
+                )
+                connection.execute(
+                    """
+                    UPDATE external_sources SET last_attempt_at=?, last_success_at=?,
+                        last_status='ok', last_error='', consecutive_failures=0,
+                        next_fetch_at=? WHERE source_id=?
+                    """,
+                    (fetched_at, fetched_at, next_fetch, source_id),
+                )
+                connection.execute(
+                    "INSERT INTO external_runs VALUES (?, ?, ?, ?, 'ok', ?, ?, '', '')",
+                    (run_id, source_id, iso(started), fetched_at, len(points), new_count),
+                )
+            return {
+                "status": "ok",
+                "fetched_count": len(points),
+                "new_count": new_count,
+                "updated_count": updated_count,
+            }
+        except FetchError as error:
+            finished = self.now()
+            failures = source["consecutive_failures"] + 1
+            delay = _failure_backoff_minutes(failures)
+            with self.database.connect() as connection:
+                connection.execute(
+                    """
+                    UPDATE external_sources SET last_attempt_at=?, last_status='error',
+                        last_error=?, consecutive_failures=?, next_fetch_at=? WHERE source_id=?
+                    """,
+                    (
+                        iso(finished),
+                        str(error),
+                        failures,
+                        iso(finished + timedelta(minutes=delay)),
+                        source_id,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO external_runs VALUES (?, ?, ?, ?, 'error', 0, 0, ?, ?)",
+                    (run_id, source_id, iso(started), iso(finished), error.error_type, str(error)),
+                )
+            return {
+                "status": "error",
+                "error_type": error.error_type,
+                "message": str(error),
+            }
+
+    def situation_layers(self):
+        """每图层的条数、最近发生时间，以及各态势源的抓取状态。只读，不触发抓取。"""
+        with self.database.connect() as connection:
+            layer_rows = connection.execute(
+                """
+                SELECT layer, COUNT(*) AS count, MAX(occurred_at) AS latest_occurred_at,
+                       GROUP_CONCAT(DISTINCT source_id) AS source_ids
+                FROM situation_events
+                GROUP BY layer
+                ORDER BY count DESC, layer
+                """
+            ).fetchall()
+            source_rows = connection.execute(
+                """
+                SELECT source_id, name, last_status, last_attempt_at, last_success_at,
+                       last_error, consecutive_failures, next_fetch_at
+                FROM external_sources WHERE kind = ? ORDER BY source_id
+                """,
+                (SITUATION_SOURCE_KIND,),
+            ).fetchall()
+        layers = [
+            {
+                "layer": row["layer"],
+                "name": SITUATION_LAYER_NAMES.get(row["layer"], row["layer"]),
+                "count": int(row["count"]),
+                "latest_occurred_at": row["latest_occurred_at"],
+                "source_ids": (row["source_ids"] or "").split(",") if row["source_ids"] else [],
+            }
+            for row in layer_rows
+        ]
+        return {"layers": layers, "sources": [dict(row) for row in source_rows]}
+
+    def situation_points(self, *, layer="", hours=24, bbox="", limit=500):
+        """按图层 / 时间窗 / 包围盒取点。**只读，绝不触发外网抓取。**"""
+        hours = int(hours)
+        limit = int(limit)
+        if not 1 <= hours <= 168:
+            raise ValueError("hours 需在 1-168 之间")
+        if not 1 <= limit <= 2000:
+            raise ValueError("limit 需在 1-2000 之间")
+        layer = str(layer or "").strip()
+        if layer and layer not in SITUATION_LAYER_NAMES:
+            raise ValueError("图层无效")
+        box = self._parse_bbox(bbox)
+        since = iso(self.now() - timedelta(hours=hours))
+        clauses = ["occurred_at IS NOT NULL", "occurred_at != ''", "occurred_at >= ?"]
+        values: list = [since]
+        if layer:
+            clauses.append("layer = ?")
+            values.append(layer)
+        if box is not None:
+            min_lon, min_lat, max_lon, max_lat = box
+            clauses.append("lon BETWEEN ? AND ?")
+            clauses.append("lat BETWEEN ? AND ?")
+            values.extend((min_lon, max_lon, min_lat, max_lat))
+        where = " WHERE " + " AND ".join(clauses)
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT event_id, layer, title, lat, lon, magnitude, severity,
+                       occurred_at, source_name, canonical_url
+                FROM situation_events{where}
+                ORDER BY occurred_at DESC, event_id
+                LIMIT ?
+                """,
+                (*values, limit),
+            ).fetchall()
+        points = [
+            {
+                "event_id": row["event_id"],
+                "layer": row["layer"],
+                "layer_name": SITUATION_LAYER_NAMES.get(row["layer"], row["layer"]),
+                "title": row["title"],
+                "lat": row["lat"],
+                "lon": row["lon"],
+                "magnitude": row["magnitude"],
+                "severity": row["severity"],
+                "occurred_at": row["occurred_at"],
+                "source_name": row["source_name"],
+                "canonical_url": row["canonical_url"],
+            }
+            for row in rows
+        ]
+        return {"points": points, "count": len(points), "hours": hours, "limit": limit}
+
+    @staticmethod
+    def _parse_bbox(bbox):
+        text = str(bbox or "").strip()
+        if not text:
+            return None
+        parts = [piece.strip() for piece in text.split(",")]
+        if len(parts) != 4:
+            raise ValueError("bbox 需为 min_lon,min_lat,max_lon,max_lat")
+        try:
+            min_lon, min_lat, max_lon, max_lat = (float(piece) for piece in parts)
+        except ValueError as error:
+            raise ValueError("bbox 需为四个数值") from error
+        if not (-180 <= min_lon <= 180 and -180 <= max_lon <= 180):
+            raise ValueError("bbox 经度超出范围")
+        if not (-90 <= min_lat <= 90 and -90 <= max_lat <= 90):
+            raise ValueError("bbox 纬度超出范围")
+        if min_lon > max_lon or min_lat > max_lat:
+            raise ValueError("bbox 的最小值必须不大于最大值")
+        return min_lon, min_lat, max_lon, max_lat

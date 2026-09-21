@@ -1340,6 +1340,7 @@ class DisabledAndSettingTests(CleanupBase):
         self.assertEqual(result["deleted_detail"], {})
         self.assertEqual(result["deleted_jobs"], 0)
         self.assertEqual(result["deleted_runs"], 0)
+        self.assertEqual(result["deleted_situation"], 0)
         self.assertEqual(result["downsampled_snapshots"], {})
         # 一个字节都不许动
         self.assertEqual(self.counts("personal_impacts"), 1)
@@ -1357,9 +1358,11 @@ class DisabledAndSettingTests(CleanupBase):
             "deleted_detail",
             "deleted_jobs",
             "deleted_runs",
+            "deleted_situation",
             "downsampled_snapshots",
             "cutoff",
             "cluster_cutoff",
+            "situation_cutoff",
             "db_bytes_before",
             "db_bytes_after",
             "free_pages_before",
