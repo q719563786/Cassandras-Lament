@@ -143,6 +143,24 @@ def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _iso_shaped(column: str) -> str:
+    """时间列的 ISO 形状护栏：只有 `YYYY-MM-DDThh:mm…` 形状的值才参与比较。
+
+    清理判据是**字符串字典序**比较，所以一个列里混进非 ISO 形状的值就会错判：
+    位置 10 的 `' '(0x20)`、`'+'(0x2B)`、`'.'(0x2E)` 都 `< 'T'(0x54)`，
+    于是"空格分隔的今天"会被判成比"T 形状的截止值"更旧 —— 该留的被删、
+    该删的删不掉。真库实测（2026-09-21 只读探针）确有两类异常形状：
+    `external_items.published_at` 的 537 条 RFC 2822、以及
+    `personal_impacts.updated_at` 的 4 条空格分隔（带外遗留）。
+
+    护栏让非 ISO 形状的比较结果为 `NULL`，`< 截止值` 永不成立 —— 方向是
+    **保守**：宁可不删，也绝不误删。A/F 层自 2026-09-14 起就用这个形状判据，
+    B/C/D/E 四层补齐同一道，避免将来任一写入端落进非 ISO 形状时被静默误删。
+    代价：异常形状的旧行会"焊死"在表里（只多占空间），这是可接受的。
+    """
+    return f"CASE WHEN {column} LIKE '____-__-__T%' THEN {column} END"
+
+
 def _clamp_int(value, default, low, high):
     """尽力转 int，失败或越界都回退到边界/默认值，永不抛异常。"""
     try:
@@ -515,6 +533,12 @@ class RetentionService:
           也不 backfill NULL**——那是伪造发布日期，`first_seen_at` 才是诚实的
           兜底。代价是这条 SELECT 用不上 `idx_external_items_published`，
           退化为全表扫描（实测约 96k 行 / 数十毫秒，每日一次可接受）。
+        - **B/C/D/E 层形状护栏（2026-09-21 补齐）**：`last_seen_at` /
+          `created_at` / `started_at` / `captured_at` 四列同样走
+          ``CASE WHEN col LIKE '____-__-__T%' THEN col END < ?``（见
+          `_iso_shaped`）。真库 2026-09-21 只读复核：加护栏前后五层删行数
+          **完全相同、差集 0**，即纯防御、不改当下行为；对将来落进非 ISO
+          形状的行则退化为"焊死不删"（保守），而非被字典序静默误删。
         """
         setting = read_retention_setting(self.database)
         now_utc = self.now().astimezone(timezone.utc)
@@ -736,13 +760,14 @@ class RetentionService:
         def where_for(table):
             scope = (
                 "cluster_id IN (SELECT cluster_id FROM event_clusters"
-                " WHERE last_seen_at < ?)"
+                f" WHERE {_iso_shaped('last_seen_at')} < ?)"
             )
             extra = CLUSTER_DETAIL_FILTERS.get(table)
             return scope if extra is None else f"{scope} AND {extra}"
 
         expired = connection.execute(
-            "SELECT COUNT(*) FROM event_clusters WHERE last_seen_at < ?",
+            "SELECT COUNT(*) FROM event_clusters"
+            f" WHERE {_iso_shaped('last_seen_at')} < ?",
             (cluster_cutoff,),
         ).fetchone()[0]
         if not expired:
@@ -782,11 +807,11 @@ class RetentionService:
           真正的长期价值**——它把"流水无限增长"变成"流水在 7 天窗口内封顶"，
           而不是赚一笔一次性的钱。
         """
-        condition = """
-            (status = 'succeeded' AND created_at < ?
+        condition = f"""
+            (status = 'succeeded' AND {_iso_shaped('created_at')} < ?
              AND EXISTS (SELECT 1 FROM judgments j
                          WHERE j.cluster_id = judgment_jobs.cluster_id))
-            OR created_at < ?
+            OR {_iso_shaped('created_at')} < ?
         """
         params = (job_cutoff, absolute_cutoff)
         count = connection.execute(
@@ -805,12 +830,15 @@ class RetentionService:
         当下可删 0 行 / 0 MB。不要把它当成即时回收。
         """
         count = connection.execute(
-            "SELECT COUNT(*) FROM external_runs WHERE started_at < ?",
+            "SELECT COUNT(*) FROM external_runs"
+            f" WHERE {_iso_shaped('started_at')} < ?",
             (run_cutoff,),
         ).fetchone()[0]
         if count:
             connection.execute(
-                "DELETE FROM external_runs WHERE started_at < ?", (run_cutoff,)
+                "DELETE FROM external_runs"
+                f" WHERE {_iso_shaped('started_at')} < ?",
+                (run_cutoff,),
             )
         return count
 
@@ -859,14 +887,14 @@ class RetentionService:
                 continue
             cutoff = _iso(now_utc - timedelta(days=keep_days))
             count = connection.execute(
-                "SELECT COUNT(*) FROM trend_snapshots "
-                "WHERE window_hours = ? AND captured_at < ?",
+                "SELECT COUNT(*) FROM trend_snapshots"
+                f" WHERE window_hours = ? AND {_iso_shaped('captured_at')} < ?",
                 (window_hours, cutoff),
             ).fetchone()[0]
             if count:
                 connection.execute(
-                    "DELETE FROM trend_snapshots "
-                    "WHERE window_hours = ? AND captured_at < ?",
+                    "DELETE FROM trend_snapshots"
+                    f" WHERE window_hours = ? AND {_iso_shaped('captured_at')} < ?",
                     (window_hours, cutoff),
                 )
             counts[window_hours] = count

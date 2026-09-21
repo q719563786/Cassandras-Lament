@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from yuanjian_app.database import Database
@@ -56,6 +57,27 @@ class SignalServiceTests(unittest.TestCase):
     def test_empty_signal_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "不能为空"):
             self.service.ingest("  ", "2026-08-06")
+
+    def test_blank_occurred_at_falls_back_to_a_real_timestamp(self):
+        """`occurred_at` 是时间语义列：界面不带该字段时必须落一个真时间，不能落空串。
+
+        缺陷现场：`POST /api/events` 不带 `occurred_at` 时，
+        `payload.get("occurred_at", "")` 给出空串，写入端原样落库 ——
+        真库里已经有 1 行 `occurred_at=''`。空串没有时间形状，任何字符串比较/
+        排序/`MAX()` 都会把它排在一切真实时间之前，形状护栏也识别不出它。
+        """
+        signal = self.service.ingest("今天散步半小时", "")
+
+        self.assertTrue(signal["occurred_at"], "空串又落库了")
+        moment = datetime.fromisoformat(signal["occurred_at"])
+        self.assertIsNotNone(moment.tzinfo, "落的时间必须带时区，否则跨时区不可比")
+        # 与 received_at 同源（"最迟此刻已发生"），形状也该一致
+        self.assertEqual(signal["occurred_at"][:10], signal["received_at"][:10])
+
+    def test_whitespace_only_occurred_at_is_also_replaced(self):
+        signal = self.service.ingest("今天散步半小时", "   ")
+
+        self.assertTrue(signal["occurred_at"].strip())
 
 
 if __name__ == "__main__":

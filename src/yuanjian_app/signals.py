@@ -38,7 +38,18 @@ class SignalService:
         item = {
             "signal_id": f"S-{uuid4().hex}",
             "received_at": datetime.now(timezone.utc).isoformat(),
-            "occurred_at": str(occurred_at or ""),
+            #: `occurred_at` 是**时间语义列**，不能落空串（2026-09-21 修）。
+            #:
+            #: 缺陷现场：界面提交时若没带 `occurred_at`，`payload.get(..., "")`
+            #: 就给到这里一个空串，真库里已经躺着 1 行 `occurred_at=''`（见
+            #: `build-artifacts/scratch-yj-20260921/probe_time_cols.txt`）。空串**没有
+            #: 任何时间形状**，任何按字符串比较/排序/取 MAX 的地方都会把它当成
+            #: "比一切真实时间都小"，并且 `LIKE '____-__-__T%'` 之类的形状护栏
+            #: 也识别不出它。用户没填就记"收到时刻"，语义是"最迟此刻已发生"。
+            "occurred_at": (
+                str(occurred_at or "").strip()
+                or datetime.now(timezone.utc).isoformat()
+            ),
             "source_type": str(source_type or "manual"),
             "source_ref": str(source_ref or ""),
             "summary": summary,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -12,6 +13,8 @@ from urllib.parse import urlsplit
 from .clustering import ClusterText, should_merge
 from .text_cleaning import plain_text
 from .external_sources import normalize_published_at
+
+_logger = logging.getLogger(__name__)
 
 
 # ---- 远程 AI 节流四道闸（2026-09-15 建，2026-09-16 补第四道）--------------------
@@ -748,7 +751,7 @@ class CognitionController:
                 """
             )
 
-    def _enqueue_remote_upgrades(self, remote_provider: str, max_n: int) -> int:
+    def _enqueue_remote_upgrades(self, remote_provider: str, max_n: int) -> dict:
         """开闸时主动把"最新研判仍是本地模板"的活跃事件送去远程AI升级。
 
         背景：事件首次出现时若远程闸关闭，会立刻拿到一条本地研判并把
@@ -756,9 +759,14 @@ class CognitionController:
         长期停留在"不掌握个人情况的本地套话"。本方法每轮挑出当前个人影响最高、
         且该证据版本还没尝试过远程的事件补入远程队列（L4>L3>其他），由 run_due
         的远程优先逻辑实际调用。每个证据版本最多升级一次，避免空转。
+
+        返回 `{"enqueued": n, "failed": m}`。**单条入队失败不再无声 `continue`**：
+        原先整批里坏一条就只有 `count` 少一个数字，看不出"有东西没排上队"。
+        现在每条失败都有日志（带堆栈），并把成功/失败数一并回给调用方
+        （进 `process_once()` 的 `remote_upgrades`）。
         """
         if not remote_provider or remote_provider == "local" or max_n <= 0:
-            return 0
+            return {"enqueued": 0, "failed": 0}
         with self.database.connect() as connection:
             rows = connection.execute(
                 """
@@ -785,6 +793,7 @@ class CognitionController:
                 (max_n,),
             ).fetchall()
         count = 0
+        failed = 0
         for row in rows:
             try:
                 # 本地研判走新建；旧远程缺字段则重置原作业，统一由 requeue 处理
@@ -793,8 +802,22 @@ class CognitionController:
                 )
                 count += 1
             except Exception:
-                continue
-        return count
+                # 原先这里裸 `continue`：整批里失败几条完全无痕，`count` 少几个
+                # 数字也看不出原因。现在逐条留日志（带堆栈）+ 计失败数。
+                failed += 1
+                _logger.warning(
+                    "远程升级作业入队失败 cluster_id=%s evidence_hash=%s",
+                    row["cluster_id"],
+                    row["evidence_hash"],
+                    exc_info=True,
+                )
+        if failed:
+            _logger.warning(
+                "本轮远程升级入队：成功 %d 条、失败 %d 条（失败项下轮会重试）",
+                count,
+                failed,
+            )
+        return {"enqueued": count, "failed": failed}
 
     def _should_notify(self, row) -> bool:
         """False for judgments older than the bootstrap cutoff.
@@ -829,8 +852,9 @@ class CognitionController:
             )
         # 开闸时：把已有本地模板研判的高影响事件补送远程AI，结合个人画像升级结论
         remote_slots = REMOTE_SLOTS_PER_ROUND if remote_enabled else 0
+        remote_upgrades = {"enqueued": 0, "failed": 0}
         if remote_enabled:
-            self._enqueue_remote_upgrades(remote_provider, remote_slots)
+            remote_upgrades = self._enqueue_remote_upgrades(remote_provider, remote_slots)
         # 远程优先处理（不被本地任务挤出），本地任务补齐其余名额；关闸只处理本地
         judgments = self.judgment_queue.run_due(
             limit=30,
@@ -913,6 +937,8 @@ class CognitionController:
             "mapped_impacts": mapped,
             "notifications_created": notified,
             "provider": effective_provider,
+            # 远程升级入队的成功/失败数：`failed > 0` 表示有事件没排上队（可见）。
+            "remote_upgrades": remote_upgrades,
             "auto_confirmed": self._auto_confirm_candidates(),
         }
 
@@ -948,15 +974,22 @@ class CognitionController:
     def _iso_now(self) -> str:
         return self.now().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
-    def _auto_confirm_candidates(self) -> int:
+    def _auto_confirm_candidates(self):
         """全自动模式：认知运行后自动确认所有待确认预测，无需用户手动去校准面板。
         使用每个候选的实际概率区间中值，自动创建预测账本。
-        返回自动确认的数量。"""
+
+        返回自动确认的条数；**执行失败返回 `None`**。
+
+        原先失败一律 `return 0`，于是"全自动模式其实一次都没入账"在
+        `process_once()` 的结果里长得和"本轮确实没有候选"一模一样 ——
+        静默到查不出来。现在失败有日志（带堆栈）+ 返回值 `None` 可区分。
+        """
         try:
             result = self.impacts.auto_confirm_all()
             return result.get("confirmed", 0)
         except Exception:
-            return 0
+            _logger.warning("自动确认候选预测失败：本轮未入账", exc_info=True)
+            return None
 
     def capture_trends(self):
         return self.trends.capture(self.now())

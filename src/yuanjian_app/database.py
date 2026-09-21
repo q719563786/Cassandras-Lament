@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import shutil
 import sqlite3
@@ -6,6 +7,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+_logger = logging.getLogger(__name__)
+
+#: `PRAGMA synchronous=NORMAL` 失败只提示一次：`connect()` 每次开库都会跑这条
+#: PRAGMA，若失败是确定性的（例如底层文件系统不支持），逐次记日志会刷屏。
+#: 但**不能不记**：它意味着耐久性退回默认档，是需要知道的降级。
+_SYNCHRONOUS_FALLBACK_WARNED = False
 
 
 #: v7：存量 `personal_impacts` 定级口径回填（v1.5 的 L4 结构闸 / 事件侧强度）。
@@ -648,7 +656,15 @@ class Database:
         try:
             connection.execute("PRAGMA synchronous=NORMAL")
         except Exception:
-            pass
+            # 原先裸 `pass`：设置失败 ⇒ 停在默认耐久档（FULL），提交更慢、
+            # 持锁窗口更长，但**无痕**。降级可以接受，"不知道为什么慢"不可以。
+            global _SYNCHRONOUS_FALLBACK_WARNED
+            if not _SYNCHRONOUS_FALLBACK_WARNED:
+                _SYNCHRONOUS_FALLBACK_WARNED = True
+                _logger.warning(
+                    "设置 PRAGMA synchronous=NORMAL 失败，本次退回到默认耐久档",
+                    exc_info=True,
+                )
         # recursive_triggers 默认是 OFF。OFF 时 `INSERT OR REPLACE` 的冲突消解
         # 内部虽然会删掉旧行，但**不会触发该表的 BEFORE DELETE 触发器**——于是
         # 只要写法从 UPDATE / DELETE 换成 `INSERT OR REPLACE`（撞 PK 或撞 UNIQUE），

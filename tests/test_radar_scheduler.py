@@ -210,6 +210,50 @@ class RadarSchedulerTests(unittest.TestCase):
         self.assertNotIn(leaked, stored["error_message"])
         self.assertIn("<path>", stored["error_message"])
 
+    def test_task_failure_records_the_exact_frame_and_logs_the_full_stack(self):
+        """失败要留下"死在哪一行"+完整堆栈：只记类型等于没有现场。
+
+        状态表（会被诊断面板读出来展示）**只**带 `function:lineno`，路径无关；
+        完整堆栈走日志。两条都要 —— 少前者查不出，少后者要么看不见、
+        要么把一整段 traceback 灌到界面上。
+        """
+
+        def boom():
+            raise ValueError("炸在 boom 里")
+
+        scheduler = RadarScheduler(
+            self.service(lambda source: []),
+            poll_seconds=0.01,
+            database=self.database,
+            now=self.clock,
+        )
+
+        with self.assertLogs("yuanjian_app.radar_scheduler", level="ERROR") as captured:
+            payload = scheduler._execute("external", boom)
+
+        self.assertEqual(payload["status"], "error")
+        # ① 状态表只多一个"函数名:行号"，且不含任何路径分隔符
+        self.assertTrue(
+            payload["error_location"].startswith("boom:"), payload["error_location"]
+        )
+        self.assertNotIn("\\", payload["error_location"])
+        self.assertNotIn("/", payload["error_location"])
+
+        # ② 完整堆栈（含最内层原因）进了日志
+        logged = "\n".join(captured.output)
+        self.assertIn("Traceback (most recent call last)", logged)
+        self.assertIn("ValueError: 炸在 boom 里", logged)
+
+        # ③ 同一个 error_location 也落了库（面板读的是 runtime_state）
+        with self.database.connect() as connection:
+            stored = json.loads(
+                connection.execute(
+                    "SELECT value_json FROM runtime_state"
+                    " WHERE state_key='task.external'"
+                ).fetchone()[0]
+            )
+        self.assertEqual(stored["error_location"], payload["error_location"])
+
     def test_slow_task_does_not_trigger_a_catch_up_burst(self):
         """任务耗时超过自身间隔时，下一次到期必须从任务结束时刻起算。
 

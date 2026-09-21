@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
 from .forecasts import ALLOWED_PROBABILITIES
+
+_logger = logging.getLogger(__name__)
 
 _ALLOWED_PROB_LIST = sorted(ALLOWED_PROBABILITIES)
 
@@ -799,19 +802,35 @@ ALERT_LEVELS = ("L1", "L2", "L3", "L4")
 
 
 def _category_penalties_from_connection(connection):
-    """Feedback-learning multipliers persisted by the learning consumer."""
+    """Feedback-learning multipliers persisted by the learning consumer.
+
+    读失败**不再静默清零**：`{}` 的含义是"没有惩罚"，与"读不到所以当没有"
+    在行为上一样，但后者是降级 —— 抹平它会让"学习回路其实没生效"永远看不见。
+    返回值保持 dict（调用方 `exposure * penalties.get(...)` 直接做算术，
+    不能返回 None），可观测性由日志承担。
+    """
     try:
         row = connection.execute(
             "SELECT value_json FROM runtime_state WHERE state_key=?",
             ("learning.category_penalties",),
         ).fetchone()
     except Exception:
+        _logger.warning(
+            "读取反馈学习惩罚系数失败，本轮按无惩罚（全 1.0）处理", exc_info=True
+        )
         return {}
     try:
         penalties = json.loads(row["value_json"]) if row else {}
     except (TypeError, json.JSONDecodeError):
+        _logger.warning(
+            "反馈学习惩罚系数内容不是合法 JSON，按无惩罚处理：%r",
+            (row["value_json"] if row else "")[:120],
+        )
         penalties = {}
     if not isinstance(penalties, dict):
+        _logger.warning(
+            "反馈学习惩罚系数不是对象（%s），按无惩罚处理", type(penalties).__name__
+        )
         return {}
     return {
         str(key): max(0.5, min(float(value), 1.0))
@@ -1279,11 +1298,19 @@ class ImpactService:
         }
 
     def _category_penalties(self):
-        """Feedback-learning multipliers persisted by the learning consumer."""
+        """Feedback-learning multipliers persisted by the learning consumer.
+
+        连接失败原先静默 `return {}`（= 静默清零惩罚），现在留日志（带堆栈）。
+        返回值仍是 dict：`_score` 里直接 `penalties.get(...)` 做算术，
+        改成 None 会当场炸在评分路径上。见 `_category_penalties_from_connection`。
+        """
         try:
             with self.database.connect() as connection:
                 return _category_penalties_from_connection(connection)
         except Exception:
+            _logger.warning(
+                "打开数据库读取反馈学习惩罚系数失败，本轮按无惩罚处理", exc_info=True
+            )
             return {}
 
     def map_judgment(self, cluster_id: str, judgment_id: str) -> list[dict]:
@@ -1448,9 +1475,19 @@ class ImpactService:
         审计说明：本方法会改写不可变账本，属于**受控例外**，因此每轮都写一条
         `audit_log`（`action='forecast.purge_garbage'`），如实记录作废了多少条、
         清了多少 impact 的确认标记。存量孤儿（R-13）是否清理是产品决策，本方法不碰。
+
+        可观测性（2026-09-21 补）：清除确认标记的单条失败**不再 `pass`**，而是
+        计入 `failed_impacts`（同时进审计 `details_json`）并
+        `_logger.warning(..., exc_info=True)`。失败 = 那条影响仍留着指向已作废
+        预测的 `confirmed_forecast_id`（孤儿引用），必须看得见。单条失败不打断
+        整轮作废 —— 与原先"继续跑"的控制流一致，只是不再无声。
         """
         voided = 0
         cleared_impacts = 0
+        #: 清除确认标记失败的条数。**不再静默**：失败意味着那条 impact 会留着
+        #: 指向"已作废预测"的 `confirmed_forecast_id`，页面上就成了一个有效关联
+        #: 指向一条 void 预测（即"孤儿引用"）。必须能看见，才能知道要补跑/排查。
+        failed_impacts = 0
         with self.database.connect() as connection:
             garbage = connection.execute(
                 "SELECT forecast_id FROM forecasts WHERE forecast_id LIKE 'F-CAND-%'"
@@ -1475,7 +1512,18 @@ class ImpactService:
                         )
                         cleared_impacts += 1
                     except Exception:
-                        pass
+                        # 原先这里是裸 `pass` —— 一旦 JSON 损坏或写库失败，这条影响
+                        # 就永久留着指向已 void 预测的确认标记，且**完全无痕**。
+                        # 现在计入失败数并留日志（带堆栈）；流程照旧继续，不因单条
+                        # 坏数据打断整轮作废。
+                        failed_impacts += 1
+                        _logger.warning(
+                            "清除个人影响的预测确认标记失败，该影响仍指向已作废预测"
+                            " impact_id=%s forecast_id=%s",
+                            irow["impact_id"],
+                            fid,
+                            exc_info=True,
+                        )
                 connection.execute(
                     "UPDATE forecasts SET status='void' WHERE forecast_id=?", (fid,)
                 )
@@ -1493,6 +1541,7 @@ class ImpactService:
                             {
                                 "voided_forecasts": voided,
                                 "cleared_impacts": cleared_impacts,
+                                "failed_impacts": failed_impacts,
                                 "note": (
                                     "v1.4 起不再删除父行（forecasts 已加 no_delete 触发器）。"
                                     "删除父行正是历史上 55% 孤儿子行的来源；改为置 void，"

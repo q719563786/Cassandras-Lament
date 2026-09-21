@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import socket
 import threading
 import time
@@ -26,6 +27,8 @@ from .judgments import (
     validate_judgment,
 )
 from .retention import read_retention_setting
+
+_logger = logging.getLogger(__name__)
 
 
 DEFAULT_ENDPOINT = "https://api.openai.com/v1/responses"
@@ -770,6 +773,12 @@ class AiSettingsService:
 
 
 class JudgmentQueue:
+    #: 关闭兜底态：不在 `run_due` 选取的到期集合
+    #: （`queued`/`retry`/`queued_budget`）里，故**进程内不会被执行、跨重启也不会
+    #: 被自动拾起**；显式 `requeue_for_upgrade` 才会把它放回 `queued`。
+    #: 与 `paused_auth` 是同一套路（认证失败批量冻结）。
+    PAUSED_SHUTDOWN_STATUS = "paused_shutdown"
+
     def __init__(
         self,
         database,
@@ -797,19 +806,59 @@ class JudgmentQueue:
 
     def shutdown(self):
         """安全关闭：设置关闭标志，清空所有待处理的远程任务。
-        退出时必须先调用此方法，确保不会有新的API请求发出。"""
+
+        退出时必须先调用此方法，确保不会有新的 API 请求发出。
+
+        **两段式**：
+
+        1. 正常路径 —— 直接 `DELETE` 掉所有排队中的远程任务。
+        2. **兜底路径** —— `DELETE` 失败时（库被占锁、磁盘只读……）绝不能再
+           `except: pass`：那些 `queued` 行会原样留在库里，用户以为"退出即取消"，
+           下次启动 `run_due` 却照常把它们发出去 —— 这就是**实打实的意外花钱**。
+           所以失败先 `_logger.warning(..., exc_info=True)` 留痕，再退一步把这些行
+           **冻结**成 `PAUSED_SHUTDOWN_STATUS`：它不在 `run_due` 选取的
+           `status IN ('queued','retry','queued_budget')` 里，因此进程内不会被
+           执行，**跨重启也不会被自动拾起**；只有显式 `requeue_for_upgrade`
+           才会把它放回 `queued`。冻结再失败才 `_logger.error(..., exc_info=True)`。
+
+        冻结而非"保持 queued 把 next_attempt_at 推到很远的将来"：后者是在撒谎
+        （状态写着"排队中、将来会跑"），而且任何将来按 `created_at` 重算
+        `next_attempt_at` 的代码都会把它复活。
+        """
         self._shutdown.set()
+        scope = "provider!='local' AND status IN ('queued','retry','queued_budget')"
         try:
             with self.database.connect() as connection:
-                # 清空所有排队中的远程任务（包括重试、预算等待中的）
-                connection.execute(
-                    """
-                    DELETE FROM judgment_jobs
-                    WHERE provider!='local' AND status IN ('queued','retry','queued_budget')
-                    """
-                )
+                removed = connection.execute(
+                    f"DELETE FROM judgment_jobs WHERE {scope}"
+                ).rowcount
+            if removed:
+                _logger.info("关闭时清空了 %d 条待处理的远程研判作业", removed)
+            return
         except Exception:
-            pass
+            _logger.warning(
+                "关闭时清空待处理的远程研判作业失败，改用冻结兜底"
+                "（防止下次启动误发请求）",
+                exc_info=True,
+            )
+        try:
+            with self.database.connect() as connection:
+                frozen = connection.execute(
+                    "UPDATE judgment_jobs SET status=?,last_error='shutdown'"
+                    f" WHERE {scope}",
+                    (self.PAUSED_SHUTDOWN_STATUS,),
+                ).rowcount
+            _logger.warning(
+                "已冻结 %d 条待处理的远程研判作业（status=%s，不会被自动执行）",
+                frozen,
+                self.PAUSED_SHUTDOWN_STATUS,
+            )
+        except Exception:
+            _logger.error(
+                "兜底冻结远程研判作业也失败：队列里仍有排队中的远程作业，"
+                "下次启动可能被自动执行 —— 请手动检查 judgment_jobs",
+                exc_info=True,
+            )
 
     def enqueue(self, cluster_id: str, evidence_hash: str, provider: str) -> str:
         if provider not in self.providers:
@@ -994,7 +1043,9 @@ class JudgmentQueue:
     def run_due(self, limit: int = 5, *, remote_limit: int = 3) -> dict:
         """处理到期任务。远程任务每次最多处理remote_limit个，严格控制API消耗；
         本地任务不受此限制（不花钱）。"""
-        # 关闭状态下不处理任何任务
+        # 关闭状态下不处理任何任务 —— 尤其**一条待处理的远程作业都不许进 `rows`**，
+        # 否则"退出后仍在发 API 请求"会直接变成账单。这是进程内的最后一道闸；
+        # 跨重启的**持久**兜底见 `shutdown()` 的冻结路径（`PAUSED_SHUTDOWN_STATUS`）。
         if self._shutdown.is_set():
             return {"succeeded": 0, "deferred": 0, "failed": 0, "shutdown": True}
         # 远程任务最多重试3次（普通失败退避15/30/60分钟；429 走 1/2/4 分钟，

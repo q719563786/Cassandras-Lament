@@ -4,7 +4,9 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from yuanjian_app import database as database_module
 from yuanjian_app.database import Database
 
 
@@ -525,6 +527,84 @@ class LegacyAlertBackfillMigrationTests(unittest.TestCase):
                 ).fetchone()
             self.assertEqual(first["alert_level"], second["alert_level"])
             self.assertEqual(first["components_json"], second["components_json"])
+
+
+class SynchronousFallbackObservabilityTests(unittest.TestCase):
+    """#26 第四处：`PRAGMA synchronous=NORMAL` 失败原先裸 `pass`（静默退回耐久档）。
+
+    降级本身可以接受（WAL 下 NORMAL 只是优化，退回 FULL 更慢但更安全），
+    但"库为什么突然变慢/持锁变长"不能无痕。所以断言两件事：
+    **留痕**（WARNING 日志，带堆栈）+ **可区分**（模块级一次性标志置位）。
+    一次性是为了不刷屏：失败若是确定性的，每次开库都记会淹没日志。
+    """
+
+    def setUp(self):
+        self._saved = database_module._SYNCHRONOUS_FALLBACK_WARNED
+        database_module._SYNCHRONOUS_FALLBACK_WARNED = False
+
+    def tearDown(self):
+        database_module._SYNCHRONOUS_FALLBACK_WARNED = self._saved
+
+    def test_pragma_failure_is_logged_once_instead_of_silently_downgrading(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Database(Path(temp_dir) / "yuanjian.db")
+            database.initialize()  # 建库走正常路径
+
+            real_connect = sqlite3.connect
+
+            class RefusingConnection:
+                """真实连接外套一层：只拒绝 synchronous PRAGMA，其余原样透传。"""
+
+                def __init__(self, real):
+                    object.__setattr__(self, "_real", real)
+
+                def __getattr__(self, name):
+                    return getattr(object.__getattribute__(self, "_real"), name)
+
+                def __setattr__(self, name, value):
+                    setattr(object.__getattribute__(self, "_real"), name, value)
+
+                def execute(self, sql, *args, **kwargs):
+                    if sql.lstrip().upper().startswith("PRAGMA SYNCHRONOUS"):
+                        raise sqlite3.OperationalError("synchronous 不可设置")
+                    return object.__getattribute__(self, "_real").execute(
+                        sql, *args, **kwargs
+                    )
+
+            def refusing_connect(*args, **kwargs):
+                return RefusingConnection(real_connect(*args, **kwargs))
+
+            with mock.patch.object(sqlite3, "connect", refusing_connect):
+                with self.assertLogs(
+                    "yuanjian_app.database", level="WARNING"
+                ) as captured:
+                    with database.connect() as connection:
+                        self.assertEqual(connection.execute("SELECT 1").fetchone()[0], 1)
+                    # 第二次开库：失败是确定性的，不该再刷第二条
+                    with database.connect() as connection:
+                        self.assertEqual(connection.execute("SELECT 1").fetchone()[0], 1)
+
+        logged = "\n".join(captured.output)
+        self.assertIn("PRAGMA synchronous=NORMAL 失败", logged)
+        self.assertEqual(
+            logged.count("PRAGMA synchronous=NORMAL 失败"),
+            1,
+            "确定性失败只应提示一次，逐次开库都记会刷屏",
+        )
+        self.assertTrue(
+            database_module._SYNCHRONOUS_FALLBACK_WARNED,
+            "标志没置位 —— 调用方无法用机器可读的方式区分'降级发生过'",
+        )
+
+    def test_healthy_path_logs_nothing_and_leaves_the_flag_clear(self):
+        """反面对照：PRAGMA 正常时既不该记日志，也不该置位。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Database(Path(temp_dir) / "yuanjian.db")
+            database.initialize()
+            with self.assertNoLogs("yuanjian_app.database", level="WARNING"):
+                with database.connect() as connection:
+                    connection.execute("SELECT 1").fetchone()
+        self.assertFalse(database_module._SYNCHRONOUS_FALLBACK_WARNED)
 
 
 if __name__ == "__main__":

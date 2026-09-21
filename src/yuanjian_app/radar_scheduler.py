@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import threading
 import time
@@ -7,6 +8,7 @@ from datetime import datetime, timezone
 from .operations import CognitionOperation
 from .text_cleaning import plain_text
 
+_logger = logging.getLogger(__name__)
 
 _WINDOWS_PATH = re.compile(r"[A-Za-z]:[\\/][^\s'\"<>|,;]+")
 _POSIX_HOME_PATH = re.compile(r"/(?:Users|home)/[^\s'\"<>|,;]+")
@@ -20,6 +22,21 @@ def _redact_paths(text: str) -> str:
     没有理由把路径写进去。
     """
     return _POSIX_HOME_PATH.sub("<path>", _WINDOWS_PATH.sub("<path>", text))
+
+
+def _error_location(error) -> str:
+    """取异常**最内层**一帧的"函数名:行号"——路径无关，可安全进状态表。
+
+    只给 `function:lineno`，不给文件名/完整堆栈：完整堆栈走日志
+    （`_logger.error(..., exc_info=True)`），状态表是会被诊断面板读出来展示的，
+    不该把一整段 traceback 怼到界面上。
+    """
+    tb = getattr(error, "__traceback__", None)
+    if tb is None:
+        return ""
+    while tb.tb_next is not None:
+        tb = tb.tb_next
+    return f"{tb.tb_frame.f_code.co_name}:{tb.tb_lineno}"
 
 
 def _iso(value):
@@ -100,6 +117,9 @@ class RadarScheduler:
         try:
             result = callback()
         except Exception as error:
+            # 完整堆栈进**日志**（不落状态表、更不进界面）：只记类型+消息
+            # 在排查"到底是哪一步、哪个值"时等于没有现场。
+            _logger.error("定时任务 %s 执行失败", name, exc_info=True)
             payload = {
                 "status": "error",
                 "started_at": started_at,
@@ -111,6 +131,9 @@ class RadarScheduler:
                 "error_message": _redact_paths(
                     plain_text(str(error), max_length=300)
                 ),
+                # 状态表**只**多带一个"函数名:行号"，路径无关；完整堆栈在上面的
+                # 日志里。这样诊断面板能指出"死在哪一步"，又不会被 traceback 灌满。
+                "error_location": _error_location(error),
             }
             self._record(name, payload)
             return payload

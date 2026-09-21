@@ -408,5 +408,137 @@ class BootstrapNotifySuppressionTests(unittest.TestCase):
         self.assertFalse(controller._should_notify(historical))
 
 
+class CognitionSilentFailureTests(unittest.TestCase):
+    """#26（cognition 侧两处）：静默失败变可观测。
+
+    控制流**刻意不变**：原先"降级/继续"的仍降级/继续，只是不再无声。
+    """
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.database = Database(Path(self.temporary.name) / "yuanjian.db")
+        self.database.initialize()
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    # -- ① `_auto_confirm_candidates`：吞全部异常返 0 → 全自动模式静默不入账 --
+
+    def test_auto_confirm_failure_is_logged_and_distinguishable_from_zero(self):
+        controller = object.__new__(CognitionController)
+
+        class ExplodingImpacts:
+            def auto_confirm_all(self):
+                raise RuntimeError("账本写不进去")
+
+        controller.impacts = ExplodingImpacts()
+
+        with self.assertLogs("yuanjian_app.cognition", level="WARNING") as captured:
+            result = controller._auto_confirm_candidates()
+
+        self.assertIsNone(
+            result,
+            "失败与「成功但本轮零候选」必须分得开 —— 原先两者都是 0",
+        )
+        self.assertIn("自动确认候选预测失败", "\n".join(captured.output))
+
+    def test_auto_confirm_success_still_reports_the_real_count(self):
+        """反面对照：成功时返回值语义不变（防"顺手把 0 也改成 None"）。"""
+        controller = object.__new__(CognitionController)
+
+        class WorkingImpacts:
+            def __init__(self, confirmed):
+                self.confirmed = confirmed
+
+            def auto_confirm_all(self):
+                return {"confirmed": self.confirmed}
+
+        controller.impacts = WorkingImpacts(3)
+        self.assertEqual(controller._auto_confirm_candidates(), 3)
+        controller.impacts = WorkingImpacts(0)
+        self.assertEqual(controller._auto_confirm_candidates(), 0)
+
+    # -- ② `_enqueue_remote_upgrades` 的入队循环：整批跳过无痕 ----------------
+
+    def seed_upgrade_candidate(self, cluster_id, evidence_hash):
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT INTO judgments(judgment_id,cluster_id,provider,evidence_hash,"
+                "content_json,created_at)"
+                " VALUES (?,?,'local',?,'{}','2026-08-11T08:00:00Z')",
+                ("J-" + cluster_id, cluster_id, evidence_hash),
+            )
+            connection.execute(
+                "INSERT INTO event_clusters(cluster_id,title,summary,first_seen_at,"
+                "last_seen_at,evidence_level,evidence_hash,categories_json,status,"
+                "needs_judgment,independent_domains,primary_source_count,"
+                "latest_judgment_id,created_at,updated_at)"
+                " VALUES (?,?,'','2026-08-11T08:00:00Z','2026-08-11T08:00:00Z','E2',"
+                "'h','[]','active',0,1,1,?,"
+                "'2026-08-11T08:00:00Z','2026-08-11T08:00:00Z')",
+                (cluster_id, "标题" + cluster_id, "J-" + cluster_id),
+            )
+
+    def test_requeue_failures_are_counted_and_logged_per_row(self):
+        controller = object.__new__(CognitionController)
+        controller.database = self.database
+
+        class FlakyQueue:
+            def __init__(self):
+                self.good = 0
+
+            def requeue_for_upgrade(self, cluster_id, evidence_hash, provider):
+                if cluster_id == "C-bad":
+                    raise RuntimeError("唯一约束炸了")
+                self.good += 1
+                return "Q-" + cluster_id
+
+        queue = FlakyQueue()
+        controller.judgment_queue = queue
+
+        self.seed_upgrade_candidate("C-ok", "h1")
+        self.seed_upgrade_candidate("C-bad", "h2")
+        self.seed_upgrade_candidate("C-ok2", "h3")
+
+        with self.assertLogs("yuanjian_app.cognition", level="WARNING") as captured:
+            summary = controller._enqueue_remote_upgrades("remote", 10)
+
+        # 控制流不变：坏一条不打断整批
+        self.assertEqual(queue.good, 2)
+        self.assertEqual(summary, {"enqueued": 2, "failed": 1})
+        logged = "\n".join(captured.output)
+        self.assertIn("远程升级作业入队失败", logged)
+        self.assertIn("C-bad", logged)
+
+    def test_no_failures_reports_a_zero_failure_count(self):
+        """反面对照：全成功时 failed 必须是 0（也能看出来"没出事"）。"""
+        controller = object.__new__(CognitionController)
+        controller.database = self.database
+        controller.judgment_queue = type(
+            "Queue",
+            (),
+            {"requeue_for_upgrade": lambda self, *a: "Q-x"},
+        )()
+
+        self.seed_upgrade_candidate("C-ok", "h1")
+
+        self.assertEqual(
+            controller._enqueue_remote_upgrades("remote", 10),
+            {"enqueued": 1, "failed": 0},
+        )
+
+    def test_closed_gate_returns_the_same_shape(self):
+        """关闸（provider=local / max_n=0）时的返回值形状必须一致，便于调用方统一读。"""
+        controller = object.__new__(CognitionController)
+        self.assertEqual(
+            controller._enqueue_remote_upgrades("local", 10),
+            {"enqueued": 0, "failed": 0},
+        )
+        self.assertEqual(
+            controller._enqueue_remote_upgrades("remote", 0),
+            {"enqueued": 0, "failed": 0},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

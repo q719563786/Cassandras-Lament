@@ -1,5 +1,7 @@
+import contextlib
 import json
 import socket
+import sqlite3
 import tempfile
 import unittest
 import urllib.error
@@ -366,6 +368,100 @@ class FakeTime:
     def sleep(self, seconds):
         self.sleeps.append(seconds)
         self.now += seconds
+
+
+class ShutdownQueueCleanupTests(JudgmentQueueTests):
+    """#24：shutdown 清队列失败不许静默，且必须防住"重启后误发请求"。
+
+    缺陷现场：`except: pass` 把 DELETE 失败吃掉，排队中的远程作业原样留在库里。
+    用户以为"退出即取消"，下次启动 `run_due` 照常把它们发出去 —— 意外花钱。
+    """
+
+    def _job_statuses(self):
+        with self.database.connect() as connection:
+            return {
+                row["job_id"]: row["status"]
+                for row in connection.execute("SELECT job_id,status FROM judgment_jobs")
+            }
+
+    def test_delete_failure_is_logged_with_a_stack_and_freezes_the_queue(self):
+        provider = FakeProvider()
+        queue = self.queue({"remote": provider})
+        queue.enqueue("C-1", "h-1", "remote")
+
+        real_connect = self.database.connect
+        state = {"first": True}
+
+        @contextlib.contextmanager
+        def flaky_connect():
+            if state["first"]:
+                state["first"] = False
+                raise sqlite3.OperationalError("database is locked")
+            with real_connect() as connection:
+                yield connection
+
+        self.database.connect = flaky_connect
+        try:
+            with self.assertLogs("yuanjian_app.remote_ai", level="WARNING") as captured:
+                queue.shutdown()
+        finally:
+            self.database.connect = real_connect
+
+        # ① 失败留痕：有日志、带堆栈（原先是一条 `pass`，什么都没留下）
+        joined = "\n".join(captured.output)
+        self.assertIn("清空待处理的远程研判作业失败", joined)
+        self.assertIn("Traceback (most recent call last)", joined)
+
+        # ② 作业没丢，但被冻结成非到期态（不在 run_due 的选取集合里）
+        statuses = self._job_statuses()
+        self.assertEqual(len(statuses), 1)
+        self.assertEqual(
+            list(statuses.values()),
+            [JudgmentQueue.PAUSED_SHUTDOWN_STATUS],
+            "清队列失败后作业仍是 queued —— 下次启动会被自动执行",
+        )
+
+        # ③ 模拟"重启"：新队列（`_shutdown` 未置位）跑一轮，也**不得**真发请求
+        restarted = self.queue({"remote": provider})
+        summary = restarted.run_due(limit=10)
+
+        self.assertEqual(provider.calls, 0, "重启后被冻结的远程作业仍然被自动执行了")
+        self.assertEqual(summary["succeeded"], 0)
+        self.assertEqual(
+            self._job_statuses(),
+            {job_id: JudgmentQueue.PAUSED_SHUTDOWN_STATUS for job_id in statuses},
+        )
+
+    def test_happy_path_deletes_the_queue_and_does_not_freeze_anything(self):
+        """反面对照：DELETE 成功时走原路径 —— 行被删掉，不留下冻结态。"""
+        queue = self.queue({"remote": FakeProvider()})
+        queue.enqueue("C-1", "h-1", "remote")
+
+        queue.shutdown()
+
+        self.assertEqual(self._job_statuses(), {})
+
+    def test_run_due_refuses_to_send_while_the_shutdown_flag_is_set(self):
+        """进程内最后一道闸：`_shutdown` 已置位时 `run_due` 必须一条都不发。
+
+        与冻结兜底**互为独立**：冻结管"跨重启"（状态层面，见上一条），这个标志管
+        "本进程退出时"——哪怕队列里还有 `queued` 行（比如退出途中又被塞进来一条），
+        也不许真的发出去，否则就是意外账单。
+        """
+        provider = FakeProvider()
+        queue = self.queue({"remote": provider})
+        queue.shutdown()  # 置位 _shutdown（此刻库里还没有作业）
+        queue.enqueue("C-1", "h-1", "remote")  # 退出途中又被塞进来一条
+
+        summary = queue.run_due(limit=10)
+
+        self.assertTrue(summary.get("shutdown"), "置位后 run_due 仍照常处理")
+        self.assertEqual(provider.calls, 0, "_shutdown 已置位，run_due 仍然发了远程请求")
+        self.assertEqual(
+            list(self._job_statuses().values()),
+            ["queued"],
+            "作业不该被处理、也不该被删掉",
+        )
 
 
 class RemotePacerTests(unittest.TestCase):

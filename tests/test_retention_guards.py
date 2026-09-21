@@ -359,5 +359,192 @@ class ThresholdThrottleClockTests(RetentionGuardBase):
         self.assertEqual(self.service.run("threshold")["status"], "disabled")
 
 
+class NonIsoShapeGuardTests(RetentionGuardBase):
+    """B/C/D/E 四层的时间列形状护栏（2026-09-21 补齐）。
+
+    清理判据是**字符串字典序**比较。非 ISO 形状的值会被错判：位置 10 的
+    `' '(0x20)`、`'+'(0x2B)`、`'.'(0x2E)` 都 `< 'T'(0x54)`，于是
+    `'2020-01-01 00:00:00'`（空格分隔）这类值相对 `'…T…Z'` 截止值恒为"更旧"。
+    真库 2026-09-21 只读探针实锤：`external_items.published_at` 有 537 条
+    RFC 2822、`personal_impacts.updated_at` 有 4 条空格分隔（带外遗留）。
+
+    护栏（`_iso_shaped`）让非 ISO 形状的比较结果为 `NULL` ⇒ 永不命中，
+    方向是**保守**（宁可不删）。每层一条独立用例：**变异对照时去掉哪条护栏，
+    就只有对应用例变红**，不会混成一团。
+    """
+
+    #: 远超所有保留窗口（A 60d / B 180d / C 7d / D 90d / E 7d）
+    OLD_ISO = None  # 在 setUp 里按 NOW 计算
+    #: 空格分隔、秒级、无 Z —— 真库 `personal_impacts.updated_at` 里那 4 条的形状
+    OLD_SPACE = "2020-01-01 00:00:00"
+
+    def setUp(self):
+        super().setUp()
+        self.OLD_ISO = stamp(NOW - timedelta(days=400))
+
+    # -- 造数据 -----------------------------------------------------------
+
+    def add_cluster(self, cluster_id, *, last_seen_at, first_seen_at=None):
+        first_seen_at = first_seen_at or last_seen_at
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT INTO event_clusters(cluster_id,title,summary,first_seen_at,"
+                "last_seen_at,evidence_level,evidence_hash,categories_json,status,"
+                "needs_judgment,independent_domains,primary_source_count,created_at,updated_at)"
+                " VALUES (?,?,'',?,?,'E2','hash','[]','active',1,1,1,?,?)",
+                (
+                    cluster_id,
+                    "标题" + cluster_id,
+                    first_seen_at,
+                    last_seen_at,
+                    first_seen_at,
+                    first_seen_at,
+                ),
+            )
+
+    def add_judgment(self, cluster_id, judgment_id=None):
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT INTO judgments(judgment_id,cluster_id,provider,evidence_hash,"
+                "content_json,created_at) VALUES (?,?,'local','h','{}',?)",
+                (judgment_id or "J-" + cluster_id, cluster_id, stamp(NOW)),
+            )
+
+    def add_entity(self, cluster_id, entity_id):
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT INTO event_entities(entity_id,cluster_id,name,normalized_name,"
+                "category,confidence) VALUES (?,?,'甲','甲','actor',0.9)",
+                (entity_id, cluster_id),
+            )
+
+    def add_job(self, job_id, cluster_id, created_at, status="succeeded"):
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT INTO judgment_jobs(job_id,cluster_id,evidence_hash,provider,"
+                "model,status,attempts,request_chars,created_at,next_attempt_at,"
+                "finished_at,last_error)"
+                " VALUES (?,?,'h','local','m',?,1,0,?,?,?,'')",
+                (job_id, cluster_id, status, created_at, created_at, created_at),
+            )
+
+    def add_run(self, run_id, started_at):
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT INTO external_runs(run_id,source_id,started_at,finished_at,"
+                "status,fetched_count,new_count,error_type,error_message)"
+                " VALUES (?,'src',?,?,'ok',1,1,'','')",
+                (run_id, started_at, started_at),
+            )
+
+    def add_snapshot(self, snapshot_id, captured_at, window_hours=6):
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT INTO trend_snapshots(snapshot_id,captured_at,category,"
+                "window_hours,event_count,baseline_count,surge_ratio,status)"
+                " VALUES (?,?,'policy',?,1,1.0,1.0,'normal')",
+                (snapshot_id, captured_at, window_hours),
+            )
+
+    # -- B 层 -------------------------------------------------------------
+
+    def test_b_cluster_with_non_iso_last_seen_keeps_its_detail(self):
+        """B 层：`last_seen_at` 非 ISO 形状的簇不得被当成"过期"而清掉明细。"""
+        self.add_cluster("C-iso", last_seen_at=self.OLD_ISO)
+        self.add_entity("C-iso", "E-iso")
+        self.add_cluster("C-space", last_seen_at=self.OLD_SPACE)
+        self.add_entity("C-space", "E-space")
+
+        result = self.service.run("manual")
+
+        self.assertEqual(result["expired_clusters"], 1, "过期簇计数不对")
+        self.assertEqual(
+            self.count("event_entities", "entity_id='E-iso'"), 0, "ISO 形状的过期簇没被清"
+        )
+        self.assertEqual(
+            self.count("event_entities", "entity_id='E-space'"),
+            1,
+            "非 ISO 形状的 last_seen_at 被字典序误判成过期 —— B 层护栏失效",
+        )
+
+    # -- C 层 -------------------------------------------------------------
+
+    def test_c_job_with_non_iso_created_at_is_never_purged(self):
+        """C 层：`created_at` 非 ISO 形状的作业流水不得被误删。"""
+        # 簇保持"新鲜"，避免被 B 层连带清掉，从而把 C 层单独隔离出来
+        for tag in ("iso", "space"):
+            self.add_cluster("C-live-" + tag, last_seen_at=stamp(NOW))
+            self.add_judgment("C-live-" + tag)
+        self.add_job("JOB-iso", "C-live-iso", self.OLD_ISO)
+        self.add_job("JOB-space", "C-live-space", self.OLD_SPACE)
+
+        result = self.service.run("manual")
+
+        self.assertEqual(result["deleted_jobs"], 1, "C 层删除计数不对")
+        self.assertEqual(self.count("judgment_jobs", "job_id='JOB-iso'"), 0)
+        self.assertEqual(
+            self.count("judgment_jobs", "job_id='JOB-space'"),
+            1,
+            "非 ISO 形状的 created_at 被字典序误判成过期 —— C 层护栏失效",
+        )
+
+    # -- D 层 -------------------------------------------------------------
+
+    def test_d_run_with_non_iso_started_at_is_never_purged(self):
+        """D 层：`started_at` 非 ISO 形状的采集运行不得被误删。"""
+        self.add_run("RUN-iso", self.OLD_ISO)
+        self.add_run("RUN-space", self.OLD_SPACE)
+
+        result = self.service.run("manual")
+
+        self.assertEqual(result["deleted_runs"], 1, "D 层删除计数不对")
+        self.assertEqual(self.count("external_runs", "run_id='RUN-iso'"), 0)
+        self.assertEqual(
+            self.count("external_runs", "run_id='RUN-space'"),
+            1,
+            "非 ISO 形状的 started_at 被字典序误判成过期 —— D 层护栏失效",
+        )
+
+    # -- E 层 -------------------------------------------------------------
+
+    def test_e_snapshot_with_non_iso_captured_at_is_never_purged(self):
+        """E 层：`captured_at` 非 ISO 形状的趋势快照不得被误删。"""
+        self.add_snapshot("S-iso", self.OLD_ISO, window_hours=6)
+        self.add_snapshot("S-space", self.OLD_SPACE, window_hours=6)
+
+        result = self.service.run("manual")
+
+        self.assertEqual(result["downsampled_snapshots"][6], 1, "E 层删除计数不对")
+        self.assertEqual(self.count("trend_snapshots", "snapshot_id='S-iso'"), 0)
+        self.assertEqual(
+            self.count("trend_snapshots", "snapshot_id='S-space'"),
+            1,
+            "非 ISO 形状的 captured_at 被字典序误判成过期 —— E 层护栏失效",
+        )
+
+    # -- 反向：护栏不得把正常 ISO 行也挡住 --------------------------------
+
+    def test_guard_does_not_block_normal_iso_rows_in_any_layer(self):
+        """四条 ISO 形状的过期行必须**全部**照旧被删 —— 防"护栏过紧"。"""
+        self.add_cluster("C-iso", last_seen_at=self.OLD_ISO)
+        self.add_entity("C-iso", "E-iso")
+        self.add_cluster("C-live", last_seen_at=stamp(NOW))
+        self.add_judgment("C-live")
+        self.add_job("JOB-iso", "C-live", self.OLD_ISO)
+        self.add_run("RUN-iso", self.OLD_ISO)
+        self.add_snapshot("S-iso", self.OLD_ISO, window_hours=6)
+
+        result = self.service.run("manual")
+
+        self.assertEqual(result["expired_clusters"], 1)
+        self.assertEqual(result["deleted_jobs"], 1)
+        self.assertEqual(result["deleted_runs"], 1)
+        self.assertEqual(result["downsampled_snapshots"][6], 1)
+        self.assertEqual(self.count("event_entities", "entity_id='E-iso'"), 0)
+        self.assertEqual(self.count("judgment_jobs", "job_id='JOB-iso'"), 0)
+        self.assertEqual(self.count("external_runs", "run_id='RUN-iso'"), 0)
+        self.assertEqual(self.count("trend_snapshots", "snapshot_id='S-iso'"), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

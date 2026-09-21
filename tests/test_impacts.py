@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -526,6 +527,121 @@ class ImpactServiceTests(unittest.TestCase):
         # A known category returns the per-category template, not the default.
         cashflow = _backfill_gyw("cashflow")
         self.assertIn("拨付", cashflow["least_resistance_path"])
+
+    # -- purge_garbage_forecasts：作废预测时必须一并清掉引用它的确认标记 ------
+    #
+    # 缺陷现场：清除循环里 `except Exception: pass` —— 只要 JSON 损坏或写库失败，
+    # 那条 impact 就永久留着指向"已作废预测"的 `confirmed_forecast_id`
+    # （孤儿引用），页面上仍像一个有效关联，且**完全无痕**。
+
+    def seed_garbage_forecast(self, forecast_id="F-CAND-1", impact_id="P-1",
+                              candidate=None):
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT INTO forecasts(forecast_id,status,window_end,created_at)"
+                " VALUES (?,'open','2026-09-30','2026-08-11T08:00:00Z')",
+                (forecast_id,),
+            )
+            connection.execute(
+                "INSERT INTO personal_impacts(impact_id,cluster_id,judgment_id,"
+                "interest_id,impact_score,alert_level,components_json,reason,"
+                "candidate_json,created_at,updated_at)"
+                " VALUES (?,'C-1','J-1',?,0.9,'L3','{}','原因',?,?,?)",
+                (
+                    impact_id,
+                    self.health["object_id"],
+                    candidate
+                    if candidate is not None
+                    else json.dumps({"confirmed_forecast_id": forecast_id}),
+                    "2026-08-11T08:00:00Z",
+                    "2026-08-11T08:00:00Z",
+                ),
+            )
+
+    def test_purge_voids_the_forecast_and_drops_the_confirmed_link(self):
+        self.seed_garbage_forecast()
+
+        self.service.purge_garbage_forecasts()
+
+        with self.database.connect() as connection:
+            status = connection.execute(
+                "SELECT status FROM forecasts WHERE forecast_id='F-CAND-1'"
+            ).fetchone()[0]
+            candidate = json.loads(
+                connection.execute(
+                    "SELECT candidate_json FROM personal_impacts WHERE impact_id='P-1'"
+                ).fetchone()[0]
+            )
+        self.assertEqual(status, "void")
+        self.assertNotIn(
+            "confirmed_forecast_id",
+            candidate,
+            "作废了预测却把 impact 上的确认标记留着 —— 页面上仍是一个有效关联",
+        )
+
+    def test_purge_failure_is_counted_and_logged_instead_of_swallowed(self):
+        """坏 JSON 让清除失败：必须计入失败数（进审计）+ 留日志，而不是 `pass`。"""
+        # 既要命中 `candidate_json LIKE '%"confirmed_forecast_id": "F-CAND-1"%'`
+        # 的选取条件，又要是**非法 JSON** —— 于是清除那一步必然抛异常。
+        self.seed_garbage_forecast(
+            candidate='{"confirmed_forecast_id": "F-CAND-1" 这不是 JSON'
+        )
+
+        with self.assertLogs("yuanjian_app.impacts", level="WARNING") as captured:
+            voided = self.service.purge_garbage_forecasts()
+
+        # 控制流不变：坏数据不打断整轮作废
+        self.assertEqual(voided, 1)
+        self.assertIn("清除个人影响的预测确认标记失败", "\n".join(captured.output))
+        with self.database.connect() as connection:
+            details = json.loads(
+                connection.execute(
+                    "SELECT details_json FROM audit_log"
+                    " WHERE action='forecast.purge_garbage'"
+                ).fetchone()[0]
+            )
+        self.assertEqual(details["voided_forecasts"], 1)
+        self.assertEqual(
+            details["failed_impacts"],
+            1,
+            "失败数没进审计 —— 现场又回到只有 voided 一个数字",
+        )
+        self.assertEqual(details["cleared_impacts"], 0)
+
+    # -- 学习回路惩罚系数：读失败不许静默清零 ------------------------------
+
+    def test_category_penalty_read_failure_is_logged_not_silently_zeroed(self):
+        """读惩罚系数失败原先直接 `return {}`（= 静默清零惩罚），现在要留日志。
+
+        返回值**必须**仍是 dict：`_score` 里直接 `exposure *
+        penalties.get(...)`，改成 None 会当场炸在评分路径上。所以可观测性由日志承担。
+        """
+        from yuanjian_app.impacts import _category_penalties_from_connection
+
+        class BrokenConnection:
+            def execute(self, *args, **kwargs):
+                raise sqlite3.OperationalError("cannot read runtime_state")
+
+        with self.assertLogs("yuanjian_app.impacts", level="WARNING") as captured:
+            penalties = _category_penalties_from_connection(BrokenConnection())
+
+        self.assertEqual(penalties, {})
+        self.assertIn("读取反馈学习惩罚系数失败", "\n".join(captured.output))
+
+    def test_corrupt_category_penalties_are_logged_not_silently_zeroed(self):
+        from yuanjian_app.impacts import _category_penalties_from_connection
+
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT INTO runtime_state(state_key,value_json,updated_at)"
+                " VALUES ('learning.category_penalties','{oops',?)",
+                ("2026-08-11T08:00:00Z",),
+            )
+            with self.assertLogs("yuanjian_app.impacts", level="WARNING") as captured:
+                penalties = _category_penalties_from_connection(connection)
+
+        self.assertEqual(penalties, {})
+        self.assertIn("不是合法 JSON", "\n".join(captured.output))
 
 
 if __name__ == "__main__":
