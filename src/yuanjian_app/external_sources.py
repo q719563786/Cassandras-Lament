@@ -29,10 +29,6 @@ DEFAULT_MAX_BYTES = 5 * 1024 * 1024
 #: 同时把最坏内存占用钉死在 20MB。超限按 `too_large` 记账，不静默截断。
 MAX_DECOMPRESSED_BYTES = 4 * DEFAULT_MAX_BYTES
 
-#: 单次喂给解压器的分块大小 —— 逐块解压才能在超限时立刻停下，
-#: 而不是先把整颗炸弹展开到内存里再判断。
-_GZIP_CHUNK = 64 * 1024
-
 _GZIP_MAGIC = b"\x1f\x8b"
 
 
@@ -307,7 +303,6 @@ def fetch_json(
     if len(data) > max_bytes:
         raise FetchError("too_large", f"响应超过{max_bytes}字节上限")
     return _decode_body(data, headers)
-    return data
 
 
 def parse_json_api(body, source_id, source_name, config):
