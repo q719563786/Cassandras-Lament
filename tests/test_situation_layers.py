@@ -21,6 +21,7 @@ from yuanjian_app.external_sources import FetchError, parse_geojson
 from yuanjian_app.forecasts import ForecastService
 from yuanjian_app.http_api import Services, create_server
 from yuanjian_app.interests import InterestService
+from yuanjian_app.radar_scheduler import RadarScheduler
 from yuanjian_app.signals import SignalService
 
 
@@ -454,6 +455,147 @@ class SituationHttpContractTests(SituationBase):
     def test_points_require_a_token(self):
         status, _ = self.get("/api/situation/points", token=False)
         self.assertEqual(status, 403)
+
+
+class SituationSchedulerChainTests(SituationBase):
+    """调度链路（2026-09-21 补的测试盲区）。
+
+    覆盖「到期选取 → 调用 fetcher → 落库 → 源状态被更新 → 调度状态可见」这条
+    **完整**链路，离线夹具 + 临时库、不联网。
+
+    为什么以前拦不住：`SituationStorageTests` / `SituationHttpContractTests` 测的
+    都是 `ExternalRadarService.refresh_situation_layers()` 这一层（服务方法本身
+    写得没问题）；而 `RadarScheduler.run_situation_once()` —— 把这个方法接到后台
+    循环上的那一环 —— 一条用例都没有，`test_radar_scheduler.py` 里也完全没有
+    态势相关断言。于是"任务压根没被调度"这种故障可以一路绿灯溜到安装产物上。
+    """
+
+    def scheduler(self, service):
+        return RadarScheduler(
+            service, database=self.database, poll_seconds=0.01, now=self.clock
+        )
+
+    def situation_source_rows(self):
+        with self.database.connect() as connection:
+            return {
+                row["source_id"]: dict(row)
+                for row in connection.execute(
+                    "SELECT source_id, last_status, last_attempt_at, last_success_at,"
+                    " consecutive_failures, next_fetch_at FROM external_sources"
+                    " WHERE kind = 'geojson'"
+                )
+            }
+
+    def task_state(self, name):
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT value_json FROM runtime_state WHERE state_key=?",
+                (f"task.{name}",),
+            ).fetchone()
+        return None if row is None else json.loads(row["value_json"])
+
+    def test_run_situation_once_drives_the_whole_chain(self):
+        self.only_situation_sources_enabled()
+
+        payload = self.scheduler(self.service).run_situation_once()
+
+        # ① 到期选取命中了三个源，② fetcher 被调用并按真实 config_json 解析
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["result"], 3)
+        # ③ 落库
+        self.assertEqual(self.count_situation_rows(), 4)
+        # ④ 源状态被更新（现场坏就坏在这里：永远停留在 'never'）
+        rows = self.situation_source_rows()
+        for source_id in SITUATION_SOURCE_IDS:
+            row = rows[source_id]
+            self.assertEqual(row["last_status"], "ok", source_id)
+            self.assertIsNotNone(row["last_attempt_at"], source_id)
+            self.assertIsNotNone(row["last_success_at"], source_id)
+            self.assertEqual(row["consecutive_failures"], 0)
+            # 下轮到期时间被推到本轮之后，否则每轮都会重复抓
+            self.assertGreater(row["next_fetch_at"], "2026-09-20T12:00:00Z", source_id)
+        # ⑤ 调度状态可见 —— 没有这条记录，就只能像现场那样靠猜
+        state = self.task_state("situation")
+        self.assertIsNotNone(state, "task.situation 必须落库")
+        self.assertEqual(state["status"], "ok")
+        # ⑥ 只读接口能读到刚落库的点（两条 API 路由就是这两个方法）
+        self.assertEqual(self.service.situation_points()["count"], 3)
+        layers = {row["layer"] for row in self.service.situation_layers()["layers"]}
+        self.assertEqual(layers, {"quake", "wildfire"})
+
+    def test_situation_is_serviced_before_the_long_external_walk(self):
+        """冷启动：采集一次补抓三十多个源（十几分钟），态势任务不能被它饿死。
+
+        回归现场（真机 + 安装产物）：隔夜重启后所有常规源都过期，采集那一次调用
+        要 15~30 分钟才返回；态势块原先写在采集块之后，单线程循环里"采集没返回
+        → 态势永远轮不到"，表现为地图整片空白。这里用虚拟 monotonic 把一次采集
+        拉长到 30 分钟，钉住"态势先于采集被服务"这条顺序契约。
+        """
+        import yuanjian_app.radar_scheduler as module
+
+        order = []
+        clock = {"now": 100.0}
+
+        class SlowExternalService(ExternalRadarService):
+            def refresh_due_sources(self):
+                order.append("external")
+                clock["now"] += 1800.0  # 一次全量补抓 = 30 分钟
+                return 0
+
+        service = SlowExternalService(
+            self.database, fetcher=self._fetch, now=self.clock
+        )
+        service.ensure_public_defaults()
+        self.only_situation_sources_enabled()
+        real_situation = service.refresh_situation_layers
+
+        def recording_situation():
+            order.append("situation")
+            return real_situation()
+
+        service.refresh_situation_layers = recording_situation
+
+        class StopAfterFirstWait:
+            def __init__(self):
+                self.waits = []
+                self._set = False
+
+            def is_set(self):
+                return self._set
+
+            def set(self):
+                self._set = True
+
+            def clear(self):
+                self._set = False
+
+            def wait(self, timeout=None):
+                self.waits.append(timeout)
+                self._set = True
+                return True
+
+        scheduler = self.scheduler(service)
+        stop = StopAfterFirstWait()
+        scheduler._stop = stop
+
+        original = module.time.monotonic
+        module.time.monotonic = lambda: clock["now"]
+        try:
+            scheduler._run()
+        finally:
+            module.time.monotonic = original
+
+        # 只跑了一轮；这一轮里态势必须先被服务，才不会被 30 分钟的采集挡住
+        self.assertEqual(len(stop.waits), 1)
+        self.assertTrue(order, "两个任务都该被调到")
+        self.assertEqual(order[0], "situation", order)
+        self.assertIn("external", order)
+        # 并且态势这一趟真的走完了落库 + 源状态更新
+        self.assertEqual(self.count_situation_rows(), 4)
+        self.assertEqual(
+            {row["last_status"] for row in self.situation_source_rows().values()},
+            {"ok"},
+        )
 
 
 if __name__ == "__main__":

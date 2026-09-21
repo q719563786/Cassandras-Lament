@@ -302,14 +302,27 @@ class RadarScheduler:
 
         while not self._stop.is_set():
             current = time.monotonic()
+            # 态势任务**必须排在采集之前**（2026-09-21 修复）。
+            #
+            # 故障现场：冷启动时所有常规源都已过期（隔夜再开），`refresh_due_sources`
+            # 会在**一次调用里**按 source_id 顺序补抓三十多个源 —— 实测 15~30 分钟
+            # （真机现场：07:04 起，逐个源按字母序 refresh，到 07:21 还没走完）。
+            # 循环是单线程、任务按书写顺序串行，态势块原来排在采集块之后，于是整个
+            # 补抓窗口里它一次都轮不到：`task.situation` 从无记录、三个 geojson 源
+            # 永远停在 last_status='never'、situation_events 恒为 0，地图页整片空白
+            # （"0 / 0 个事件"）。注意这不是抓取失败 —— 全程没有任何异常，所以日志
+            # 里干干净净，`_execute` 的吞异常也不是本因；**它是被前面的长任务饿死**。
+            #
+            # 把态势检查提到采集之前：冷启动时它先跑完（三个源，秒级），地图立刻有
+            # 数据，再去补抓新闻。态势源自身 refresh_minutes 是 20~30 分钟，这里
+            # 5 分钟查一次是否到期即可（是否真的抓由 next_fetch_at 决定），不额外
+            # 增加外网压力。
+            if current >= next_situation:
+                self.run_situation_once()
+                next_situation = following(300)
             if current >= next_external:
                 self.run_external_once()
                 next_external = following(self.poll_seconds)
-            if current >= next_situation:
-                # 态势源自身 refresh_minutes 是 20~30 分钟，这里 5 分钟查一次是否到期
-                # 即可（是否真的抓由 next_fetch_at 决定），不额外增加外网压力。
-                self.run_situation_once()
-                next_situation = following(300)
             if self.cognition is not None and current >= next_cognition:
                 self.run_cognition_once()
                 # 认知扫描间隔为5分钟（300秒），远程调用频率由 cognition._remote_due() 严格控制
