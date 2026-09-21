@@ -1,11 +1,13 @@
 import ipaddress
 import json
+import logging
 import re
 import socket
 import ssl
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
+import zlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -14,8 +16,24 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
 
 
+_logger = logging.getLogger(__name__)
+
 DEFAULT_TIMEOUT = 10
 DEFAULT_MAX_BYTES = 5 * 1024 * 1024
+
+#: 解压后体积上限（防 gzip 炸弹）。
+#:
+#: `max_bytes` 管的是**线上**字节数；gzip 的合法压缩比可达数十倍、构造炸弹可达
+#: 上千倍，只卡线上体积等于没卡。上限取线上上限的 4 倍（20MB）：实测最大的预置
+#: 源（EONET / GDACS 的 JSON）解压后也就 1~3MB，留了接近一个数量级的余量，
+#: 同时把最坏内存占用钉死在 20MB。超限按 `too_large` 记账，不静默截断。
+MAX_DECOMPRESSED_BYTES = 4 * DEFAULT_MAX_BYTES
+
+#: 单次喂给解压器的分块大小 —— 逐块解压才能在超限时立刻停下，
+#: 而不是先把整颗炸弹展开到内存里再判断。
+_GZIP_CHUNK = 64 * 1024
+
+_GZIP_MAGIC = b"\x1f\x8b"
 
 
 class FetchError(RuntimeError):
@@ -117,6 +135,118 @@ def _validate_dns(hostname, resolver):
         raise FetchError("unsafe_url", "域名解析到了非公网地址")
 
 
+_VERIFY_SSL = "verify"
+_UNVERIFIED_SSL = "unverified"
+
+
+def _request_host(url):
+    return urlparse(str(url)).hostname or ""
+
+
+def _open(request, *, opener, timeout, ssl_mode):
+    """按 SSL 模式发起请求。只有降级模式才带上不校验证书的 context。"""
+    if ssl_mode == _UNVERIFIED_SSL:
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        return opener(request, timeout=timeout, context=context)
+    return opener(request, timeout=timeout)
+
+
+def _http_error_kind(error):
+    return "rate_limited" if error.code == 429 else "http_error"
+
+
+def _read_raw(request, *, opener, timeout, max_bytes):
+    """发一次请求并返回 (线上原始字节, 响应头)。
+
+    SSL 证书校验失败时**降级一次**（不校验证书重试）。政府/学校站点的证书链
+    问题很常见，走字节路径（RSS/HTML）早就靠这条兜底，JSON 路径以前没有，
+    两条路行为不一致。回退只在证书校验失败时发生，并且**留痕**（warning 日志，
+    只记主机名，不带 query，避免把 URL 里的参数写进日志）。
+    """
+
+    def attempt(ssl_mode):
+        with _open(request, opener=opener, timeout=timeout, ssl_mode=ssl_mode) as response:
+            return response.read(max_bytes + 1), getattr(response, "headers", None)
+
+    try:
+        return attempt(_VERIFY_SSL)
+    except (TimeoutError, socket.timeout) as error:
+        raise FetchError("timeout", "外部源请求超时") from error
+    except urllib.error.HTTPError as error:
+        raise FetchError(_http_error_kind(error), f"外部源返回HTTP {error.code}") from error
+    except (urllib.error.URLError, OSError) as error:
+        # urllib 把 SSL 错误包装在 URLError.reason 中；证书问题降级为不校验
+        reason = getattr(error, "reason", error)
+        if not isinstance(reason, (ssl.SSLError, ssl.SSLCertVerificationError)):
+            raise FetchError("unreachable", f"外部源不可达：{error}") from error
+        _logger.warning(
+            "TLS证书校验失败，降级为不校验重试：host=%s reason=%s",
+            _request_host(getattr(request, "full_url", "")),
+            reason,
+        )
+        try:
+            return attempt(_UNVERIFIED_SSL)
+        except (TimeoutError, socket.timeout) as inner:
+            raise FetchError("timeout", "外部源请求超时") from inner
+        except urllib.error.HTTPError as inner:
+            raise FetchError(
+                _http_error_kind(inner), f"外部源返回HTTP {inner.code}"
+            ) from inner
+        except (urllib.error.URLError, OSError) as inner:
+            raise FetchError("unreachable", f"外部源不可达：{inner}") from inner
+
+
+def _decompress_gzip(body, limit):
+    """解压 gzip。逐块解压并卡住解压后体积，超限立刻停（防 gzip 炸弹）。"""
+    engine = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    chunks = []
+    total = 0
+    pending = body
+    try:
+        while True:
+            piece = engine.decompress(pending, limit - total + 1)
+            chunks.append(piece)
+            total += len(piece)
+            if total > limit:
+                raise FetchError(
+                    "too_large", f"解压后超过{limit}字节上限（疑似gzip炸弹）"
+                )
+            pending = engine.unconsumed_tail
+            if engine.eof or not pending:
+                break
+    except zlib.error as error:
+        raise FetchError("bad_encoding", f"gzip解压失败：{error}") from error
+    if not engine.eof:
+        raise FetchError("bad_encoding", "gzip数据不完整")
+    return b"".join(chunks)
+
+
+def _decode_body(body, headers, *, limit=MAX_DECOMPRESSED_BYTES):
+    """按 `Content-Encoding` 解压响应体。
+
+    `urllib` **不会**自动解压：源若返回 `Content-Encoding: gzip`，拿到的是压缩
+    字节，直接丢给解析器必然报错，于是被记成 parse_error、`consecutive_failures`
+    一路涨到源被禁用 —— 全程没有明显错误，用户只觉得那个源不再更新。
+
+    声明了 gzip 就必须解开，解不开**明确报错**（不静默）；只靠魔数判断的情况
+    允许退回原样，但要记一条 warning，别把现场吃掉。
+    """
+    encoding = ""
+    if headers is not None and hasattr(headers, "get"):
+        encoding = str(headers.get("Content-Encoding") or "").lower()
+    if "gzip" in encoding:
+        return _decompress_gzip(body, limit)
+    if body.startswith(_GZIP_MAGIC):
+        try:
+            return _decompress_gzip(body, limit)
+        except FetchError as error:
+            _logger.warning("响应带gzip魔数但解压失败，按原样处理：%s", error)
+            return body
+    return body
+
+
 def fetch_bytes(
     url,
     *,
@@ -129,38 +259,18 @@ def fetch_bytes(
     _validate_dns(urlparse(safe_url).hostname, resolver)
     request = urllib.request.Request(
         safe_url,
-        headers={"User-Agent": "YuanJian-Cognition/1.0 (+local personal research)"},
+        headers={
+            "User-Agent": "YuanJian-Cognition/1.0 (+local personal research)",
+            # 明确谢绝压缩；但有些站点会无视它照样压，所以下面仍做防御性解压。
+            "Accept-Encoding": "identity",
+        },
     )
-    try:
-        with opener(request, timeout=timeout) as response:
-            body = response.read(max_bytes + 1)
-    except (TimeoutError, socket.timeout) as error:
-        raise FetchError("timeout", "外部源请求超时") from error
-    except urllib.error.HTTPError as error:
-        kind = "rate_limited" if error.code == 429 else "http_error"
-        raise FetchError(kind, f"外部源返回HTTP {error.code}") from error
-    except (urllib.error.URLError, OSError) as error:
-        # urllib 把 SSL 错误包装在 URLError.reason 中；政府网站常见证书问题，降级为不验证
-        reason = getattr(error, "reason", error)
-        if isinstance(reason, (ssl.SSLError, ssl.SSLCertVerificationError)):
-            try:
-                unverified_ctx = ssl.create_default_context()
-                unverified_ctx.check_hostname = False
-                unverified_ctx.verify_mode = ssl.CERT_NONE
-                with opener(request, timeout=timeout, context=unverified_ctx) as response:
-                    body = response.read(max_bytes + 1)
-            except (TimeoutError, socket.timeout) as inner:
-                raise FetchError("timeout", "外部源请求超时") from inner
-            except urllib.error.HTTPError as inner:
-                kind = "rate_limited" if inner.code == 429 else "http_error"
-                raise FetchError(kind, f"外部源返回HTTP {inner.code}") from inner
-            except (urllib.error.URLError, OSError) as inner:
-                raise FetchError("unreachable", f"外部源不可达：{inner}") from inner
-        else:
-            raise FetchError("unreachable", f"外部源不可达：{error}") from error
+    body, headers = _read_raw(
+        request, opener=opener, timeout=timeout, max_bytes=max_bytes
+    )
     if len(body) > max_bytes:
         raise FetchError("too_large", f"响应超过{max_bytes}字节上限")
-    return body
+    return _decode_body(body, headers)
 
 
 def fetch_json(
@@ -172,7 +282,12 @@ def fetch_json(
     max_bytes=DEFAULT_MAX_BYTES,
     resolver=socket.getaddrinfo,
 ):
-    """POST a JSON query to a public API endpoint with the same safety net."""
+    """POST a JSON query to a public API endpoint with the same safety net.
+
+    与 `fetch_bytes` 共用 `_read_raw`（含 SSL 证书降级回退）与 `_decode_body`
+    （含 gzip 解压）—— 两条路径的行为必须一致，否则同一个站点走 RSS 能通、
+    走 JSON 直接失败。
+    """
     safe_url = validate_public_url(url)
     _validate_dns(urlparse(safe_url).hostname, resolver)
     body = json.dumps(payload or {}).encode("utf-8")
@@ -182,21 +297,16 @@ def fetch_json(
         headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) YuanJian/1.0",
             "Content-Type": "application/json",
+            "Accept-Encoding": "identity",
         },
         method="POST",
     )
-    try:
-        with opener(request, timeout=timeout) as response:
-            data = response.read(max_bytes + 1)
-    except (TimeoutError, socket.timeout) as error:
-        raise FetchError("timeout", "外部源请求超时") from error
-    except urllib.error.HTTPError as error:
-        kind = "rate_limited" if error.code == 429 else "http_error"
-        raise FetchError(kind, f"外部源返回HTTP {error.code}") from error
-    except (urllib.error.URLError, OSError) as error:
-        raise FetchError("unreachable", f"外部源不可达：{error}") from error
+    data, headers = _read_raw(
+        request, opener=opener, timeout=timeout, max_bytes=max_bytes
+    )
     if len(data) > max_bytes:
         raise FetchError("too_large", f"响应超过{max_bytes}字节上限")
+    return _decode_body(data, headers)
     return data
 
 

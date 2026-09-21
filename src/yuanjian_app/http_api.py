@@ -778,8 +778,10 @@ def create_server(host, port, token, services):
                 if services.external is not None
                 else []
             )
+            # 首页只呈现最多 3 条个人事项（README.md:47 / 使用说明.md:5 的承诺）。
+            # 既有 risk_dashboard 默认 limit=3，这里显式传 3 防止被覆盖漂移。
             self._json(
-                services.cognition_controller.risk_dashboard(source_states, limit=50)
+                services.cognition_controller.risk_dashboard(source_states, limit=3)
             )
 
         def _get_cognition_clusters(self, services, params, parsed, payload):

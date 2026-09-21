@@ -969,6 +969,65 @@ class HttpApiTests(unittest.TestCase):
         self.assertNotIn("last_error", serialized)
         self.assertNotIn("watch_rules", serialized)
 
+    def test_risk_dashboard_endpoint_returns_at_most_three_items(self):
+        """首页契约（端到端，真实库）：无论后端有多少 L3/L4 事项，接口最多返回 3 条。
+
+        README.md:47 与 使用说明.md:5 都承诺「行动首页只呈现最多 3 条个人事项」。
+        此前 http_api 把 limit 写成 50 又没人守，才会漂走；这里用真实数据钉死上限，
+        以后谁把 limit 改大，这条断言立刻变红。
+        """
+        db = self._database
+        for n in range(1, 7):  # 6 个 L4 事项，远超首页上限
+            cluster_id = "C-ITEM-%d" % n
+            judgment_id = "J-ITEM-%d" % n
+            ts = "2026-08-12T0%d:00:00Z" % n
+            with db.connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO event_clusters(
+                        cluster_id,title,summary,first_seen_at,last_seen_at,
+                        evidence_level,evidence_hash,categories_json,status,
+                        needs_judgment,independent_domains,primary_source_count,
+                        latest_judgment_id,created_at,updated_at
+                    ) VALUES (?,?,?,?,?,'E3',?,'["finance"]','active',0,2,1,?,?,?)
+                    """,
+                    (
+                        cluster_id, "外部变化%d" % n, "摘要", ts, ts,
+                        "hash-item-%d" % n, judgment_id, ts, ts,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO judgments VALUES (?,?,?,?,?,?)",
+                    (
+                        judgment_id, cluster_id, "local", "hash-item-%d" % n,
+                        json.dumps(
+                            {"fact_summary": "变化%d" % n, "horizons": ["7天内"]},
+                            ensure_ascii=False,
+                        ),
+                        ts,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO personal_impacts(
+                        impact_id,cluster_id,judgment_id,interest_id,impact_score,
+                        alert_level,components_json,reason,candidate_json,created_at,updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        "P-ITEM-%d" % n, cluster_id, judgment_id, "I-CASH",
+                        0.9, "L4", '{"confidence":0.82}', "内部映射理由",
+                        json.dumps(
+                            {"recommended_action": "行动%d" % n}, ensure_ascii=False
+                        ),
+                        ts, ts,
+                    ),
+                )
+
+        dashboard = self.get_json("/api/risk-dashboard")
+        self.assertEqual(dashboard["state"], "action")
+        self.assertLessEqual(len(dashboard["items"]), 3)
+
     def test_invalid_pagination_returns_bad_request(self):
         request = urllib.request.Request(
             self.base_url + "/api/cognition/clusters?limit=0",
@@ -1848,7 +1907,9 @@ class GetRouteContractTests(RoutingTestCase):
         self.assertEqual(status, 200)
         call = stubs["cognition_controller"].called("risk_dashboard")[0]
         self.assertEqual(call[1], ([],), "未装配外部源时应传空列表")
-        self.assertEqual(call[2], {"limit": 50})
+        # 首页契约：端点必须转发 limit=3（README.md:47 / 使用说明.md:5 承诺
+        # 「最多 3 条」；此前这里写成 50，契约没人守就漂走了）。
+        self.assertEqual(call[2], {"limit": 3})
 
         status, payload = self.body("POST", "/api/export/mobile-summary", payload={})
         self.assertEqual(status, 201)
