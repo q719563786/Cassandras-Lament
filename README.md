@@ -125,12 +125,17 @@ $env:PYTHONWARNINGS='error::ResourceWarning'
 而「单表 > 500 MB」护栏依赖 `dbstat`，缺失时**静默返回 0**、护栏形同虚设。
 现已修复（无 `dbstat` 时退化为逐表估算，并如实标注来源），用例也改成**打桩覆盖
 「有/无 dbstat」两条路径**、不再依赖解释器。细节见
-[`docs/releases/YuanJian-v1.5-verification.md`](docs/releases/YuanJian-v1.5-verification.md) 的「未覆盖范围/已知局限」。
+[`docs/releases/YuanJian-v1.5-verification.md`](docs/releases/YuanJian-v1.5-verification.md)
+的 **2.7 / 2.8** 与「三、已知局限」的 **第 7～9 条**。
 
 测试要求 `ResourceWarning` 视为错误。当前 **767 个测试在 `.venv-build` 与系统
-`python314` 两个解释器上各自全绿（skipped=3，均为既有占位）**，另有 15 条变异对照
-（每条都把改动改坏一次，确认对应断言真的会变红），本批另加 1 条（删掉护栏的估算兜底
-→ 3 条用例变红，见 `build-artifacts/qa_mutation_dbstat.py`）。当前版本的验证记录见
+`python314` 两个解释器上各自全绿（skipped=3，均为既有占位）**。
+
+此外还有一批**变异对照**（把改动改坏一次，确认对应断言真的会变红）：
+15 条历史对照 + 本批 1 条（删掉护栏的估算兜底 → 3 条用例变红，
+`build-artifacts/qa_mutation_dbstat.py`）。**注意：这些脚本不在 `tests/` 下、也不入库，
+`unittest discover` 不会收集它们** —— 克隆仓库后随 `tests/` 能自动跑到的变异对照为 **0**。
+它们只随交付包（`build-artifacts/`）分发、由人工逐个执行。当前版本的验证记录见
 [`docs/releases/YuanJian-v1.5-verification.md`](docs/releases/YuanJian-v1.5-verification.md)、
 [`docs/releases/YuanJian-v1.4-verification.md`](docs/releases/YuanJian-v1.4-verification.md)，
 按时间线的变更摘要见 [`CHANGELOG.md`](CHANGELOG.md)。
