@@ -835,12 +835,22 @@ class ThresholdTests(CleanupBase):
         report = self.service.should_run_by_threshold()
 
         self.assertEqual(
-            set(report), {"needed", "reason", "db_bytes", "largest_table", "largest_bytes"}
+            set(report),
+            {
+                "needed",
+                "reason",
+                "db_bytes",
+                "largest_table",
+                "largest_bytes",
+                "largest_table_source",
+            },
         )
         self.assertFalse(report["needed"])
         self.assertEqual(report["reason"], "")
         self.assertGreater(report["db_bytes"], 0)
         self.assertIsInstance(report["largest_bytes"], int)
+        # 来源随解释器而变（本机 dbstat 缺失走 estimate），故断言集合而不是定值。
+        self.assertIn(report["largest_table_source"], {"dbstat", "estimate"})
 
     def test_report_is_read_only(self):
         self.seed_every_layer()
@@ -866,23 +876,83 @@ class ThresholdTests(CleanupBase):
         self.assertIn("库文件", report["reason"])
         self.assertGreater(report["db_bytes"], 1024 * 1024)
 
-    def test_table_size_rule_is_evaluated(self):
-        """覆盖"任一表超过 DEFAULT_TABLE_THRESHOLD_MB"这条分支。
+    def test_table_size_rule_uses_dbstat_when_available(self):
+        """有 dbstat 时：走**精确**分支，来源如实标成 dbstat。
 
-        单元测试造不出 500 MB 的真表，所以把表阈值临时改成 0 —— 任何有内容的
-        库都必然超标，从而真的走到该分支，而不是假装测过。
+        打桩而不是依赖本机 SQLite 是否编译了 dbstat —— 用例必须与解释器无关。
         """
         self.seed_every_layer()
+        big = 600 * 1024 * 1024  # 600 MB > 500 MB 阈值
 
-        with mock.patch(
-            "yuanjian_app.retention.DEFAULT_TABLE_THRESHOLD_MB", 0
+        with mock.patch.object(
+            RetentionService,
+            "_dbstat_largest_table",
+            return_value=("judgments", big),
         ):
             report = self.service.should_run_by_threshold()
 
         self.assertTrue(report["needed"])
+        self.assertEqual(report["largest_table"], "judgments")
+        self.assertEqual(report["largest_bytes"], big)
+        self.assertEqual(report["largest_table_source"], "dbstat")
         self.assertIn("表", report["reason"])
+        # 精确值不加"（估算值）"后缀 —— 否则用户分不清护栏可不可信。
+        self.assertNotIn("估算值", report["reason"])
+
+    def test_table_size_rule_falls_back_to_estimate_without_dbstat(self):
+        """无 dbstat 时：退化为**估算**，且仍能触发这条分支（不是静默失效）。
+
+        交付环境（打包 sqlite3.dll 未编译 SQLITE_ENABLE_DBSTAT_VTAB）走的就是
+        这条路。强制 dbstat 抛错来复现该环境，再让真实估算器跑在临时库上。
+        """
+        self.seed_every_layer()
+
+        with mock.patch.object(
+            RetentionService,
+            "_dbstat_largest_table",
+            side_effect=sqlite3.OperationalError("no such table: dbstat"),
+        ), mock.patch(
+            "yuanjian_app.retention.DEFAULT_TABLE_THRESHOLD_MB", 0
+        ), self.assertLogs("yuanjian_app.retention", level="WARNING") as captured:
+            report = self.service.should_run_by_threshold()
+
+        # 仍然能真的走到"表 > 阈值"分支 —— 这就是"不再静默失效"的证明。
+        self.assertTrue(report["needed"])
+        self.assertEqual(report["largest_table_source"], "estimate")
+        self.assertIn("表", report["reason"])
+        self.assertIn("估算值", report["reason"])
         self.assertGreater(report["largest_bytes"], 0)
         self.assertTrue(report["largest_table"])
+        # 退化这件事必须留痕，不能悄悄发生。
+        self.assertTrue(
+            any("dbstat" in message for message in captured.output),
+            "退化到估算时必须在日志里留下 warning",
+        )
+
+    def test_table_size_rule_reports_unavailable_when_nothing_works(self):
+        """dbstat 与估算**都**不可用时：如实标注 unavailable，绝不静默返回 0。"""
+        self.seed_every_layer()
+
+        with mock.patch.object(
+            RetentionService,
+            "_dbstat_largest_table",
+            side_effect=sqlite3.OperationalError("no such table: dbstat"),
+        ), mock.patch.object(
+            RetentionService,
+            "_estimate_largest_table",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ), self.assertLogs("yuanjian_app.retention", level="WARNING") as captured:
+            report = self.service.should_run_by_threshold()
+
+        self.assertEqual(report["largest_table_source"], "unavailable")
+        self.assertEqual(report["largest_table"], "")
+        self.assertEqual(report["largest_bytes"], 0)
+        # 库文件没超阈值时不该因为"护栏不可用"就强行触发清理。
+        self.assertFalse(report["needed"])
+        self.assertTrue(
+            any("无法判定" in message for message in captured.output),
+            "护栏不可用必须显式记 warning，而不是静默当作没有大表",
+        )
 
     def test_threshold_trigger_records_threshold_mb_in_audit(self):
         self.seed_every_layer()

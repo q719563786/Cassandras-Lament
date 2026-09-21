@@ -263,6 +263,10 @@ class RadarScheduler:
                 "db_bytes": check["db_bytes"],
                 "largest_table": check["largest_table"],
                 "largest_bytes": check["largest_bytes"],
+                # 单表护栏的占用来源必须进诊断数据：交付环境没有 dbstat，这条
+                # 分支实际是估算值；不写出来，界面/排障就分不清"精确判定"与
+                # "估算判定"，护栏会再次变成静默的。
+                "largest_table_source": check.get("largest_table_source", "unknown"),
             }
         return self._execute(
             "retention_threshold",

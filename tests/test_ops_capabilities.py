@@ -1,10 +1,12 @@
 """六项新能力的单元测试：备份 / 保留 / 诊断 / 反馈学习 / 设置 / 移动导出 / 校准。"""
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from yuanjian_app.backup import BackupService, read_backup_setting, write_backup_setting
 from yuanjian_app.database import Database
@@ -214,6 +216,39 @@ class SettingsAndDiagnosticsTests(unittest.TestCase):
             self.assertIn(key, payload)
         self.assertGreater(payload["db_bytes"], 0)
         self.assertIsNotNone(payload["last_backup"])
+
+    def test_table_size_source_is_exposed_and_matches_dbstat_capability(self):
+        """「单表 > 500 MB」护栏是不是精确值，必须能在诊断面板看见。
+
+        交付环境没有 dbstat —— 这条护栏实际是估算值。不写出来，它又会退化成
+        一个「静默的、看起来精确的」护栏。这里断言字段存在且与 dbstat 能力一致，
+        **不绑定本机是否编译了 dbstat**（两个分支都合法）。
+        """
+        diagnostics = DiagnosticsService(self.database)
+
+        payload = diagnostics.snapshot()
+
+        self.assertIn("table_size_source", payload)
+        self.assertIn(payload["table_size_source"], {"dbstat", "estimate"})
+        # 与解释器能力一致：有 dbstat 就是精确，没有就是估算。
+        try:
+            with self.database.connect() as connection:
+                connection.execute("SELECT 1 FROM dbstat LIMIT 1").fetchone()
+            expected = "dbstat"
+        except Exception:
+            expected = "estimate"
+        self.assertEqual(payload["table_size_source"], expected)
+
+    def test_table_size_source_does_not_guess_when_it_cannot_probe(self):
+        """探测未得出结论（例如库被锁）时返回 None，而不是猜。"""
+        diagnostics = DiagnosticsService(self.database)
+
+        with mock.patch.object(
+            self.database, "connect", side_effect=sqlite3.OperationalError("database is locked")
+        ):
+            payload = diagnostics.snapshot()
+
+        self.assertIsNone(payload["table_size_source"])
 
 
 class MobileExportTests(unittest.TestCase):

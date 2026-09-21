@@ -49,8 +49,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
+
+_logger = logging.getLogger(__name__)
 
 DEFAULT_DAYS = 60
 MIN_DAYS = 7
@@ -87,6 +90,36 @@ PROTECTED_SNAPSHOT_WINDOWS = (720,)
 DEFAULT_THRESHOLD_MB = 2048
 DEFAULT_TABLE_THRESHOLD_MB = 500
 DEFAULT_MIN_INTERVAL_HOURS = 6
+
+# 「单表 > 500 MB」这条护栏的**逐表占用来源**。
+#
+# 首选 SQLite 的 `dbstat` 虚表（精确），但它需要 `SQLITE_ENABLE_DBSTAT_VTAB`
+# 编译开关。**交付环境实测没有**：打包进的 `_internal\sqlite3.dll`（3.50.4）
+# 不含该选项，`sqlite_dbpage` 同样没有，`pythoncore-3.14-64` 各解释器一致。
+# 于是这条护栏此前**静默失效**（`_largest_table_bytes` 吞掉异常返回 ("",0)），
+# 等于没有护栏 —— 这正是本次要修的缺陷，不是把测试跳过。
+#
+# 兜底用「逐表 COUNT(*) × 采样平均行宽」估算。采样方式很关键，实测三种：
+#
+#   采样法              偏差（对全表均值）        成本（judgments，79k 行）
+#   ------------------  -------------------------  -----------------------
+#   前 N 行            0.32x ~ 5.55x（方向不定）  <10 ms
+#   全表 AVG           1.00x（准）                0.8 ~ 16.6 s
+#   沿 rowid 均匀开窗  0.97x ~ 1.11x（准）        ~28 ms
+#
+# 故取「沿 rowid 均匀开窗」：真库 26 表合计约 3.7 s，而护栏检查是**每小时一次**
+# （`radar_scheduler` 里 `next_retention_check = following(3600)`），代价可接受。
+# 行宽用 `LENGTH(CAST(col AS BLOB))` 取**字节**而非字符：CJK 内容按字符会低估
+# 60%+（实测 t_cjk：字符法 -63%，字节法 -8%）。
+#
+# 估算相对精确值系统性偏低约 12%（合成库实测 -7.7%/-11.1%/-17.8%，真库对照
+# dbstat 时代实测 judgments 245.8 MB vs 281 MB = -12.5%），来源是未计入的索引页
+# 与页内空隙。故乘一个保守系数让估算**偏高**：宁可早一点触发清理（清理本身幂等且
+# 安全），也不要因为低估而让单表无限膨胀。
+TABLE_ESTIMATE_WINDOWS = 24
+TABLE_ESTIMATE_PER_WINDOW = 60
+TABLE_ESTIMATE_ROW_OVERHEAD = 4
+TABLE_ESTIMATE_CONSERVATIVE = 1.15
 
 # F3：单簇研判条数上限
 DEFAULT_MAX_JUDGMENTS_PER_CLUSTER = 8
@@ -375,36 +408,161 @@ class RetentionService:
         except sqlite3.Error:
             return 0
 
-    def _largest_table_bytes(self):
-        """返回（占用最大的对象名, 字节数）。dbstat 不可用时返回 ("", 0)。"""
-        try:
-            with self.database.connect() as connection:
-                row = connection.execute(
-                    """
-                    SELECT name, SUM(pgsize) AS bytes FROM dbstat
-                    GROUP BY name ORDER BY bytes DESC LIMIT 1
-                    """
-                ).fetchone()
-        except sqlite3.Error:
-            return "", 0
+    def _dbstat_largest_table(self, connection):
+        """`dbstat` 可用时返回（占用最大的对象名, 字节数）；空库返回 ("", 0)。
+
+        **不可用时抛 `sqlite3.Error`**（而不是吞掉）——由调用方决定退化路径。
+        这条护栏静默失效过一整个版本，所以这里刻意不吞异常。
+        """
+        row = connection.execute(
+            """
+            SELECT name, SUM(pgsize) AS bytes FROM dbstat
+            GROUP BY name ORDER BY bytes DESC LIMIT 1
+            """
+        ).fetchone()
         if row is None:
             return "", 0
         return str(row["name"]), int(row["bytes"] or 0)
+
+    @staticmethod
+    def _row_byte_expr(connection, table):
+        """该表"一行可计字节"的 SQL 表达式；无列返回 None。
+
+        用 `CAST(... AS BLOB)` 取 UTF-8 字节数而非字符数：CJK 内容按字符会低估
+        60%+，实测见模块常量处的对照表。
+        """
+        columns = [
+            row[1] for row in connection.execute("PRAGMA table_info(%s)" % table)
+        ]
+        if not columns:
+            return None
+        parts = ["LENGTH(CAST(%s AS BLOB))" % column for column in columns]
+        expr = "+".join(parts)
+        return "COALESCE(%s,0)" % expr if len(parts) > 1 else expr
+
+    @staticmethod
+    def _sampled_row_bytes(connection, table, expr):
+        """沿 rowid 均匀开窗采样平均行宽（字节）。
+
+        不取"前 N 行"：真库实测前 2000 行与全表均值之比在 0.32x ~ 5.55x 之间
+        且方向不定（`judgments` 低估 3 倍、`external_items` 高估 5 倍），单靠它
+        会把护栏带偏。全表 AVG 准但一次要 0.8 ~ 16.6 s。开窗采样在两者之间：
+        24 窗 × 60 行，偏差 ±11% 以内、单表 ~30 ms。
+
+        `WITHOUT ROWID` 表没有 rowid，退化为前 N 行采样（此时按"够用即可"处理，
+        并在调用方把来源标成估算值）。
+        """
+        try:
+            borders = connection.execute(
+                "SELECT MIN(rowid), MAX(rowid) FROM %s" % table
+            ).fetchone()
+        except sqlite3.Error:
+            borders = None
+        low = borders[0] if borders else None
+        if low is None:
+            row = connection.execute(
+                "SELECT AVG(w) FROM (SELECT %s AS w FROM %s LIMIT ?)" % (expr, table),
+                (TABLE_ESTIMATE_WINDOWS * TABLE_ESTIMATE_PER_WINDOW,),
+            ).fetchone()
+            return float(row[0] or 0.0) if row else 0.0
+        span = max(1, int(borders[1]) - int(low))
+        step = max(1, span // TABLE_ESTIMATE_WINDOWS)
+        total = 0.0
+        seen = 0
+        for index in range(TABLE_ESTIMATE_WINDOWS):
+            row = connection.execute(
+                "SELECT AVG(w), COUNT(*) FROM"
+                " (SELECT %s AS w FROM %s WHERE rowid >= ? LIMIT ?)" % (expr, table),
+                (int(low) + index * step, TABLE_ESTIMATE_PER_WINDOW),
+            ).fetchone()
+            if row is not None and row[0] is not None and int(row[1] or 0):
+                total += float(row[0]) * int(row[1])
+                seen += int(row[1])
+        return (total / seen) if seen else 0.0
+
+    def _estimate_largest_table(self, connection):
+        """无 `dbstat` 时的兜底：返回（估算占用最大的表名, 估算字节数）。
+
+        空库返回 (None, 0)。这是**估算**（见模块常量处的实测误差），不是精确值；
+        调用方必须把来源如实标成 `"estimate"`，不能当作精确值蒙混过去。
+        """
+        tables = [
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master"
+                " WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        ]
+        best_name = None
+        best_bytes = 0
+        for table in tables:
+            rows = int(connection.execute("SELECT COUNT(*) FROM %s" % table).fetchone()[0])
+            if not rows:
+                continue
+            expr = self._row_byte_expr(connection, table)
+            average = self._sampled_row_bytes(connection, table, expr) if expr else 0.0
+            estimate = int(
+                rows
+                * (average + TABLE_ESTIMATE_ROW_OVERHEAD)
+                * TABLE_ESTIMATE_CONSERVATIVE
+            )
+            if estimate > best_bytes:
+                best_name, best_bytes = table, estimate
+        return best_name, best_bytes
+
+    def _largest_table_bytes(self):
+        """返回（占用最大的对象名, 字节数, 来源）。
+
+        来源 `source` 取值：
+
+        - ``"dbstat"``：`dbstat` 虚表给的**精确**值。
+        - ``"estimate"``：无 `dbstat`，用「逐表行数 × 开窗采样平均行宽」**估算**。
+          交付环境（打包 `sqlite3.dll` 无 `SQLITE_ENABLE_DBSTAT_VTAB`）走的就是
+          这条路；误差与耗时见模块常量处的实测表。
+        - ``"unavailable"``：连估算都失败（例如库被锁）。此时**必须让调用方看见**
+          护栏不可用，故记一条 warning 并如实返回来源，绝不静默返回 0 冒充"没有大表"。
+        """
+        with self.database.connect() as connection:
+            try:
+                name, size = self._dbstat_largest_table(connection)
+            except sqlite3.Error as error:
+                _logger.warning(
+                    "单表体积护栏：dbstat 不可用（%s），退化为逐表估算；"
+                    "该护栏当前为估算值，非精确值。",
+                    type(error).__name__,
+                )
+            else:
+                return name, size, "dbstat"
+            try:
+                name, estimate = self._estimate_largest_table(connection)
+            except sqlite3.Error as error:
+                _logger.warning(
+                    "单表体积护栏：dbstat 与估算均不可用（%s），"
+                    "「单表 > %d MB」这一分支本次无法判定。",
+                    type(error).__name__,
+                    DEFAULT_TABLE_THRESHOLD_MB,
+                )
+                return "", 0, "unavailable"
+        return str(name or ""), int(estimate), "estimate"
 
     def should_run_by_threshold(self) -> dict:
         """只读检查是否需要按阈值清理，**不做任何删除**。
 
         判定：库文件体积 > `threshold_mb`，**或** 任一表 > 500 MB。
+        「任一表 > 500 MB」的占用来源见 `_largest_table_bytes`：优先 `dbstat`
+        精确值；交付环境没有 `dbstat` 时退化为估算，且**如实标注来源**。
+
         返回:
 
         .. code-block:: python
 
             {"needed": bool, "reason": str, "db_bytes": int,
-             "largest_table": str, "largest_bytes": int}
+             "largest_table": str, "largest_bytes": int,
+             "largest_table_source": "dbstat" | "estimate" | "unavailable"}
         """
         setting = read_retention_setting(self.database)
         db_bytes = self._database_bytes()
-        largest_table, largest_bytes = self._largest_table_bytes()
+        largest_table, largest_bytes, source = self._largest_table_bytes()
         db_limit = setting["threshold_mb"] * 1024 * 1024
         table_limit = DEFAULT_TABLE_THRESHOLD_MB * 1024 * 1024
         reasons = []
@@ -414,8 +572,9 @@ class RetentionService:
                 f"（{setting['threshold_mb']} MB）"
             )
         if largest_bytes > table_limit:
+            suffix = "" if source == "dbstat" else "（估算值）"
             reasons.append(
-                f"表 {largest_table} 占用 {largest_bytes} 字节超过 "
+                f"表 {largest_table} 占用 {largest_bytes} 字节{suffix}超过 "
                 f"{DEFAULT_TABLE_THRESHOLD_MB} MB"
             )
         return {
@@ -424,6 +583,7 @@ class RetentionService:
             "db_bytes": db_bytes,
             "largest_table": largest_table,
             "largest_bytes": largest_bytes,
+            "largest_table_source": source,
         }
 
     @staticmethod

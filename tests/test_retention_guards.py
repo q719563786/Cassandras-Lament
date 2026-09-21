@@ -546,5 +546,45 @@ class NonIsoShapeGuardTests(RetentionGuardBase):
         self.assertEqual(self.count("trend_snapshots", "snapshot_id='S-iso'"), 0)
 
 
+class ThresholdGuardVisibilityTests(RetentionGuardBase):
+    """「单表 > 500 MB」护栏**不许再静默**：来源必须随阈值检查一起进诊断数据。
+
+    背景：该护栏依赖 `dbstat`，而交付环境（打包 sqlite3.dll）没有编译它 →
+    查询抛错被吞掉、恒返回 0、分支永不触发，且没有任何红/黄提示。修复后，
+    退化到估算时既记 warning，也要把 `largest_table_source` 写进任务状态。
+    """
+
+    def _scheduler(self):
+        from yuanjian_app.radar_scheduler import RadarScheduler
+
+        return RadarScheduler(
+            None,
+            database=self.database,
+            retention_service=self.service,
+            now=self.clock,
+        )
+
+    def test_skipped_threshold_check_still_reports_the_guards_source(self):
+        """哪怕这一趟"不需要清理"，来源也要如实带出来（否则等于静默）。"""
+        self.add_interest()
+
+        payload = self._scheduler().run_retention_if_threshold()
+
+        self.assertEqual(payload["status"], "skipped")
+        # 两个取值都合法：本机无 dbstat → estimate；有 dbstat 的机器 → dbstat。
+        self.assertIn(payload["largest_table_source"], {"dbstat", "estimate"})
+        # 既有字段一个都不能少（前端/排障依赖）。
+        for key in ("reason", "db_bytes", "largest_table", "largest_bytes"):
+            self.assertIn(key, payload)
+
+    def test_source_field_is_never_silently_absent(self):
+        """`should_run_by_threshold()` 必须始终给出三选一的来源，不留空。"""
+        self.add_interest()
+
+        report = self.service.should_run_by_threshold()
+
+        self.assertIn(report["largest_table_source"], {"dbstat", "estimate", "unavailable"})
+
+
 if __name__ == "__main__":
     unittest.main()

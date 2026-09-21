@@ -13,12 +13,17 @@ v1.4 再补两组"此前没人盯"的事实（前端同样按可选处理）：
 trend_health（R-11：rising 占可判定快照的比例，>20% 即阈值失效）、
 evidence_levels / primary_source_count / evidence_level_note
 （R-15：证据等级分布，以及"尚未标记任何官方来源 → E3/E4 不可达"的明示）。
+
+v1.5.1 再补一个"护栏可不可信"的事实（前端按可选处理）：
+table_size_source —— 「单表 > 500 MB」护栏的逐表占用来源，dbstat=精确 / estimate=估算。
+交付环境没有 dbstat，这条护栏实际是估算值；不写出来它又会变成静默护栏。
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from datetime import datetime, timezone
 
 from .remote_ai import REMOTE_MIN_INTERVAL_SECONDS
@@ -135,7 +140,35 @@ class DiagnosticsService:
                 "当前证据体系实际只有 E1/E2 两级，最窄的概率区间（E4 ±0.07）不可达。"
             )
         )
+        # 「单表 > 500 MB」护栏的占用来源。交付环境没有 dbstat（打包的
+        # sqlite3.dll 未编译 SQLITE_ENABLE_DBSTAT_VTAB），该分支实际是估算值。
+        # 一个不知道自己"是估算值"的护栏等于没有护栏，所以这里把它显式摊开：
+        # dbstat=精确 / estimate=估算。
+        try:
+            payload["table_size_source"] = self._read_table_size_source()
+        except Exception:
+            payload["table_size_source"] = None
         return payload
+
+    def _read_table_size_source(self):
+        """`dbstat` 虚表在不在 —— 决定「单表 > 500 MB」护栏是精确还是估算。
+
+        刻意做**能力探测**而不是"重跑一次估算取上次结果"：估算一次要 ≈3.7 s
+        （真库 26 表），不能塞进一个按需打开的诊断接口；而"护栏可不可信"恰好只
+        取决于 `dbstat` 在不在，探测只需 ~1 ms。
+
+        返回 ``"dbstat"``（精确）/ ``"estimate"``（估算）/ ``None``（探测未得出结论，
+        例如库被锁 —— 此时不下结论，而不是猜）。
+        """
+        with self.database.connect() as connection:
+            try:
+                connection.execute("SELECT 1 FROM dbstat LIMIT 1").fetchone()
+            except sqlite3.Error as error:
+                # 只有"没有 dbstat 这张虚表"才判为估算；锁/IO 等其它错误不下结论。
+                if "dbstat" in str(error).lower():
+                    return "estimate"
+                return None
+        return "dbstat"
 
     def _read_evidence_levels(self) -> dict:
         """已识别事件簇的证据等级分布。缺失的等级补 0（而不是不出现）——

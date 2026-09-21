@@ -111,11 +111,26 @@ powershell -ExecutionPolicy Bypass -File tools\smoke_packaged.ps1 -ExePath 'dist
 ```powershell
 $env:PYTHONPATH='src'
 $env:PYTHONWARNINGS='error::ResourceWarning'
-python -m unittest discover -s tests -v
+.\.venv-build\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-测试要求 `ResourceWarning` 视为错误。当前 **723 个测试连续三轮全部通过**，另有 15 条变异对照
-（每条都把改动改坏一次，确认对应断言真的会变红）。当前版本的验证记录见
+**回归必须用哪个解释器，以及为什么。** 用 `build\build_windows.ps1` 建出来的
+`.venv-build\Scripts\python.exe`（Python 3.14 / SQLite 3.50.4）。原因是它才是
+**打包基线**：PyInstaller 冻结的就是这个解释器及其标准库，`sqlite3` 的编译选项
+（如是否有 `dbstat` 虚表）也随之带进交付件。换用系统里随便哪个 `python` 跑，
+测的可能是**另一套 SQLite**，结论对交付件不成立。
+
+这一点有前车之鉴：本仓库曾出现过「用 A 解释器跑 725 全绿、换 B 解释器同一条用例
+必红」——根因是打包的 `sqlite3.dll` 没有编译 `SQLITE_ENABLE_DBSTAT_VTAB`，
+而「单表 > 500 MB」护栏依赖 `dbstat`，缺失时**静默返回 0**、护栏形同虚设。
+现已修复（无 `dbstat` 时退化为逐表估算，并如实标注来源），用例也改成**打桩覆盖
+「有/无 dbstat」两条路径**、不再依赖解释器。细节见
+[`docs/releases/YuanJian-v1.5-verification.md`](docs/releases/YuanJian-v1.5-verification.md) 的「未覆盖范围/已知局限」。
+
+测试要求 `ResourceWarning` 视为错误。当前 **767 个测试在 `.venv-build` 与系统
+`python314` 两个解释器上各自全绿（skipped=3，均为既有占位）**，另有 15 条变异对照
+（每条都把改动改坏一次，确认对应断言真的会变红），本批另加 1 条（删掉护栏的估算兜底
+→ 3 条用例变红，见 `build-artifacts/qa_mutation_dbstat.py`）。当前版本的验证记录见
 [`docs/releases/YuanJian-v1.5-verification.md`](docs/releases/YuanJian-v1.5-verification.md)、
 [`docs/releases/YuanJian-v1.4-verification.md`](docs/releases/YuanJian-v1.4-verification.md)，
 按时间线的变更摘要见 [`CHANGELOG.md`](CHANGELOG.md)。
