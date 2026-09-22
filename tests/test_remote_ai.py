@@ -464,6 +464,266 @@ class ShutdownQueueCleanupTests(JudgmentQueueTests):
         )
 
 
+class RemotePaidGovernanceTests(unittest.TestCase):
+    """第二批 · 远程付费三条（B1 账目 / B2 默认上限 / B3 熔断）。
+
+    三条守的是同一件事：**付费端点的钱要花在明处**。B1 保证账目对得上账单，
+    B2 保证默认值按最坏情况（付费）来定，B3 保证对端整体挂掉时不再无谓烧钱。
+    """
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.database = Database(Path(self.temporary.name) / "yuanjian.db")
+        self.database.initialize()
+        self.clock = MutableClock()
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def queue(self, providers, daily_budget=30):
+        return JudgmentQueue(
+            self.database,
+            providers=providers,
+            bundle_loader=lambda cluster_id: bundle(),
+            local_provider=LocalHeuristicProvider(),
+            now=self.clock,
+            daily_budget=daily_budget,
+        )
+
+    def _rows(self, sql, args=()):
+        with self.database.connect() as connection:
+            return connection.execute(sql, args).fetchall()
+
+    def _count(self, sql, args=()):
+        return self._rows(sql, args)[0][0]
+
+    # ── B1 账目 ──────────────────────────────────────────────────────────
+    def test_failed_retries_are_counted_against_the_daily_budget(self):
+        """B1：重试是一次真实付费调用，必须计入当日预算。
+
+        旧判据只数 `finished_at IS NOT NULL` 的行，而**重试分支不写 `finished_at`**
+        ⇒ 失败重试整个漏掉，越失败漏得越多（账上写着 2000，实际能发出
+        2000×重试倍数次）。验收口径：打桩持续抛错，当天累计调用**不超 budget**。
+        """
+        provider = FakeProvider(lambda: RemoteProviderError("network"))
+        queue = self.queue({"remote": provider}, daily_budget=3)
+        for index in range(6):
+            queue.enqueue(f"C-{index}", f"h-{index}", "remote")
+
+        # 连跑 6 轮、每轮把时钟推过退避点，给重试充分的发生机会
+        for _ in range(6):
+            queue.run_due(limit=20, remote_limit=20)
+            self.clock.value += timedelta(minutes=20)
+
+        self.assertEqual(provider.calls, 3, "日预算没能拦住持续失败的重试")
+        snapshot = queue.remote_budget_snapshot()
+        self.assertEqual(
+            snapshot["used_today"],
+            provider.calls,
+            "账目与实际发起的调用次数不一致 —— 重试又被漏记了",
+        )
+
+    def test_usage_counter_survives_a_restart_and_a_new_day_resets_it(self):
+        """B1 的落点：按**次**记账、跨重启不丢、换日归零。
+
+        不跨重启就不叫"日预算"——重启一次账本清零，等于给了绕过上限的直通车道。
+        """
+        queue = self.queue({"remote": FakeProvider()})
+        with self.database.connect() as connection:
+            queue._bump_remote_usage(connection, self.clock.value)
+            queue._bump_remote_usage(connection, self.clock.value)
+
+        restarted = self.queue({"remote": FakeProvider()})
+        self.assertEqual(restarted.remote_used_today(), 2)
+
+        # 同一个替身时钟（`now=self.clock`）推到第二天
+        self.clock.value = datetime(2026, 8, 12, 8, tzinfo=timezone.utc)
+        self.assertEqual(restarted.remote_used_today(), 0, "换日后账本没有归零")
+
+    # ── B2 默认上限 ──────────────────────────────────────────────────────
+    def test_default_daily_budget_is_two_hundred_not_two_thousand(self):
+        """B2：非本地 provider 的默认日上限 = 200。
+
+        2000 是照着**免费** Agnes 定的（那端点限的是 20 RPM、没有日配额）；一旦
+        端点换成付费 provider，同一个数字就从"白给"变成"一天几千次真实扣费"。
+        默认值必须按最坏情况定，免费额度宽松的用户自己在设置页调高。
+        """
+        self.assertEqual(remote_ai.DAILY_REMOTE_BUDGET, 200)
+        self.assertTrue(
+            remote_ai.MIN_DAILY_BUDGET <= remote_ai.DAILY_REMOTE_BUDGET <= remote_ai.MAX_DAILY_BUDGET
+        )
+        with self.database.connect() as connection:
+            connection.execute("DELETE FROM runtime_state WHERE state_key='ai_settings'")
+        # 从未存过设置的库 ⇒ 读回来就是新默认
+        self.assertEqual(remote_ai.read_ai_setting(self.database)["daily_budget"], 200)
+
+    def test_stored_budget_is_never_overwritten_by_the_new_default(self):
+        """B2 的红线：**只改默认，不覆盖用户已显式存过的值**。
+
+        真库 `ai_settings` 里显式存了 2000（见
+        `build-artifacts/scratch-yj-20260921/probe_remote_budget.txt`），
+        把默认改成 200 之后那台机器读回来**必须还是 2000** —— 收紧"已存过"的
+        值需要一次写库迁移，那是产品决策，本轮不做。
+        """
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO runtime_state(state_key,value_json,updated_at)
+                VALUES ('ai_settings',?,'2026-08-11T08:00:00Z')
+                """,
+                (json.dumps({"enabled": True, "daily_budget": 2000}),),
+            )
+
+        self.assertEqual(remote_ai.read_ai_setting(self.database)["daily_budget"], 2000)
+        # daily_budget=None ⇒ 现读设置（生产路径）
+        live = JudgmentQueue(
+            self.database,
+            providers={"remote": FakeProvider()},
+            bundle_loader=lambda cluster_id: bundle(),
+            local_provider=LocalHeuristicProvider(),
+            now=self.clock,
+        )
+        self.assertEqual(live._current_daily_budget(), 2000, "默认值覆盖了用户已存的上限")
+        self.assertEqual(live.remote_budget_snapshot()["budget"], 2000)
+
+    def test_budget_and_used_today_are_exposed_for_diagnostics(self):
+        """B2 的出口：`budget` / `used_today` 由后端统一给出，前端不要自己另算一份。"""
+        queue = self.queue({"remote": FakeProvider()}, daily_budget=7)
+        queue.enqueue("C-1", "h-1", "remote")
+
+        queue.run_due(limit=10)
+
+        snapshot = queue.remote_budget_snapshot()
+        self.assertEqual(snapshot["budget"], 7)
+        self.assertEqual(snapshot["used_today"], 1)
+        self.assertEqual(snapshot["day"], "2026-08-11")
+        self.assertEqual(queue.remote_used_today(), 1)
+
+    # ── B3 熔断 ──────────────────────────────────────────────────────────
+    def test_consecutive_failures_open_the_circuit_and_stop_the_queue(self):
+        """B3：同一 provider 连续失败达阈值 ⇒ 排队作业**统一冻结**且**停工**。
+
+        非鉴权失败原本只有逐作业退避（15/30/60/120 分钟）没有总闸；对端整体
+        不可用时，预算会一路烧在"明知会失败"的调用上。冻结复用既有
+        `paused_auth`（`last_error=circuit_open` 与 `auth_paused` 区分）。
+        """
+        provider = FakeProvider(lambda: RemoteProviderError("network"))
+        queue = self.queue({"remote": provider}, daily_budget=1000)
+        for index in range(8):
+            queue.enqueue(f"C-{index}", f"h-{index}", "remote")
+
+        queue.run_due(limit=20, remote_limit=20)
+
+        self.assertEqual(
+            provider.calls,
+            remote_ai.REMOTE_CIRCUIT_THRESHOLD,
+            "达阈值后没有停工，剩余作业仍在继续发请求",
+        )
+        rows = self._rows("SELECT status,last_error FROM judgment_jobs")
+        self.assertEqual(len(rows), 8)
+        self.assertEqual({row["status"] for row in rows}, {"paused_auth"})
+        self.assertEqual(
+            {row["last_error"] for row in rows}, {remote_ai.CIRCUIT_OPEN_REASON}
+        )
+        self.assertEqual(queue.remote_budget_snapshot()["circuit_open"], ["remote"])
+
+        # 停工是**持续**的：后续几轮（paused_auth 不在到期集合里）一条都不发
+        for _ in range(3):
+            self.clock.value += timedelta(minutes=30)
+            queue.run_due(limit=20, remote_limit=20)
+        self.assertEqual(
+            provider.calls,
+            remote_ai.REMOTE_CIRCUIT_THRESHOLD,
+            "熔断后又在发请求 —— 熔断没起作用",
+        )
+
+    def test_one_success_closes_the_circuit_and_resumes_the_frozen_jobs(self):
+        """B3 的解除：**半开** —— 冷却期后放行一条探测作业，成功一次即整批解冻。
+
+        这条同时锁住"熔断不能是永久封死"：打开时排队作业全被冻结成 `paused_auth`
+        （不在到期集合里），若不放行探测，"成功一次即解除"就永远等不到那次成功。
+        """
+        provider = FakeProvider(lambda: RemoteProviderError("network"))
+        queue = self.queue({"remote": provider}, daily_budget=1000)
+        for index in range(8):
+            queue.enqueue(f"C-{index}", f"h-{index}", "remote")
+        queue.run_due(limit=20, remote_limit=20)
+        self.assertEqual(provider.calls, remote_ai.REMOTE_CIRCUIT_THRESHOLD)
+
+        # 对端已恢复，但**冷却期内**不许放行 —— 否则熔断等于没有停工
+        provider.action = None
+        queue.enqueue("C-new", "h-new", "remote")
+        self.clock.value += timedelta(minutes=remote_ai.REMOTE_CIRCUIT_PROBE_MINUTES - 5)
+        queue.run_due(limit=20, remote_limit=20)
+        self.assertEqual(
+            provider.calls,
+            remote_ai.REMOTE_CIRCUIT_THRESHOLD,
+            "熔断冷却期内就放行了作业 —— 停工形同虚设",
+        )
+
+        # 冷却期过 ⇒ 放行**一条**探测作业，成功 ⇒ 解冻整批
+        self.clock.value += timedelta(minutes=10)
+        queue.run_due(limit=20, remote_limit=20)
+        self.assertEqual(provider.calls, remote_ai.REMOTE_CIRCUIT_THRESHOLD + 1)
+
+        snapshot = queue.remote_budget_snapshot()
+        self.assertEqual(snapshot["circuit_open"], [])
+        self.assertEqual(snapshot["failure_streak"].get("remote"), 0)
+        self.assertEqual(
+            self._count("SELECT COUNT(*) FROM judgment_jobs WHERE status='queued'"), 8
+        )
+
+        self.clock.value += timedelta(minutes=5)
+        queue.run_due(limit=20, remote_limit=20)
+        self.assertEqual(
+            self._count("SELECT COUNT(*) FROM judgment_jobs WHERE status='succeeded'"),
+            9,
+            "解冻后的作业没有跑完（8 条解冻 + 1 条新作业）",
+        )
+
+    def test_closing_the_circuit_leaves_auth_paused_jobs_frozen(self):
+        """复用 `paused_auth` 的代价：两种冻结必须靠 `last_error` 区分清楚。
+
+        认证失败冻结的那批（`auth_paused`）是用户没配好凭据，一次远程调用成功
+        就顺手放行 ⇒ 白花钱重试。
+        """
+        queue = self.queue({"remote": FakeProvider()})
+        with self.database.connect() as connection:
+            for index, reason in enumerate(("auth_paused", remote_ai.CIRCUIT_OPEN_REASON)):
+                connection.execute(
+                    """
+                    INSERT INTO judgment_jobs(
+                        job_id,cluster_id,evidence_hash,provider,model,status,
+                        attempts,request_chars,created_at,next_attempt_at,last_error
+                    ) VALUES (?,?,?,?,'m','paused_auth',0,0,?,?,?)
+                    """,
+                    (
+                        f"J-{index}",
+                        f"C-{index}",
+                        f"h-{index}",
+                        "remote",
+                        "2026-08-11T08:00:00Z",
+                        "2026-08-11T08:00:00Z",
+                        reason,
+                    ),
+                )
+        queue._circuit_open.add("remote")
+
+        with self.database.connect() as connection:
+            resumed = queue._close_circuit(connection, "remote")
+
+        self.assertEqual(resumed, 1, "解冻范围越界 —— 认证冻结的作业被一起放行了")
+        self.assertEqual(
+            {
+                row["last_error"]
+                for row in self._rows(
+                    "SELECT last_error FROM judgment_jobs WHERE status='paused_auth'"
+                )
+            },
+            {"auth_paused"},
+        )
+
+
 class RemotePacerTests(unittest.TestCase):
     """瞬时速率闸（`REMOTE_MIN_INTERVAL_SECONDS` / `MinIntervalPacer`）。
 

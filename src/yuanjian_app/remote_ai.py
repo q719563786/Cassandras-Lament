@@ -33,13 +33,24 @@ _logger = logging.getLogger(__name__)
 
 DEFAULT_ENDPOINT = "https://api.openai.com/v1/responses"
 
-DAILY_REMOTE_BUDGET = 2000
-"""每日远程研判上限的**默认值**（2026-09-15 由 100 提到 2000）。
+DAILY_REMOTE_BUDGET = 200
+"""每日远程研判上限的**默认值**（2026-09-15 由 100 提到 2000；2026-09-21 降到 200）。
 
-定 2000 的依据：Agnes AI 免费版对文本模型限的是 **20 RPM**（每分钟请求数），
-**没有每日配额**；所以真正的稀缺资源是"每天总共做多少件"，不是"峰值多快"——
-旧值 100 天/天把用户卡在了每天精确 100 条（真库 judgment_jobs 9/5–9/8 每天停在
-100），而配额其实是白给的。用户可在设置页覆盖（0~100000，0 = 关闭远程）。
+定 2000 的依据（**已经不成立，留作史料**）：Agnes AI 免费版对文本模型限的是
+**20 RPM**（每分钟请求数），**没有每日配额**；所以当时认为真正的稀缺资源是
+"每天总共做多少件"，不是"峰值多快"——旧值 100 天/天把用户卡在了每天精确 100 条
+（真库 judgment_jobs 9/5–9/8 每天停在 100），而配额其实是白给的。
+
+**2026-09-21 为什么降到 200**：2000 是照着"免费 Agnes"定的，一旦用户把端点换成
+**付费** provider（如 `deepseek_chat`），同一个数字就从"白给"变成"一天最多
+几千次真实扣费"。默认值必须按**最坏情况**（付费）来定，免费额度宽松的用户自己在
+设置页调高即可（0~100000，0 = 关闭远程）。
+
+⚠ **只改默认，不覆盖用户已显式存过的值**：`read_ai_setting()` 只在
+`ai_settings` 里**没有** `daily_budget` 这个键时才用本常量；真库已显式存了 2000，
+且 2000 在 `MIN_DAILY_BUDGET..MAX_DAILY_BUDGET` 区间内 ⇒ 本机用户改动前后**都是
+2000**（实测见 `build-artifacts/scratch-yj-20260921/probe_remote_budget.txt`）。
+要连"已存过"的一起收紧，需要一次写库迁移 —— 那是产品决策，本轮不做。
 
 **2026-09-16 的安装后真库数据推翻了这里原来的另一半推断**（原文写"顺序请求、
 单次十来秒，结构上到不了 20 RPM"）：15 小时里 succeeded 152 / rate_limit 23，
@@ -54,6 +65,33 @@ MIN_DAILY_BUDGET = 0
 MAX_DAILY_BUDGET = 100000
 """每日上限的可设置区间。0 = 用户明确关闭远程（不再发起任何请求）。
 上限给到 10 万是因为真瓶颈是 RPM 与用户自己的判断，不必在软件里再设一道墙。"""
+
+#: 今日远程调用**次数**的落点（`runtime_state`）。**按次**记账 —— 失败重试也算，
+#: 因为每次重试都是一次真实付费调用（详见 `_remote_used_today` 的说明）。
+REMOTE_USAGE_STATE_KEY = "ai_remote_usage"
+
+#: 连续失败熔断阈值：同一 provider 连续这么多次**非鉴权**失败后，把该 provider
+#: 的排队作业统一冻结。复用既有 `paused_auth` 机制，**不另起一套状态**（另起一套
+#: 就要同时改 shutdown 的清理范围、requeue 的终态表、诊断面板，那是第二套）。
+REMOTE_CIRCUIT_THRESHOLD = 5
+
+#: 熔断打开后每隔这么久放行**一条**探测作业（半开状态）。
+#:
+#: 没有这条，熔断就等于把 provider **永久封死**：打开时所有排队作业被冻结成
+#: `paused_auth`（不在到期集合里），而"成功一次即解除"又要求有一次调用成功 ——
+#: 两条加起来的结果是**永远不会有那一次成功**，只能等重启或人工。教科书里的
+#: 半开（half-open）就是为这个缝设计的：冷却期过后放一条进去试，成功就整批解冻，
+#: 失败就继续冻着并重新计时。成本上界明确：最坏 **每 15 分钟 1 次**调用。
+REMOTE_CIRCUIT_PROBE_MINUTES = 15
+
+#: 熔断冻结时写进 `last_error` 的原因串 —— 与 `auth_paused` 区分开：
+#: 解除时只解冻这一批，绝不误放行"认证失败"冻结的那批。
+CIRCUIT_OPEN_REASON = "circuit_open"
+
+
+def _usage_day(now) -> str:
+    """UTC 日期键（`YYYY-MM-DD`）。预算按 UTC 日切，与 `_remote_used_today` 一致。"""
+    return now.astimezone(timezone.utc).strftime("%Y-%m-%d")
 
 # Agnes AI（免费 OpenAI 兼容接口）默认配置
 AGNES_AI_BASE_URL = "https://apihub.agnes-ai.com/v1"
@@ -801,6 +839,17 @@ class JudgmentQueue:
         # P2: 远程研判时注入个人利益地图与历史预测的回调（cluster_id -> dict | None）。
         # 本地研判永不调用，保持"local never sees personal interests"隐私边界。
         self.personal_context_loader = personal_context_loader
+        #: 连续失败熔断：provider -> 连续非鉴权失败次数（进程内计数）。
+        #: 达 `REMOTE_CIRCUIT_THRESHOLD` 就冻结该 provider 的排队作业；
+        #: 任一作业成功即清零并解除（见 `run_due`）。
+        self._failure_streak = {}
+        #: 当前处于"熔断打开"状态的 provider 集合（`_failure_streak` 达过阈值、
+        #: 且还没靠一次成功解除）。用于避免重复记日志、并驱动解除时的解冻。
+        self._circuit_open = set()
+        #: 熔断打开的 provider -> 下一次**允许放行的探测时刻**（半开状态）。
+        #: 见 `REMOTE_CIRCUIT_PROBE_MINUTES`：不留这条缝，熔断就再也等不到
+        #: 那"一次成功"，等于把 provider 永久封死。
+        self._circuit_probe_at = {}
         # 关闭标志：退出时设置，立即中断任务处理，防止继续调用API
         self._shutdown = threading.Event()
 
@@ -914,9 +963,67 @@ class JudgmentQueue:
             )
             return row["job_id"]
 
+    def _bump_remote_usage(self, connection, now, count: int = 1) -> None:
+        """把"今日已发起的远程调用次数"加 `count`，与作业状态更新**同一事务**。
+
+        为什么不能只数行：一个作业最多重试 `MAX_REMOTE_RETRIES-1` 次，而重试分支
+        **不写 `finished_at`** —— 只数 `finished_at IS NOT NULL` 的行，就会把
+        "失败重试"这一次真实付费调用**整个漏掉**，而且失败得越厉害漏得越多
+        （日预算因此形同虚设：账上写着 2000，实际可发出约 2000×重试倍数次）。
+        按次记账才能对上账单；计数器跨重启不丢，这正是"日预算"需要的性质。
+        """
+        day = _usage_day(now)
+        payload = {}
+        row = connection.execute(
+            "SELECT value_json FROM runtime_state WHERE state_key=?",
+            (REMOTE_USAGE_STATE_KEY,),
+        ).fetchone()
+        if row:
+            try:
+                loaded = json.loads(row["value_json"])
+            except (ValueError, TypeError):
+                loaded = None
+            if isinstance(loaded, dict):
+                payload = loaded
+        if payload.get("day") != day:
+            # 换日 ⇒ 从零开始；旧日期的数据自然作废，不需要清理任务。
+            payload = {"day": day, "used": 0}
+        payload["used"] = int(payload.get("used", 0) or 0) + count
+        connection.execute(
+            """
+            INSERT INTO runtime_state(state_key,value_json,updated_at)
+            VALUES (?,?,?)
+            ON CONFLICT(state_key) DO UPDATE SET
+                value_json=excluded.value_json,updated_at=excluded.updated_at
+            """,
+            (
+                REMOTE_USAGE_STATE_KEY,
+                json.dumps(payload, sort_keys=True),
+                _iso(now),
+            ),
+        )
+
     def _remote_used_today(self, connection, now):
-        """统计今日所有实际发起过API请求的远程任务（无论成功/失败/格式错误），
-        因为只要请求发出就消耗了token。"""
+        """今日已实际发起的远程调用**次数**（成功/失败/格式错误/重试都算）。
+
+        首选 `runtime_state.ai_remote_usage` 计数器：按次记账、重试也算、跨重启不丢。
+        计数器缺失（老库 / 本轮之前从未调用过）时退回原来的**按行**统计 —— 那条
+        路径只数 `finished_at` 非空的行，**会低估**（重试不计），仅作兼容，不是准值。
+        """
+        row = connection.execute(
+            "SELECT value_json FROM runtime_state WHERE state_key=?",
+            (REMOTE_USAGE_STATE_KEY,),
+        ).fetchone()
+        if row:
+            try:
+                payload = json.loads(row["value_json"])
+            except (ValueError, TypeError):
+                payload = None
+            if isinstance(payload, dict):
+                if payload.get("day") == _usage_day(now):
+                    return int(payload.get("used", 0) or 0)
+                # 计数器还停在昨天 ⇒ 今日一笔都还没发过
+                return 0
         start = now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         end = start + timedelta(days=1)
         return connection.execute(
@@ -927,6 +1034,85 @@ class JudgmentQueue:
             """,
             (_iso(start), _iso(end)),
         ).fetchone()[0]
+
+    def remote_budget_snapshot(self) -> dict:
+        """后端诊断用：本轮生效的上限 / 今日已用次数 / 熔断状态。
+
+        `budget` 与 `used_today` 都在这里出口 —— 前端要展示"还剩多少次"就取这两个
+        字段，不要自己另算一份（另算必然与真正的闸不一致）。
+        """
+        now = self.now().astimezone(timezone.utc)
+        with self.database.connect() as connection:
+            used = int(self._remote_used_today(connection, now))
+        return {
+            "budget": self._current_daily_budget(),
+            "used_today": used,
+            "day": _usage_day(now),
+            "circuit_open": sorted(self._circuit_open),
+            "failure_streak": dict(self._failure_streak),
+            "circuit_probe_at": {
+                name: _iso(moment)
+                for name, moment in sorted(self._circuit_probe_at.items())
+            },
+        }
+
+    def _open_circuit(self, connection, provider_name, now) -> int:
+        """连续失败达阈值：冻结该 provider 的**全部**排队作业并标注原因。
+
+        复用既有 `paused_auth` 状态，**不新增状态** —— 新增一个状态就要同时改
+        `shutdown()` 的清理范围、`requeue_for_upgrade` 的终态表与诊断面板，
+        那是实打实的第二套机制。区分两种冻结靠 `last_error`：
+        `circuit_open`（连续失败）与 `auth_paused`（认证失败）互不相干。
+
+        打开时一并记下**下次探测时刻**（`REMOTE_CIRCUIT_PROBE_MINUTES`）：不留这条
+        缝，"成功一次即解除"就永远等不到那一次成功。
+        """
+        self._circuit_open.add(provider_name)
+        self._circuit_probe_at[provider_name] = now + timedelta(
+            minutes=REMOTE_CIRCUIT_PROBE_MINUTES
+        )
+        paused = connection.execute(
+            """
+            UPDATE judgment_jobs SET status='paused_auth',last_error=?
+            WHERE provider=? AND status IN ('queued','retry','queued_budget')
+            """,
+            (CIRCUIT_OPEN_REASON, provider_name),
+        ).rowcount
+        _logger.warning(
+            "远程 provider %s 连续失败 %d 次，触发熔断：冻结 %d 条排队作业"
+            "（status=paused_auth，last_error=%s）；成功一次或重新入队即解除",
+            provider_name,
+            self._failure_streak.get(provider_name, 0),
+            paused,
+            CIRCUIT_OPEN_REASON,
+        )
+        return paused
+
+    def _close_circuit(self, connection, provider_name) -> int:
+        """一次成功即解除该 provider 的熔断：计数清零 + 解冻这批作业。
+
+        **只**解冻 `last_error=CIRCUIT_OPEN_REASON` 的那批 —— 认证失败冻结的
+        （`auth_paused`）绝不放行：那是用户没配好凭据，放行就是白花钱重试。
+        """
+        was_open = provider_name in self._circuit_open
+        self._failure_streak[provider_name] = 0
+        self._circuit_open.discard(provider_name)
+        self._circuit_probe_at.pop(provider_name, None)
+        if not was_open:
+            return 0
+        resumed = connection.execute(
+            """
+            UPDATE judgment_jobs SET status='queued',last_error=''
+            WHERE provider=? AND status='paused_auth' AND last_error=?
+            """,
+            (provider_name, CIRCUIT_OPEN_REASON),
+        ).rowcount
+        _logger.warning(
+            "远程 provider %s 熔断解除：本轮有一次调用成功，解冻 %d 条排队作业",
+            provider_name,
+            resumed,
+        )
+        return resumed
 
     def remote_used_today(self) -> int:
         """公共接口：今日已实际调用的远程 AI 次数（含失败/格式错误，诊断面板用）。"""
@@ -1097,6 +1283,18 @@ class JudgmentQueue:
             if provider is None:
                 continue
             is_remote = job["provider"] != "local"
+            # 熔断已打开 ⇒ 该 provider 本轮**剩下**的作业一律不发。
+            # `rows` 是开轮时一次性取出的快照，状态还是旧的 'queued'；不显式跳过的话，
+            # 刚被 `_open_circuit` 冻结的作业会在同一轮里被继续调用 —— 熔断就白开了。
+            if is_remote and job["provider"] in self._circuit_open:
+                # 半开：冷却期过后放行**一条**探测作业，对端恢复了就有机会自愈
+                # （详见 REMOTE_CIRCUIT_PROBE_MINUTES）。放行后立刻把下次探测时刻
+                # 推后，所以一轮里最多一条、一个冷却窗口里也最多一条。
+                if now < self._circuit_probe_at.get(job["provider"], now):
+                    continue
+                self._circuit_probe_at[job["provider"]] = (
+                    now + timedelta(minutes=REMOTE_CIRCUIT_PROBE_MINUTES)
+                )
             # 远程任务数量限制
             if is_remote and remote_done >= remote_limit:
                 continue
@@ -1151,6 +1349,10 @@ class JudgmentQueue:
                         """,
                         (request_chars, _iso(now), job["job_id"]),
                     )
+                    if is_remote:
+                        # 按次记账：这次调用已经真实发生并计费
+                        self._bump_remote_usage(connection, now)
+                        self._close_circuit(connection, job["provider"])
                 summary["succeeded"] += 1
             except InvalidJudgmentError as exc:
                 # 格式错误不是瞬态错误，重试无意义——立即降级本地处理，不重试
@@ -1170,6 +1372,9 @@ class JudgmentQueue:
                         """,
                         (attempts, request_chars, _iso(now), f"invalid_output: {err_detail}", job["job_id"]),
                     )
+                    if is_remote:
+                        # 格式错误也是"请求已发出、token 已消耗"，必须计入日预算
+                        self._bump_remote_usage(connection, now)
                 summary["failed"] += 1
             except RemoteProviderError as error:
                 # API调用失败（网络/认证等），token可能已消耗也可能没有
@@ -1197,8 +1402,25 @@ class JudgmentQueue:
                             """,
                             (job["provider"], job["job_id"]),
                         )
+                        # 认证失败的这一次调用也已经发出（对端回了 401），照实计费
+                        self._bump_remote_usage(connection, now)
                     summary["failed"] += 1
                 elif is_remote and attempts < MAX_REMOTE_RETRIES:
+                    # ── 连续失败熔断（B3）─────────────────────────────────────
+                    # 非鉴权失败原本**只有逐作业退避**（15/30/60/120 分钟），没有总闸：
+                    # 对端整体不可用时，预算会被一路烧在"明知会失败"的调用上。
+                    # 连续失败达阈值 ⇒ 冻结该 provider 的**全部**排队作业并停工；
+                    # 任一作业成功即解除（见 `_close_circuit`）。
+                    provider_name = job["provider"]
+                    self._failure_streak[provider_name] = (
+                        self._failure_streak.get(provider_name, 0) + 1
+                    )
+                    if self._failure_streak[provider_name] >= REMOTE_CIRCUIT_THRESHOLD:
+                        with self.database.connect() as connection:
+                            self._bump_remote_usage(connection, now)
+                            self._open_circuit(connection, provider_name, now)
+                        summary["failed"] += 1
+                        continue
                     # 远程任务还有重试机会：指数退避后重试。
                     # 普通失败（network/timeout/http_error）是在等对端恢复，用
                     # 15/30/60/120 分钟；**429 的语义不同**——它说的是"你发太快了"，
@@ -1225,6 +1447,8 @@ class JudgmentQueue:
                                 job["job_id"],
                             ),
                         )
+                        # 重试这一次的调用同样已经发出 —— 这正是旧判据漏掉的部分
+                        self._bump_remote_usage(connection, now)
                     summary["failed"] += 1
                 else:
                     # 超过重试次数 或 本地provider出错：降级本地
@@ -1239,5 +1463,7 @@ class JudgmentQueue:
                             """,
                             (attempts, request_chars, _iso(now), error.kind, job["job_id"]),
                         )
+                        if is_remote:
+                            self._bump_remote_usage(connection, now)
                     summary["failed"] += 1
         return summary
