@@ -44,6 +44,55 @@ export async function render(root) {
     : '未启用（默认关闭）';
   const aiState = aiEnabled ? (rateLimited ? 'warn' : 'ok') : '';
 
+  // N3：远程研判真实状态条（可观测性，用户最需要的一条）。
+  // 鉴权失效 / 连不上时，应用会静默降级到本机研判，界面看起来"一切正常"，
+  // 必须把这个沉默的降级说出来。下列 ai_paused / ai_pause_reason /
+  // ai_fallback_local / ai_fallback_reason 由后端补充暴露（本批次后端尚未添加时
+  // 恒为 undefined → 这两态不触发，仍按现有字段显示，属预期占位，待后端补字段即生效）。
+  const aiPaused = Boolean(diag?.ai_paused);
+  const aiPauseReason = String(diag?.ai_pause_reason || '密钥无效，请到设置重新填写');
+  const aiFallback = Boolean(diag?.ai_fallback_local);
+  const aiFallbackReason = String(diag?.ai_fallback_reason || '未知原因');
+  const aiUsedNum = Number.isFinite(aiJobs) ? aiJobs : 0;
+  const aiLimitNum = Number.isFinite(aiBudget) ? aiBudget : 0;
+
+  let remoteState, remoteCopy, remoteTone;
+  if (aiPaused) {
+    remoteState = 'paused';
+    remoteTone = 'err';
+    remoteCopy = `已暂停（密钥失效）：${aiPauseReason}`;
+  } else if (aiFallback) {
+    remoteState = 'fallback';
+    remoteTone = 'warn';
+    remoteCopy = `暂时连不上，已改用本机研判（上次失败：${aiFallbackReason}）`;
+  } else if (aiRateLimited > 0) {
+    remoteState = 'ratelimit';
+    remoteTone = 'warn';
+    remoteCopy = `正常 · 但有限流退避：${aiRateLimited} 个远程作业在等，说明对端收得比我们发得慢`;
+  } else if (aiEnabled) {
+    remoteState = 'ok';
+    remoteTone = 'ok';
+    remoteCopy = '正常 · 远程研判在线';
+  } else {
+    remoteState = 'off';
+    remoteTone = '';
+    remoteCopy = '未启用（默认关闭）';
+  }
+  const remoteUsage = (aiEnabled || aiPaused || aiFallback)
+    ? `今天用了 ${aiUsedNum} / ${aiLimitNum} 次`
+    : '';
+  const remoteBarStyle = {
+    err: 'border-left:3px solid #d23b3b;color:#e06a6a;',
+    warn: 'border-left:3px solid #e08a2b;color:#e0a45a;',
+    ok: 'border-left:3px solid #3aa76d;color:#7ec89a;',
+    '': '',
+  }[remoteTone];
+  const remoteBarHtml = (aiEnabled || aiPaused || aiFallback)
+    ? `<div class="note remote-status-bar" style="${remoteBarStyle}">
+        <span class="rs-state">远程研判：${escapeHtml(remoteCopy)}</span>${remoteUsage ? ` <span class="rs-usage">· ${escapeHtml(remoteUsage)}</span>` : ''}
+      </div>`
+    : '';
+
   // DB 大小
   const dbBytes = Number(diag?.db_bytes);
   const dbValue = Number.isFinite(dbBytes) ? formatBytes(dbBytes) : '未知';
@@ -96,6 +145,7 @@ export async function render(root) {
       ${tileHtml({label: '趋势上升占比（rising）', value: healthValue, state: healthState, icon: 'ic_pulse'})}
       ${tileHtml({label: '证据等级分布（事件簇）', value: levelValue, state: levelState, icon: 'ic_target'})}
     </section>
+    ${remoteBarHtml}
     ${neverWarned ? `<div class="note u-mt-md">从未备份且自动备份已关闭——重要判断历史存在丢失风险，建议到设置开启自动备份。</div>` : ''}
     ${healthNote ? `<div class="note u-mt-md text-warn">${escapeHtml(healthNote)}</div>` : ''}
     ${evidenceNote ? `<div class="note u-mt-md text-warn">${escapeHtml(evidenceNote)}</div>` : ''}

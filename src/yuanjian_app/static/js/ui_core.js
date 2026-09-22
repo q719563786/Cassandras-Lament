@@ -27,6 +27,15 @@ const sourceKinds = Object.freeze({
 const regions = Object.freeze({
   heyuan: '河源', guangdong: '广东', national: '全国', global: '全球'
 });
+
+// 本地转义：ui_core 是"零 DOM、可在 Node 独立验证"的纯逻辑核心，不能反向依赖 api.js
+// （api.js 顶层引用 location/window/document，且与 ui_core 已是循环依赖）。
+// 与 api.js 的 escapeHtml 保持一致的实现，供本模块内渲染使用。
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+}
 // P4: 信源分级——T1官方源 / T2权威媒体 / T3聚合或一般 / T4未验证
 const sourceTiers = Object.freeze({
   T1: 'T1 · 官方源', T2: 'T2 · 权威媒体', T3: 'T3 · 聚合或一般', T4: 'T4 · 未验证'
@@ -171,5 +180,5 @@ export function sourceBadge(candidate) {
 // 研判来源徽标 HTML（统一渲染，配合 sourceBadge）
 export function sourceBadgeHtml(candidate) {
   const { text, tone } = sourceBadge(candidate);
-  return `<span class="judgment-source judgment-${tone}" title="${text}">${text}</span>`;
+  return `<span class="judgment-source judgment-${tone}" title="${escapeHtml(text)}">${escapeHtml(text)}</span>`;
 }

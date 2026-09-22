@@ -385,11 +385,22 @@ export async function render(root) {
 }
 
 function bindDetailActions(root, clusterId) {
-  root.addEventListener('click', async (e) => {
+  // N1 同款修复（与 today.js 同一套写法）：#view-root 是持久节点，cluster 视图每次
+  // render / 导航都会再调用本函数。旧实现每次都往同一节点挂新的 click 监听 → 监听随
+  // 进出次数线性叠加，一次点击会重复触发。改成「先按引用移除旧监听再绑定」，保证
+  // 进出 N 次后单次点击仍只触发一次。
+  if (root._clusterDetailClick) {
+    root.removeEventListener('click', root._clusterDetailClick);
+  }
+
+  const handler = async (e) => {
     const btn = e.target.closest('button[data-action="confirm-from-detail"]');
     if (!btn) return;
     const impactId = btn.dataset.impact;
     // 简化：跳转到校准面板进行确认
     location.hash = '#/calib';
-  });
+  };
+
+  root._clusterDetailClick = handler;
+  root.addEventListener('click', handler);
 }

@@ -229,7 +229,22 @@ function bindCardActions(root) {
   const existingModal = root.querySelector('.modal-backdrop');
   if (existingModal) existingModal.remove();
 
-  root.addEventListener('click', async (e) => {
+  // N1 修复：#view-root（router.js:33）是持久节点，今日页每 45s 自刷都会再调用一次本函数。
+  // 旧实现每次都往同一节点挂新的 click 监听（而且挂了两路），监听随刷新次数线性叠加，
+  // 一次点击会重复触发（confirm-prob 重复 POST / 重复 renderView）。
+  // 改成「先按引用移除上一次挂的监听，再挂新的」，并把两路 click 逻辑合并成一个 handler，
+  // 保证渲染 N 次后，单次点击依然只触发一次。按钮语义 / 忙碌态 / 禁用态均不变。
+  if (root._todayCardClick) {
+    root.removeEventListener('click', root._todayCardClick);
+  }
+
+  const handler = async (e) => {
+    // 点击遮罩关闭弹窗（合并原第二路监听）
+    if (e.target.matches('[data-role="modal-backdrop"]')) {
+      e.target.remove();
+      return;
+    }
+
     const btn = e.target.closest('button[data-action]');
     if (!btn) {
       // 点击卡片主体区域，跳转到详情页
@@ -308,14 +323,10 @@ function bindCardActions(root) {
       btn.textContent = originalText;
       alert('操作失败：' + (err.message || '未知错误'));
     }
-  });
+  };
 
-  // 点击遮罩关闭弹窗
-  root.addEventListener('click', (e) => {
-    if (e.target.matches('[data-role="modal-backdrop"]')) {
-      e.target.remove();
-    }
-  });
+  root._todayCardClick = handler;
+  root.addEventListener('click', handler);
 }
 
 // 空状态引导
