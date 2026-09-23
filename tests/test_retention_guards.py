@@ -13,10 +13,12 @@
 """
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from yuanjian_app.database import Database
 from yuanjian_app.retention import DEFAULT_CLUSTER_DAYS, RetentionService
@@ -584,6 +586,75 @@ class ThresholdGuardVisibilityTests(RetentionGuardBase):
         report = self.service.should_run_by_threshold()
 
         self.assertIn(report["largest_table_source"], {"dbstat", "estimate", "unavailable"})
+
+
+class WithoutRowidEstimateTests(RetentionGuardBase):
+    """无 dbstat 时，`WITHOUT ROWID` 表必须走"没有 rowid 就退化为前 N 行采样"这条分支。
+
+    真库里 `WITHOUT ROWID` 表为 0 ⇒ 这条分支**从来没被跑过**。而它一旦被踩到：
+    `SELECT MIN(rowid) FROM t` 会抛 `no such column: rowid`，没有退化处理就会让
+    **整张表**的估算失败 → `should_run_by_threshold()` 返回 `unavailable` →
+    「单表 > 500 MB」护栏对这张表彻底失效。那正是上一版护栏静默失效的同一个病，
+    只是换了一张表来犯。
+
+    本机很多环境是**有** dbstat 的（3.13.14 编译了 `SQLITE_ENABLE_DBSTAT_VTAB`），
+    所以这里显式把 dbstat 探测打桩成抛错，保证无论解释器如何都真的走估算路径。
+    """
+
+    PAYLOAD = "x" * 400
+
+    def _add_without_rowid_table(self, name="big_wr", rows=400):
+        with self.database.connect() as connection:
+            connection.execute(
+                "CREATE TABLE %s(id TEXT PRIMARY KEY, payload TEXT) WITHOUT ROWID" % name
+            )
+            connection.executemany(
+                "INSERT INTO %s(id,payload) VALUES (?,?)" % name,
+                [("K-%05d" % index, self.PAYLOAD) for index in range(rows)],
+            )
+
+    def _no_dbstat(self):
+        """把 dbstat 探测打桩成"没有这张虚表"——与交付环境一致。"""
+        return mock.patch.object(
+            RetentionService,
+            "_dbstat_largest_table",
+            side_effect=sqlite3.OperationalError("no such table: dbstat"),
+        )
+
+    def test_estimate_survives_a_without_rowid_table_and_is_labelled_as_estimate(self):
+        rows = 400
+        self._add_without_rowid_table(rows=rows)
+        self.add_interest()
+
+        with self._no_dbstat():
+            report = self.service.should_run_by_threshold()
+
+        # ① 没崩、也没退化成"无法判定"（`unavailable` 就是护栏对这张表失效）
+        self.assertEqual(
+            report["largest_table_source"],
+            "estimate",
+            "WITHOUT ROWID 表把估算整条路径带崩了 —— 护栏对这张表失效",
+        )
+        # ② 来源如实是估算，不伪装成精确值
+        self.assertNotEqual(report["largest_table_source"], "dbstat")
+        # ③ 认出的是这张表，且估算值落在合理区间（400 行 × ~406 字节 ≈ 162 KB）
+        self.assertEqual(report["largest_table"], "big_wr")
+        raw_bytes = rows * (len("K-00000") + len(self.PAYLOAD))
+        self.assertGreater(report["largest_bytes"], raw_bytes * 0.5)
+        self.assertLess(report["largest_bytes"], raw_bytes * 1.5)
+
+    def test_sampled_row_bytes_degrades_instead_of_raising_for_without_rowid(self):
+        """单元层：`WITHOUT ROWID` 表没有 rowid，采样必须退化而不是抛错。"""
+        self._add_without_rowid_table(name="wr_flat", rows=50)
+
+        with self.database.connect() as connection:
+            with self.assertRaises(sqlite3.Error):
+                # 前提核实：这类表确实没有 rowid（否则整条退化分支就是死代码）
+                connection.execute("SELECT MIN(rowid) FROM wr_flat").fetchone()
+            expr = RetentionService._row_byte_expr(connection, "wr_flat")
+            average = RetentionService._sampled_row_bytes(connection, "wr_flat", expr)
+
+        self.assertGreater(average, 0, "退化采样返回 0 —— 估算值会被算成 0 字节")
 
 
 if __name__ == "__main__":

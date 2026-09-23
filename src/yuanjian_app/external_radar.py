@@ -1,5 +1,7 @@
 import hashlib
 import json
+import logging
+import time
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
@@ -18,6 +20,8 @@ from .external_sources import (
     validate_public_url,
 )
 from .text_cleaning import plain_text
+
+_logger = logging.getLogger(__name__)
 
 
 REGIONS = {"heyuan", "guangdong", "national", "global"}
@@ -57,6 +61,28 @@ SITUATION_SOURCE_KIND = "geojson"
 # 2^(failures-1) 指数拉开。**不自动停用**：源仍保持 enabled，只是抓得越来越稀。
 FAILURE_BACKOFF_BASE_MINUTES = 15
 FAILURE_BACKOFF_MAX_MINUTES = 360
+
+#: 单次 `refresh_due_sources` 的**时间预算**（秒）—— 到点即停，剩余到期源留到下一轮。
+#:
+#: **为什么需要**：调度器是单线程串行（`radar_scheduler._run` 里 situation →
+#: external → cognition → … 一个接一个）。改造前 `refresh_due_sources` 会在
+#: **一次调用里**把到期源全部抓完，而冷启动时几乎所有常规源都已到期。那个窗口里
+#: 循环轮不到认知/备份，首页的只读接口也拿不到响应 —— 用户可感的说法就是
+#: **"刚开机那段时间首页不响应"**。
+#:
+#: **取值依据**（实测见 `build-artifacts/v152/c-baseline-real.txt`，真库只读）：
+#:
+#:   冷启动到期源数        35 个（隔夜 39 个 = 启用总数）
+#:   单源耗时（近 7 天）    ok  n=2701 median 2.4s / p90 5.1s / max 68.9s
+#:                          error n=255  median 4.1s / p90 14.0s / max 60.6s
+#:   ⇒ 常态一次 pass       ≈ 35 × 2.5s  ≈ **88 s**
+#:   ⇒ 病态一次 pass       ≈ 35 × 60s+  ≈ **35 min**（对端大面积 TLS/连接超时）
+#:
+#: 取 **120 s**：① 常态（88 s）仍然**一次抓完**，不为健康网络增加任何额外延迟；
+#: ② 病态最坏情况从 ~35 min 压到 ~2 min（**17 倍**），任何一次迭代都不再独占循环；
+#: ③ 与调度节奏同量级（external 轮询 30 s、cognition 300 s），不会因为预算过小
+#: 把常态也切碎成好几轮（那只会让"每个源最终都会被抓到"变慢）。
+COLLECT_PASS_BUDGET_SECONDS = 120.0
 
 
 def _failure_backoff_minutes(failures: int) -> int:
@@ -127,11 +153,23 @@ def fetch_source(source):
 
 class ExternalRadarService:
     def __init__(
-        self, database, fetcher=fetch_source, now=utc_now, on_item_stored=None
+        self,
+        database,
+        fetcher=fetch_source,
+        now=utc_now,
+        on_item_stored=None,
+        pass_budget_seconds=None,
     ):
         self.database = database
         self.fetcher = fetcher
         self.now = now
+        #: 单次采集 pass 的时间预算。`None` = 用模块默认（生产路径）；
+        #: 传具体秒数 = 固定预算（测试与嵌入式用法走这条）。
+        self.pass_budget_seconds = (
+            COLLECT_PASS_BUDGET_SECONDS
+            if pass_budget_seconds is None
+            else float(pass_budget_seconds)
+        )
         self.on_item_stored = on_item_stored
 
     def ensure_public_defaults(self):
@@ -994,6 +1032,29 @@ class ExternalRadarService:
         return self.radar_page(limit=safe_limit)["items"]
 
     def refresh_due_sources(self):
+        """抓取到期源，**单次调用不超过 `pass_budget_seconds`**；返回本轮真正抓了几个源。
+
+        返回值的含义是**本轮真正发起抓取的源数**，不是"到期源数"：两者在预算到点
+        时会不同，而任务状态里那个数字会被人读着判断"采集正常吗" —— 写"到期 35 个"
+        而实际只抓了 12 个，就是又一处安静的说谎。差额由下一步的日志如实说出。
+
+        **到点只停不丢**（这是"不许把源饿死"的全部依据）：
+
+        - 未处理的源 `next_fetch_at` **原样不动** —— 它本来就已经到期，
+          下一轮必然还在到期集合里；
+        - 已处理的源由 `refresh_source` 自己把 `next_fetch_at` 推到将来
+          （失败则按既有退避序列推到将来），于是它自然退出到期集合；
+        - 集合按 `source_id` 排序，所以每一轮都从"最旧的未处理"接着抓。
+
+        三条合起来：**每个源最终都会被抓到**，只是分摊到多轮；而任何一轮都不会
+        长时间独占调度循环。
+
+        预算约束的是**开新抓取的决策点**，不是"掐断正在途中的那次抓取"——
+        单次 HTTP 抓取没法从外面中断（那要另加线程/超时机制，本批次明确不做）。
+        所以：`已用 ≥ 预算` 时不再开新的，但**第一个源永远会开**（保证每一轮都有
+        进展，预算再小也不会陷入"永远什么都没抓"）。因此一轮的实际耗时上界是
+        `预算 + 单源上界`，不是恰好等于预算。
+        """
         due_at = iso(self.now())
         with self.database.connect() as connection:
             rows = connection.execute(
@@ -1005,9 +1066,25 @@ class ExternalRadarService:
                 """,
                 (SITUATION_SOURCE_KIND, due_at),
             ).fetchall()
+        budget = float(self.pass_budget_seconds)
+        deadline = time.monotonic() + budget
+        attempted = 0
         for row in rows:
+            # 先看表再动手：反过来（干完再看）会让每一轮都超出一整个源的耗时，
+            # 预算就不成其为预算了。`attempted` 那个条件是"至少开一次"的保证。
+            if attempted and time.monotonic() >= deadline:
+                break
             self.refresh_source(row["source_id"])
-        return len(rows)
+            attempted += 1
+        deferred = len(rows) - attempted
+        if deferred:
+            _logger.info(
+                "本轮采集到点（预算 %.0f 秒）：已抓 %d 个源，剩余 %d 个到期源留到下一轮",
+                budget,
+                attempted,
+                deferred,
+            )
+        return attempted
 
     # ── 全球态势图层（v8）：独立抓取路径 + 独立只读查询 ──────────────────
     def refresh_situation_layers(self):

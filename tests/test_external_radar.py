@@ -2,7 +2,9 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
+from yuanjian_app import external_radar
 from yuanjian_app.database import Database
 from yuanjian_app.external_radar import ExternalRadarService
 from yuanjian_app.external_sources import ExternalItem, FetchError
@@ -277,6 +279,165 @@ class ExternalRadarTests(unittest.TestCase):
         # Guangdong flipped, Heyuan untouched.
         self.assertEqual(
             rows, {"S-HY-1": True, "S-HY-2": True, "S-GD-1": False, "S-GD-2": False}
+        )
+
+
+class VirtualMonotonic:
+    """替身单调时钟：**不真睡**，每个源"开工"时把时钟推 `cost` 秒。
+
+    用虚拟耗时而不是 `time.sleep`：40 源 × 2 秒的验收用例真睡要 80 秒以上，
+    测试为了跑得快只能把预算调大 —— 那等于把要验证的东西一起关掉
+    （同一个教训见 `remote_ai.MinIntervalPacer` 那里）。
+    """
+
+    def __init__(self, cost):
+        self.now = 1000.0
+        self.cost = float(cost)
+
+    def monotonic(self):
+        return self.now
+
+    def charge(self):
+        self.now += self.cost
+
+
+class CollectPassBudgetTests(unittest.TestCase):
+    """采集**每轮时间预算**：任何一次调度迭代都不许长时间独占单线程循环。
+
+    故障现场：冷启动时几乎所有常规源都已到期，`refresh_due_sources` 在一次调用里
+    把到期源全部抓完。真库实测（`build-artifacts/v152/c-baseline-real.txt`）：
+    35 个到期源、单源中位数 2.4 s（≈88 s），但对端大面积超时时单源可达 60~69 s
+    ⇒ 最坏一次 pass ≈ 35 分钟。那段时间里循环轮不到认知/备份，首页只读接口也拿不到
+    响应 —— 用户可感的说法就是"刚开机那段时间首页不响应"。
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.database = Database(Path(self.temp_dir.name) / "yuanjian.db")
+        self.database.initialize()
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def _add_due_sources(self, count, service):
+        for index in range(count):
+            service.add_source(
+                {
+                    "source_id": "S-%03d" % index,
+                    "name": "源 %03d" % index,
+                    "kind": "rss",
+                    "endpoint": "https://example.com/%03d.xml" % index,
+                    "refresh_minutes": 15,
+                    "reliability_weight": 0.7,
+                }
+            )
+
+    def _service(self, virtual, *, seen=None, budget=None, clock=None):
+        def fetcher(source):
+            if seen is not None:
+                seen.append(source["source_id"])
+            virtual.charge()  # 每个源消耗虚拟时间，替代真睡
+            return []
+
+        return ExternalRadarService(
+            self.database,
+            fetcher=fetcher,
+            now=clock or MutableClock(),
+            pass_budget_seconds=budget,
+        )
+
+    def _due_count(self):
+        with self.database.connect() as connection:
+            return connection.execute(
+                "SELECT COUNT(*) FROM external_sources"
+                " WHERE enabled=1 AND (next_fetch_at IS NULL OR next_fetch_at<=?)",
+                (external_radar.iso(MutableClock()()),),
+            ).fetchone()[0]
+
+    def test_one_pass_never_exceeds_the_budget_and_defers_the_rest(self):
+        virtual = VirtualMonotonic(cost=5.0)
+        service = self._service(virtual)
+        self._add_due_sources(40, service)
+
+        with mock.patch.object(external_radar, "time", virtual):
+            began = virtual.monotonic()
+            attempted = service.refresh_due_sources()
+            elapsed = virtual.monotonic() - began
+
+        budget = external_radar.COLLECT_PASS_BUDGET_SECONDS
+        self.assertLessEqual(elapsed, budget, "单轮 pass 超过了时间预算")
+        self.assertEqual(attempted, int(budget // 5.0))
+        self.assertEqual(attempted, 24, "预算 120s / 单源 5s 应为 24 个")
+        # 剩下的**仍然到期**（原样不动）——留到下一轮，不是被丢掉
+        self.assertEqual(self._due_count(), 40 - attempted)
+
+    def test_repeated_passes_fetch_every_source_exactly_once(self):
+        """不许饿死任何一个源：多轮之后必须**全部**抓到，且不重复抓。"""
+        virtual = VirtualMonotonic(cost=5.0)
+        seen = []
+        service = self._service(virtual, seen=seen)
+        self._add_due_sources(40, service)
+        budget = external_radar.COLLECT_PASS_BUDGET_SECONDS
+
+        rounds = 0
+        with mock.patch.object(external_radar, "time", virtual):
+            while self._due_count():
+                rounds += 1
+                self.assertLess(rounds, 10, "预算把队列推不动了（源被饿死）")
+                began = virtual.monotonic()
+                attempted = service.refresh_due_sources()
+                self.assertLessEqual(virtual.monotonic() - began, budget)
+                self.assertGreaterEqual(attempted, 1, "空转一轮 —— 有到期源却一个都没抓")
+
+        self.assertEqual(len(seen), 40, "有源在多轮之间丢了")
+        self.assertEqual(len(set(seen)), 40, "同一个源被重复抓了")
+        self.assertEqual(rounds, 2, "40 源 / 每轮 24 个应为 2 轮")
+
+    def test_a_single_source_slower_than_the_budget_still_makes_progress(self):
+        """一个源就吃掉整个预算时，也必须**动一下**，不能空转、不能死循环。
+
+        这是"至少开一次"那条保证：预算再小，一轮也必然推进一个源。
+        """
+        virtual = VirtualMonotonic(cost=500.0)  # 单源 500s ≫ 预算 120s
+        seen = []
+        service = self._service(virtual, seen=seen)
+        self._add_due_sources(3, service)
+
+        with mock.patch.object(external_radar, "time", virtual):
+            attempted = service.refresh_due_sources()
+
+        self.assertEqual(attempted, 1)
+        self.assertEqual(seen, ["S-000"])
+
+    def test_honours_an_explicitly_injected_budget(self):
+        virtual = VirtualMonotonic(cost=2.0)
+        service = self._service(virtual, budget=10.0)
+        self._add_due_sources(40, service)
+
+        with mock.patch.object(external_radar, "time", virtual):
+            attempted = service.refresh_due_sources()
+
+        self.assertEqual(attempted, 5, "注入的预算没生效")
+
+    def test_the_shipped_budget_sits_between_the_healthy_and_the_pathological_pass(self):
+        """预算取值的依据必须写死在测试里（否则将来谁改都能自称"有依据"）。
+
+        真库实测（近 7 天 external_runs，见 c-baseline-real.txt）：
+        35 个到期源 × 单源中位数 2.5 s ≈ 88 s（常态）；单源 max 68.9 s ⇒ 病态可达
+        35 分钟。预算取 120 s：常态仍一次抓完（不增加额外延迟），病态被压到 2 分钟。
+        """
+        budget = external_radar.COLLECT_PASS_BUDGET_SECONDS
+        healthy_pass = 35 * 2.5
+        pathological_single_source = 60.0
+        pathological_pass = 35 * pathological_single_source
+
+        self.assertGreater(
+            budget, healthy_pass, "预算小于常态一次 pass：健康网络也被切碎成多轮"
+        )
+        self.assertLess(
+            budget,
+            pathological_pass / 10,
+            "预算相对病态一次 pass 太大：仍然可以独占调度循环十几分钟",
         )
 
 

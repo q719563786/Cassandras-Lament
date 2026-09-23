@@ -17,6 +17,12 @@ evidence_levels / primary_source_count / evidence_level_note
 v1.5.1 再补一个"护栏可不可信"的事实（前端按可选处理）：
 table_size_source —— 「单表 > 500 MB」护栏的逐表占用来源，dbstat=精确 / estimate=估算。
 交付环境没有 dbstat，这条护栏实际是估算值；不写出来它又会变成静默护栏。
+
+v1.5.2 再补"远程研判到底还活着吗"这一组（前端 diag.js 状态条早已写好，
+此前因为后端没这四个键而恒为 undefined，于是「已暂停」「已回退本机」两态永不显示）：
+ai_paused / ai_pause_reason / ai_fallback_local / ai_fallback_reason。
+远程失效时应用会**静默降级到本机研判**，界面看起来一切正常 —— 这正是
+"安静地坏掉"的典型，必须说出来。
 """
 
 from __future__ import annotations
@@ -24,11 +30,48 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .remote_ai import REMOTE_MIN_INTERVAL_SECONDS
 
 _logger = logging.getLogger(__name__)
+
+#: 回退本机判定用的"本轮"窗口。优先取最近一次 cognition 轮的起点；库里没有
+#: 轮记录时（刚装、还没跑过）退化成"最近这么多分钟"，避免显示好几天前的陈年回退。
+REMOTE_FALLBACK_RECENT_MINUTES = 15
+
+#: 暂停原因（**人话**，不暴露 `paused_auth` / `circuit_open` 这类内部状态名）。
+#: 认证失败优先于熔断：前者要用户动作（重填密钥），后者只需要等对端恢复。
+_PAUSE_REASON_AUTH = "API 密钥无效或已过期，请到「设置」重新填写"
+_PAUSE_REASON_CIRCUIT = "连续多次调用失败，已暂停远程研判以免继续产生费用"
+_PAUSE_REASON_UNKNOWN = "远程研判已暂停（原因未记录，可查看任务日志）"
+
+#: 回退原因（`judgment_jobs.last_error` 是 `RemoteProviderError.kind`）→ 人话。
+#: 前端会拼成「上次失败：<人话>」，所以这里必须是给用户看的词，不是 kind。
+_FALLBACK_REASONS = {
+    "network": "网络不通，连不上远程服务",
+    "timeout": "连接超时",
+    "http_error": "远程服务返回错误",
+    "rate_limit": "被对端限流",
+    "unsafe_endpoint": "端点地址不被允许外发",
+    "auth": "密钥无效",
+    "invalid_output": "返回内容无法解析",
+}
+_FALLBACK_REASON_UNKNOWN = "未知原因"
+
+
+def _parse_iso(value):
+    """解析库里的时间串（`…Z` 或带偏移），无法解析返回 None（读侧不抛）。"""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc)
 
 
 class DiagnosticsService:
@@ -58,6 +101,11 @@ class DiagnosticsService:
             "ai_daily_budget": 0,
             "ai_min_interval_seconds": float(REMOTE_MIN_INTERVAL_SECONDS),
             "ai_rate_limit_pending": 0,
+            # v1.5.2：远程研判的"暂停 / 已回退本机"两态（默认不暂停、无回退）。
+            "ai_paused": False,
+            "ai_pause_reason": "",
+            "ai_fallback_local": False,
+            "ai_fallback_reason": "",
             "db_bytes": 0,
             "last_backup": None,
             "backup_enabled": False,
@@ -91,6 +139,12 @@ class DiagnosticsService:
             payload["ai_rate_limit_pending"] = int(self._read_rate_limit_pending())
         except Exception:
             payload["ai_rate_limit_pending"] = 0
+        # v1.5.2：远程研判是不是已经"安静地坏掉了"。读失败时保持默认
+        # （False / ""），不猜 —— 猜成"已暂停"比不说更糟。
+        try:
+            payload.update(self._read_remote_health())
+        except Exception:
+            _logger.warning("诊断面板：读取远程研判暂停/回退状态失败", exc_info=True)
         try:
             payload["db_bytes"] = int(self.database.path.stat().st_size)
         except OSError:
@@ -215,6 +269,77 @@ class DiagnosticsService:
                     " WHERE provider!='local' AND status='retry' AND last_error='rate_limit'"
                 ).fetchone()[0]
             )
+
+    def _read_remote_health(self) -> dict:
+        """远程研判的两态：**暂停**（熔断中或鉴权暂停）与**本轮已回退本机**。
+
+        只用既有状态，**不新增状态机**：
+
+        - 暂停 = 存在 `status='paused_auth'` 的远程作业（鉴权失败批量冻结与
+          连续失败熔断复用同一个状态，见 `remote_ai.JudgmentQueue._open_circuit`）。
+          两种冻结靠 `last_error` 区分：`circuit_open`=熔断，
+          `auth`/`auth_paused`=密钥失效。
+        - 回退 = 最近一次 cognition 轮的窗口内出现过
+          `status='remote_error_fallback_local'` 的作业（即重试耗尽后改用本机研判）。
+
+        为什么回退要绑在"轮"上：不绑窗口的话，几天前那次一次性的连接超时会永远
+        挂在界面上，用户以为现在还是坏的 —— 一个不会自愈的告警等于噪声。
+        """
+        now = datetime.now(timezone.utc)
+        with self.database.connect() as connection:
+            pauses = connection.execute(
+                "SELECT last_error AS reason, COUNT(*) AS n FROM judgment_jobs"
+                " WHERE provider!='local' AND status='paused_auth'"
+                " GROUP BY last_error"
+            ).fetchall()
+            window_start = self._fallback_window_start(connection, now)
+            fallback = connection.execute(
+                "SELECT last_error AS reason, finished_at FROM judgment_jobs"
+                " WHERE provider!='local' AND status='remote_error_fallback_local'"
+                " ORDER BY finished_at DESC LIMIT 1"
+            ).fetchone()
+
+        reasons = {str(row["reason"] or "") for row in pauses}
+        paused = bool(reasons)
+        if reasons & {"auth", "auth_paused"}:
+            pause_reason = _PAUSE_REASON_AUTH
+        elif "circuit_open" in reasons:
+            pause_reason = _PAUSE_REASON_CIRCUIT
+        else:
+            pause_reason = _PAUSE_REASON_UNKNOWN
+
+        # 时间比大小用**解析后的 datetime**，不走 SQL 的字符串比较：`_iso()`
+        # 在整秒时会省略微秒（`…T00:00:00Z` vs `…T00:00:00.5Z`），字符串序会把
+        # 同一秒内的先后判反 —— 而这里判错的方向正是"把刚发生的回退藏起来"。
+        fallback_local = False
+        fallback_reason = ""
+        if fallback is not None:
+            finished = _parse_iso(fallback["finished_at"])
+            if finished is not None and finished >= window_start:
+                fallback_local = True
+                kind = str(fallback["reason"] or "")
+                fallback_reason = _FALLBACK_REASONS.get(kind, _FALLBACK_REASON_UNKNOWN)
+        return {
+            "ai_paused": paused,
+            "ai_pause_reason": pause_reason if paused else "",
+            # 两个不变量：为真时原因必须非空（人话），为假时原因留空。
+            "ai_fallback_local": fallback_local,
+            "ai_fallback_reason": fallback_reason,
+        }
+
+    def _fallback_window_start(self, connection, now) -> datetime:
+        """回退判定的窗口起点：最近一次 cognition 轮的起点，缺记录时退化成近期窗口。"""
+        row = connection.execute(
+            "SELECT value_json FROM runtime_state WHERE state_key='task.cognition'"
+        ).fetchone()
+        if row:
+            try:
+                started = _parse_iso(str(json.loads(row["value_json"]).get("started_at", "")))
+            except (ValueError, TypeError, AttributeError):
+                started = None
+            if started is not None:
+                return started
+        return now - timedelta(minutes=REMOTE_FALLBACK_RECENT_MINUTES)
 
     def _read_backup_enabled(self) -> bool:
         with self.database.connect() as connection:
