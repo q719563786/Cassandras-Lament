@@ -458,10 +458,20 @@ export async function render(root) {
   // 个人利益登记：列表 + 新增
   const CAT_LABELS = {health:'健康安全',cashflow:'现金流',work:'工作收入',policy:'政策权益',family:'家庭关系',assets:'资产负债',opportunity:'机会成长'};
   const interestList = root.querySelector('#interest-list');
+  // 个人利益列表渲染：interests 来自顶部 Promise.all，/api/interests 失败时已被
+  // .catch(() => null) 降级为 null。原 bug 在此对 const 重赋值（interests = {...}）
+  // 抛 "Assignment to constant variable" → render 中断 → 设置页整页崩溃。
+  // 修复：用局部变量 data 读取，绝不重赋值 const；接口失败(null)与"成功但空"( {} )
+  // 都显示占位但文案区分（失败态提示重试），让该区块"明确表现"，且任何单区块失败
+  // 都不拖垮整页。
   const paintInterests = () => {
-    if (!interests) interests = {objects: [], links: []};
-    const objs = Array.isArray(interests.objects) ? interests.objects : (interests.objects = []);
-    if (!objs.length) { interestList.innerHTML = `<p class="u-dim">暂无登记的利益对象。</p>`; return; }
+    const failed = interests == null;
+    const data = (interests && Array.isArray(interests.objects)) ? interests : {objects: [], links: []};
+    const objs = data.objects;
+    if (!objs.length) {
+      interestList.innerHTML = `<p class="u-dim">${failed ? '利益对象读取失败，稍后重试。' : '暂无登记的利益对象。'}</p>`;
+      return;
+    }
     interestList.innerHTML = objs.map(o => `<div class="src" data-int="${escapeHtml(o.object_id)}">
       <span class="name">${escapeHtml(o.name || '')}</span>
       <span class="badge">${escapeHtml(CAT_LABELS[o.category] || o.category)}</span>
@@ -480,7 +490,10 @@ export async function render(root) {
     btn.disabled = true;
     try {
       const obj = await api('/api/interests/objects', {method: 'POST', body: JSON.stringify({name, category, importance, privacy_level})});
-      const objs = Array.isArray(interests?.objects) ? interests.objects : (interests.objects = []);
+      // 初始 /api/interests 失败时 interests 为 null：这里同样不得重赋值 const，
+      // 也不得 interests.object = []（在 null 上设属性会再崩）。用局部数组兜底即可：
+      // 新登记项已落地后端，下次进入设置页会重新拉取完整列表。
+      const objs = (interests && Array.isArray(interests.objects)) ? interests.objects : [];
       if (obj?.object_id) objs.unshift(obj);
       event.target.reset();
       paintInterests();

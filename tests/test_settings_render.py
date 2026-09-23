@@ -33,7 +33,10 @@ src = src.replace(/^export\s+/gm, '');
 const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
 
 const stubs = `
-const api = async (url, opts) => (fixture[url] !== undefined ? fixture[url] : null);
+const api = async (url, opts) => {
+  if (fixture[url] === '__THROW__') throw new Error('simulated network failure for ' + url);
+  return (fixture[url] !== undefined ? fixture[url] : null);
+};
 const escapeHtml = (v) => String(v === null || v === undefined ? '' : v)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -50,6 +53,17 @@ return { render };
 
 function makeRoot() {
   let _html = '';
+  let _interestHtml = '';
+  const interestEl = {
+    addEventListener() {}, removeEventListener() {},
+    getAttribute() { return null; }, setAttribute() {},
+    querySelector() { return interestEl; }, querySelectorAll() { return []; },
+    classList: { add() {}, remove() {}, toggle() {} },
+    style: {}, dataset: {}, textContent: '', value: '',
+    appendChild() {}, remove() {}, focus() {},
+    set innerHTML(v) { _interestHtml = v; },
+    get innerHTML() { return _interestHtml; },
+  };
   const fakeEl = {
     addEventListener() {}, removeEventListener() {},
     getAttribute() { return null; }, setAttribute() {},
@@ -57,15 +71,18 @@ function makeRoot() {
     classList: { add() {}, remove() {}, toggle() {} },
     style: {}, dataset: {}, textContent: '', value: '',
     appendChild() {}, remove() {}, focus() {},
+    set innerHTML(v) {}, get innerHTML() { return ''; },
   };
   return {
     addEventListener() {}, removeEventListener() {},
-    querySelector() { return fakeEl; }, querySelectorAll() { return []; },
+    querySelector(sel) { return sel === '#interest-list' ? interestEl : fakeEl; },
+    querySelectorAll() { return []; },
     getAttribute() { return null; }, setAttribute() {},
     classList: { add() {}, remove() {}, toggle() {} },
     appendChild() {}, remove() {},
     set innerHTML(v) { _html = v; },
     get innerHTML() { return _html; },
+    _getInterestHtml() { return _interestHtml; },
   };
 }
 
@@ -77,6 +94,7 @@ const out = { ok: false };
     const root = makeRoot();
     await mod.render(root);
     out.html = root.innerHTML;
+    out.interestHtml = root._getInterestHtml();
     out.ok = true;
   } catch (error) {
     out.error = String(error && error.message ? error.message : error);
@@ -170,6 +188,96 @@ class SettingsDailyBudgetTests(unittest.TestCase):
         self.assertEqual(
             _ai_input_value(outcome["html"]), "2000",
             "兜底改回 2000 后输入框应显示 2000 —— 否则正常断言（期望 200）不会变红，探针没牙",
+        )
+
+
+class SettingsInterestBlockTests(unittest.TestCase):
+    """真跑 settings.js，验证 /api/interests 失败不再拖垮整页（v1.5.2 修复）。
+
+    原 bug：render 顶部把 interests 解构成 const，/api/interests 失败时 interests 为
+    null；paintInterests 里 `if (!interests) interests = {...}` 对 const 重赋值抛
+    "Assignment to constant variable" → render 中断 → 设置页整页崩溃。三态必须都：
+    1) render 成功（不抛异常）；2) 其余区块照常出现在 root.innerHTML；3) 兴趣区块
+    明确表现（失败态文案 / 空态文案）。
+    """
+
+    def _assert_other_blocks_present(self, html):
+        for needle in ("自动备份", "数据保留", "外部 AI", "快捷入口", "关于"):
+            self.assertIn(needle, html, f"整页渲染中断：缺少区块 {needle!r}")
+
+    def test_interests_null_shows_failure_not_crash(self):
+        """/api/interests 返回 null（接口失败）→ 显示「读取失败」占位，整页仍渲染。"""
+        fixtures = {
+            "/api/settings/backup": None,
+            "/api/settings/retention": None,
+            "/api/settings/learning": None,
+            "/api/settings/forecast-archive": None,
+            "/api/settings/ai": None,
+            "/api/interests": None,
+        }
+        outcome = _run_settings(SETTINGS_JS.read_text(encoding="utf-8"), fixtures)
+        self.assertTrue(outcome.get("ok"), f"整页崩溃：{outcome.get('errorName')}: {outcome.get('error')}")
+        self._assert_other_blocks_present(outcome["html"])
+        self.assertIn("利益对象读取失败", outcome.get("interestHtml", ""), "null 时应显示读取失败占位")
+        self.assertNotIn("Assignment to constant variable", outcome.get("error", ""))
+
+    def test_interests_empty_object_shows_no_data(self):
+        """/api/interests 返回 {}（成功但空）→ 显示「暂无登记的利益对象。」"""
+        fixtures = {
+            "/api/settings/backup": None,
+            "/api/settings/retention": None,
+            "/api/settings/learning": None,
+            "/api/settings/forecast-archive": None,
+            "/api/settings/ai": None,
+            "/api/interests": {},
+        }
+        outcome = _run_settings(SETTINGS_JS.read_text(encoding="utf-8"), fixtures)
+        self.assertTrue(outcome.get("ok"), f"整页崩溃：{outcome.get('error')}")
+        self._assert_other_blocks_present(outcome["html"])
+        self.assertIn("暂无登记的利益对象", outcome.get("interestHtml", ""), "空对象时应显示暂无数据占位")
+
+    def test_interests_throws_is_caught_not_crash(self):
+        """/api/interests 抛异常（网络错）→ .catch 降级为 null → 显示读取失败，整页仍渲染。"""
+        fixtures = {
+            "/api/settings/backup": None,
+            "/api/settings/retention": None,
+            "/api/settings/learning": None,
+            "/api/settings/forecast-archive": None,
+            "/api/settings/ai": None,
+            "/api/interests": "__THROW__",
+        }
+        outcome = _run_settings(SETTINGS_JS.read_text(encoding="utf-8"), fixtures)
+        self.assertTrue(
+            outcome.get("ok"),
+            f"异常未被 .catch 兜住，整页崩溃：{outcome.get('errorName')}: {outcome.get('error')}",
+        )
+        self._assert_other_blocks_present(outcome["html"])
+        self.assertIn("利益对象读取失败", outcome.get("interestHtml", ""), "抛异常经 .catch 降级后应显示读取失败占位")
+
+    def test_mutation_control_reassign_const_must_go_red(self):
+        """变异对照：把修复后的局部变量兜底改回「对 const 重赋值」→ 必复现常量错误 → 测试变红。"""
+        source = SETTINGS_JS.read_text(encoding="utf-8")
+        mutated = source.replace(
+            "    const failed = interests == null;\n"
+            "    const data = (interests && Array.isArray(interests.objects)) ? interests : {objects: [], links: []};",
+            "    if (!interests) interests = {objects: [], links: []};\n    const data = interests;",
+        )
+        self.assertNotEqual(mutated, source, "变异替换没生效，对照无效")
+
+        fixtures = {
+            "/api/settings/backup": None,
+            "/api/settings/retention": None,
+            "/api/settings/learning": None,
+            "/api/settings/forecast-archive": None,
+            "/api/settings/ai": None,
+            "/api/interests": None,
+        }
+        outcome = _run_settings(mutated, fixtures)
+        self.assertFalse(outcome.get("ok"), "变异对照失效：修复被撤销后 render 竟仍成功")
+        self.assertIn(
+            "Assignment to constant variable",
+            outcome.get("error", "") + outcome.get("errorName", ""),
+            "变异对照失效：未复现常量重赋值错误",
         )
 
 
