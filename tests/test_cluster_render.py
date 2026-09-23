@@ -16,7 +16,9 @@
 """
 
 import json
+import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -30,6 +32,9 @@ CLUSTER_JS = STATIC / "js" / "views" / "cluster.js"
 # 缺陷是第三波引入的；adcfd22 是第三波之前，那一版没有这个问题，
 # 拿它做对照会得到"旧版也通过"，从而误判本探针无效（我第一次就踩了这个）。
 BROKEN_REV = "dc22a18"
+
+# 真跑 JS 用的 node：优先读环境变量 NODE（CI/本地统一入口），缺省回退到 PATH 上的 node。
+NODE = os.environ.get("NODE", "node")
 
 HARNESS = r"""
 const fs = require('fs');
@@ -89,7 +94,7 @@ def _run_cluster(cluster_source: str, fixture: dict) -> dict:
     harness_path.write_text(HARNESS, encoding="utf-8")
 
     result = subprocess.run(
-        ["node", str(harness_path), str(module_path), str(fixture_path)],
+        [NODE, str(harness_path), str(module_path), str(fixture_path)],
         text=True,
         encoding="utf-8",
         capture_output=True,
@@ -337,6 +342,153 @@ class ClusterCssContractTests(unittest.TestCase):
 
         missing = sorted(cls for cls in used if cls not in defined)
         self.assertEqual(missing, [], f"这些类没有样式定义：{missing}")
+
+
+# ── N1 同款：bindDetailActions 往持久节点 #view-root 重复挂 click 监听（与 today.js 一类）──
+# 旧实现每次 render / 进出详情页都往同一持久节点挂新的 click 监听 → 监听随进出次数线性叠加，
+# 一次点击会重复触发（重复跳转校准面板）。修复：先按引用移除旧监听再绑定。
+# 这里真跑整页 render（而非只跑子渲染函数），数清楚「进出 N 次后单次点击触发几次」。
+HARNESS_LEAK = r"""
+const fs = require('fs');
+const modulePath = process.argv[2];
+const fixturePath = process.argv[3];
+let src = fs.readFileSync(modulePath, 'utf8');
+src = src.replace(/^import[^;]*;\s*$/mg, '');
+src = src.replace(/^export\s+/gm, '');
+
+const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
+
+const stubs = `
+const api = async (url, opts) => fixture;
+const escapeHtml = (v) => String(v === null || v === undefined ? '' : v)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+const showLoading = () => {};
+const showPageError = () => {};
+const alert = () => {};
+const setTimeout = () => 0;
+const document = { createElement: () => ({ set innerHTML(_v) {}, appendChild() {} }) };
+const locationHashWrites = [];
+const _location = { _hash: '#/cluster/C-1' };
+Object.defineProperty(_location, 'hash', {
+  get() { return this._hash; },
+  set(v) { if (v === '#/calib') locationHashWrites.push(v); this._hash = v; },
+});
+const location = _location;
+`;
+
+const exportsLine = `
+return { render, bindDetailActions, locationHashWrites };
+`;
+
+function makeRoot() {
+  const listeners = [];
+  return {
+    _listeners: listeners,
+    addEventListener(type, fn) { listeners.push({ type, fn }); },
+    removeEventListener(type, fn) {
+      const i = listeners.findIndex(l => l.type === type && l.fn === fn);
+      if (i >= 0) listeners.splice(i, 1);
+    },
+    querySelector() { return null; },
+    appendChild() {},
+    classList: { add() {} },
+    set innerHTML(_v) {},
+    get innerHTML() { return ''; },
+  };
+}
+function makeDetailBtn() {
+  const btn = {
+    dataset: { action: 'confirm-from-detail', impact: 'P-9', cluster: 'C-1' },
+    closest(sel) {
+      if (sel === 'button[data-action="confirm-from-detail"]') return btn;
+      return null;
+    },
+  };
+  return btn;
+}
+
+const out = { ok: false };
+(async () => {
+  try {
+    const factory = new Function('fixture', stubs + src + exportsLine);
+    const mod = factory(fixture);
+    const root = makeRoot();
+    await mod.render(root);
+    await mod.render(root);
+    await mod.render(root);
+    out.listenerCount = root._listeners.filter(l => l.type === 'click').length;
+    const btn = makeDetailBtn();
+    const ev = { target: btn, stopPropagation() {} };
+    const proms = [];
+    for (const l of root._listeners) {
+      if (l.type === 'click') proms.push(l.fn(ev));
+    }
+    await Promise.allSettled(proms);
+    out.confirmCalls = mod.locationHashWrites.length;
+    out.ok = true;
+  } catch (error) {
+    out.error = String(error && error.message ? error.message : error);
+    out.errorName = String(error && error.name ? error.name : '');
+  }
+  process.stdout.write(JSON.stringify(out));
+})();
+"""
+
+
+def _run_cluster_render(cluster_source: str, fixture: dict) -> dict:
+    """跑整页 render（含 bindDetailActions），返回监听数与点击触发数。"""
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    module_path = tmp / "cluster_under_test.js"
+    module_path.write_text(cluster_source, encoding="utf-8")
+    fixture_path = tmp / "fixture.json"
+    fixture_path.write_text(json.dumps(fixture, ensure_ascii=False), encoding="utf-8")
+    harness_path = tmp / "harness_leak.js"
+    harness_path.write_text(HARNESS_LEAK, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(harness_path), str(module_path), str(fixture_path)],
+        text=True, encoding="utf-8", capture_output=True, check=False, timeout=90,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        raise AssertionError(
+            f"node 执行失败 rc={result.returncode}\nstdout={result.stdout!r}\nstderr={result.stderr!r}"
+        )
+    return json.loads(result.stdout)
+
+
+class ClusterDetailActionListenerTests(unittest.TestCase):
+    """N1 同款：cluster 详情页进出多次后，持久节点上不应叠加 click 监听。"""
+
+    def test_render_three_times_then_one_click_fires_action_once(self):
+        outcome = _run_cluster_render(CLUSTER_JS.read_text(encoding="utf-8"), _fixture())
+        self.assertTrue(
+            outcome.get("ok"),
+            f"渲染抛异常：{outcome.get('errorName')}: {outcome.get('error')}",
+        )
+        self.assertEqual(outcome["listenerCount"], 1, "持久节点上不应叠加 click 监听")
+        self.assertEqual(outcome["confirmCalls"], 1, "一次点击不应重复跳转校准面板")
+
+    def test_mutation_control_removing_unbind_step_must_go_red(self):
+        """去掉"先移除再绑定"那一步 → 监听叠加 → 一次点击重复触发 → 测试必须变红。"""
+        source = CLUSTER_JS.read_text(encoding="utf-8")
+        mutated = re.sub(
+            r"  if \(root\._clusterDetailClick\) \{.*?root\.removeEventListener\('click', root\._clusterDetailClick\);.*?\}\n",
+            "",
+            source,
+            flags=re.S,
+        )
+        self.assertNotEqual(mutated, source, "变异替换没生效，对照无效")
+
+        outcome = _run_cluster_render(mutated, _fixture())
+        self.assertTrue(outcome.get("ok"), f"变异版渲染抛异常：{outcome.get('error')}")
+        self.assertGreater(
+            outcome["listenerCount"], 1,
+            "去掉先移除那步后，监听应当叠加（>1），否则本探针没牙",
+        )
+        self.assertGreater(
+            outcome["confirmCalls"], 1,
+            "去掉先移除那步后，一次点击应重复触发跳转（>1 次）",
+        )
 
 
 if __name__ == "__main__":

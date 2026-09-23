@@ -70,6 +70,12 @@ async function bindToggle(root, path, key, extra, options = {}) {
   });
 }
 
+// 远程 AI 每日上限的兜底值（200）来自后端默认：remote_ai 的 AiSettings 默认 200
+// （此前照免费 Agnes 端点定为 2000，已改）。改后端默认时必须同步下面三处：
+//   1) AI 表单输入框默认值（ai-daily-budget 的 value）
+//   2) 同处提示文案"默认 X"
+//   3) 提交时 budgetRaw 为空的兜底（daily_budget = Number(ai?.daily_budget ?? 200)）
+// 三处都走 `ai?.daily_budget ?? 200` —— 优先读后端返回值，读不到才用 200，绝不再写死第二份数字。
 export async function render(root) {
   // 设置端点均在开发中：逐个 catch 降级为"未知"，不阻塞页面
   const [backup, retention, learning, archive, ai, interests] = await Promise.all([
@@ -181,8 +187,8 @@ export async function render(root) {
           <div class="field u-mb-md"><label for="ai-key">API 密钥</label>
           <input id="ai-key" name="token" type="password" placeholder="留空 = 不修改已存密钥"></div>
           <div class="field u-mb-md"><label for="ai-daily-budget">远程 AI 每日上限（0–100000）</label>
-          <input id="ai-daily-budget" name="daily_budget" type="number" min="0" max="100000" required value="${escapeHtml(String(ai?.daily_budget ?? 2000))}">
-          <p class="u-dim u-mt-sm">每天最多让远程 AI 研判多少条事件；填 0 = 关闭远程，只在本机研判。默认 2000。</p></div>
+          <input id="ai-daily-budget" name="daily_budget" type="number" min="0" max="100000" required value="${escapeHtml(String(ai?.daily_budget ?? 200))}">
+          <p class="u-dim u-mt-sm">每天最多让远程 AI 研判多少条事件；填 0 = 关闭远程，只在本机研判。默认 ${escapeHtml(String(ai?.daily_budget ?? 200))}。</p></div>
           <div class="u-row u-mb-md">
             <button type="button" class="btn btn-sm btn-secondary" data-ai-preset-agnes>一键填入 Agnes AI（免费）</button>
           </div>
@@ -430,7 +436,7 @@ export async function render(root) {
     const enabled = root.querySelector('[data-ai-enabled]')?.getAttribute('aria-checked') === 'true';
     // 空值绝不能被当成 0 —— 0 的含义是"关闭远程"，静默关掉远程是危险的默认值。
     const budgetRaw = event.target.querySelector('#ai-daily-budget').value.trim();
-    const daily_budget = budgetRaw === '' ? Number(ai?.daily_budget ?? 2000) : Number(budgetRaw);
+    const daily_budget = budgetRaw === '' ? Number(ai?.daily_budget ?? 200) : Number(budgetRaw);
     // 提交体字段名与 remote_ai.AiSettingsService.save() 读取键逐一对齐
     const body = {enabled, endpoint, model, frequency: selectedFreq, daily_budget};
     if (token) body.token = token; // 留空 = 不修改已存密钥（save 仅在有 token 键时覆盖）
