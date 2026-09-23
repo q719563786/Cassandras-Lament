@@ -3,7 +3,7 @@
 > **命名口径**：对外发布用正式名 **卡珊德拉的哀歌／Cassandra's Lament**；
 > **内部代号「远见」（YuanJian）**——日常对话、代码、目录、以及程序界面里的
 > 窗口与托盘菜单，一律沿用「远见」。两者指的是同一个程序，不是两个产品。
-> 当前版本 **v1.5.1**。
+> 当前版本 **v1.5.2**。
 
 远见是一个只在 Windows 本机运行的外部认知雷达。它持续读取公开信息，把同一事件的多篇报道合并，区分单源线索与多源证据，生成结构化判断，再在本机映射到个人利益和候选预测。
 
@@ -128,16 +128,20 @@ $env:PYTHONWARNINGS='error::ResourceWarning'
 [`docs/releases/YuanJian-v1.5-verification.md`](docs/releases/YuanJian-v1.5-verification.md)
 的 **2.7 / 2.8** 与「三、已知局限」的 **第 7～9 条**。
 
-测试要求 `ResourceWarning` 视为错误。当前 **790 个测试在 `.venv-build` 上全量三轮、
+测试要求 `ResourceWarning` 视为错误。当前 **810 个测试在 `.venv-build` 上全量三轮、
 系统 `python314` 上一轮，各自全绿（skipped=3，均为既有占位）**。
 
 此外还有一批**变异对照**（把改动改坏一次，确认对应断言真的会变红）：
 本版**实测能跑**的共 **21 条**（单表护栏估算兜底 1 条 + B/C/D/E 四层护栏各 1 条 +
 `#23–#26` 与 B1/B2a/B2b/B3a/B3b/B3c 共 16 条），全部「基线绿 → 改坏变红 → 逐字节还原」。
 （历史记录里曾出现 10/10、17、「15 + 1」等口径，本版一律以**实测能跑的条数**为准。）
-**注意：这些脚本不在 `tests/` 下、也不入库，`unittest discover` 不会收集它们**
-—— 克隆仓库后随 `tests/` 能自动跑到的变异对照为 **0**。
-它们只随交付包（`build-artifacts/`）分发、由人工逐个执行。各版本的验证记录见
+**注意：v1.5.1 及更早的变异对照脚本不在 `tests/` 下、也不入库，`unittest discover` 不会收集它们**
+—— 就那批脚本而言，克隆仓库后随 `tests/` 能自动跑到的变异对照为 **0**。
+它们只随交付包（`build-artifacts/`）分发、由人工逐个执行。
+**自 v1.5.2 起，新增的变异对照已固化进 `tests/`**（设置页 `const` 重赋值、诊断页硬编码后缀、
+设置页 `?? 2000` 共 3 条），随上面那批用例一起跑、一起全绿 ⇒ **克隆仓库即可自动跑到**。
+各版本的验证记录见
+[`docs/releases/YuanJian-v1.5.2-verification.md`](docs/releases/YuanJian-v1.5.2-verification.md)、
 [`docs/releases/YuanJian-v1.5.1-verification.md`](docs/releases/YuanJian-v1.5.1-verification.md)、
 [`docs/releases/YuanJian-v1.5-verification.md`](docs/releases/YuanJian-v1.5-verification.md)、
 [`docs/releases/YuanJian-v1.4-verification.md`](docs/releases/YuanJian-v1.4-verification.md)，

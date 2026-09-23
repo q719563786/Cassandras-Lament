@@ -1,4 +1,4 @@
-// 远见 v1.5.1 · 今日远见 · 行动雷达模式
+// 远见 v1.5.2 · 今日远见 · 行动雷达模式
 // 首页 = L4 立即行动 + L3 准备观察 + 今日低后悔动作 + 预测进度 KPI + 告诉远见
 import { api, escapeHtml } from '../api.js';
 import { tellBoxHtml, bindTellBox } from './tell.js';
