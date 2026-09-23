@@ -1,17 +1,17 @@
-"""诊断页（diag.js）的**真执行**测试 —— 专门抓 N3 远程研判真实状态条。
+"""诊断页（diag.js）的**真执行**测试 —— 抓暂停态硬编码「（密钥失效）」错文案（v1.5.2）。
 
-为什么必须真执行：状态条是纯字符串拼接 + 四态分支，文本断言容易，但"去掉某一态的判断
-测试会不会变红"才是关键 —— 不在 node 里真跑一遍，无法确认这套四态逻辑真的接到了渲染出口，
-也无法确认变异对照有牙。
+后端把暂停来源分成两种并给出人话原因 ai_pause_reason：
+  - 密钥无效/过期（auth）→ 原「密钥失效」对；
+  - 连续多次调用失败触发的熔断（circuit_open）→ 「密钥失效」是错的，用户会去改没坏的密钥。
 
-本测试：
-  1) 四种状态各自的 diag 夹具下，断言状态条出现对应的**大白话**文案，且显示「今天用了 X / Y 次」；
-  2) 未启用时不显示状态条；
-  3) 变异对照：去掉「已暂停（密钥失效）」那一分支 → 暂停夹具下状态条消失 → 测试必须变红。
+本测试把 diag.js 拿到 node 里真渲染：
+  1) 熔断暂停：后端给 ai_pause_reason="连续多次调用失败，已暂停远程研判以免继续产生费用"，
+     渲染出来必须是这段后端原文，且绝不能出现硬编码后缀「（密钥失效）」；
+  2) 密钥失效暂停：后端给的原因也必须原样显示，不出现「（密钥失效）」；
+  3) 远程已关闭：ai_enabled=false 且不暂停不回退 → 整页不得出现"已暂停"；
+  4) 变异对照：把「只用后端原因」改回「硬编码（密钥失效）」→ 旧后缀复现 → 正常断言变红。
 
-注意：ai_paused / ai_pause_reason / ai_fallback_local / ai_fallback_reason 由后端补充暴露；
-本批次后端尚未添加时恒为 undefined，那两态不触发（属预期占位）。本测试直接喂这些字段，
-证明前端逻辑已就绪，后端一补字段即生效。
+其余三态（正常/限流退避/本机回退）与禁用态隐藏状态条也一并断言，防止回归。
 """
 
 import json
@@ -37,29 +37,55 @@ src = src.replace(/^export\s+/gm, '');
 
 const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
 const stubs = `
-const __diag = __DIAG_JSON__;
-const api = async () => __diag;
+const api = async (url, opts) => (fixture[url] !== undefined ? fixture[url] : null);
 const escapeHtml = (v) => String(v === null || v === undefined ? '' : v)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 const showPageError = () => {};
+const showToast = () => {};
+const alert = () => {};
+const setTimeout = () => 0;
+// diag.js 依赖的展示辅助：真库里来自 icons.js / ui_core.js，测试里给最小桩
+// （必须与 diag.js 的导入名逐字一致：camelCase）。
 const yjIcon = () => '';
-const format_bytes = (n) => String(n);
-const format_local_time = (s) => String(s || '');
+const formatBytes = (v) => String(v === null || v === undefined ? '' : v);
+const formatLocalTime = (v) => String(v === null || v === undefined ? '' : v);
+const document = { createElement: () => ({ set innerHTML(_v) {}, appendChild() {} }), getElementById: () => null };
+const location = { hash: '' };
 `;
+
 const exportsLine = `return { render };`;
-const root = {
-  _html: '',
-  set innerHTML(v) { this._html = v; },
-  get innerHTML() { return this._html; },
-};
+
+function makeRoot() {
+  let _html = '';
+  const fakeEl = {
+    addEventListener() {}, removeEventListener() {},
+    getAttribute() { return null; }, setAttribute() {},
+    querySelector() { return fakeEl; }, querySelectorAll() { return []; },
+    classList: { add() {}, remove() {}, toggle() {} },
+    style: {}, dataset: {}, textContent: '', value: '',
+    appendChild() {}, remove() {}, focus() {},
+    set innerHTML(v) {}, get innerHTML() { return ''; },
+  };
+  return {
+    addEventListener() {}, removeEventListener() {},
+    querySelector() { return fakeEl; }, querySelectorAll() { return []; },
+    getAttribute() { return null; }, setAttribute() {},
+    classList: { add() {}, remove() {}, toggle() {} },
+    appendChild() {}, remove() {},
+    set innerHTML(v) { _html = v; },
+    get innerHTML() { return _html; },
+  };
+}
+
 const out = { ok: false };
 (async () => {
   try {
-    const factory = new Function(stubs + src + exportsLine);
-    const mod = factory();
+    const factory = new Function('fixture', stubs + src + exportsLine);
+    const mod = factory(fixture);
+    const root = makeRoot();
     await mod.render(root);
-    out.html = root._html;
+    out.html = root.innerHTML;
     out.ok = true;
   } catch (error) {
     out.error = String(error && error.message ? error.message : error);
@@ -75,10 +101,9 @@ def _run_diag(source_text: str, diag: dict) -> dict:
     module_path = tmp / "diag_under_test.js"
     module_path.write_text(source_text, encoding="utf-8")
     fixture_path = tmp / "fixture.json"
-    fixture_path.write_text(json.dumps(diag, ensure_ascii=False), encoding="utf-8")
-    script = HARNESS_TEMPLATE.replace("__DIAG_JSON__", json.dumps(diag, ensure_ascii=False))
+    fixture_path.write_text(json.dumps({"/api/diagnostics": diag}, ensure_ascii=False), encoding="utf-8")
     harness_path = tmp / "harness.js"
-    harness_path.write_text(script, encoding="utf-8")
+    harness_path.write_text(HARNESS_TEMPLATE, encoding="utf-8")
     result = subprocess.run(
         [NODE, str(harness_path), str(module_path), str(fixture_path)],
         text=True, encoding="utf-8", capture_output=True, check=False, timeout=90,
@@ -90,9 +115,11 @@ def _run_diag(source_text: str, diag: dict) -> dict:
     return json.loads(result.stdout)
 
 
-@unittest.skipUnless(os.name == "nt" or True, "需要 node")
 class DiagRemoteStatusBarTests(unittest.TestCase):
-    """真跑 diag.js，验证四态状态条文案与用量显示。"""
+    """真跑 diag.js，验证四态状态条文案与用量显示（v1.5.2）。"""
+
+    CIRCUIT_REASON = "连续多次调用失败，已暂停远程研判以免继续产生费用"
+    KEY_REASON = "密钥无效或已过期，请到设置重新填写"
 
     def test_normal_state_shows_online_and_usage(self):
         outcome = _run_diag(DIAG_JS.read_text(encoding="utf-8"),
@@ -112,32 +139,47 @@ class DiagRemoteStatusBarTests(unittest.TestCase):
                              "ai_rate_limit_pending": 0, "ai_fallback_local": True, "ai_fallback_reason": "密钥无效"})
         self.assertIn("暂时连不上，已改用本机研判（上次失败：密钥无效）", outcome["html"])
 
-    def test_paused_state_says_key_invalid(self):
+    def test_paused_circuit_open_shows_backend_reason(self):
+        """熔断暂停：渲染必须是后端原文，不得出现硬编码「（密钥失效）」。"""
         outcome = _run_diag(DIAG_JS.read_text(encoding="utf-8"),
                             {"ai_enabled": True, "ai_jobs_today": 0, "ai_daily_budget": 200,
-                             "ai_rate_limit_pending": 0, "ai_paused": True, "ai_pause_reason": "密钥已过期"})
-        self.assertIn("已暂停（密钥失效）：密钥已过期", outcome["html"])
+                             "ai_rate_limit_pending": 0, "ai_paused": True, "ai_pause_reason": self.CIRCUIT_REASON})
+        self.assertTrue(outcome.get("ok"), f"渲染抛异常：{outcome.get('errorName')}: {outcome.get('error')}")
+        self.assertIn(self.CIRCUIT_REASON, outcome["html"], "熔断暂停必须原样显示后端原因")
+        self.assertNotIn("（密钥失效）", outcome["html"], "熔断场景绝不能再硬编码（密钥失效）")
 
-    def test_disabled_state_hides_status_bar(self):
+    def test_paused_key_invalid_shows_backend_reason(self):
+        """密钥失效暂停：渲染必须是后端原文，不得出现硬编码「（密钥失效）」。"""
+        outcome = _run_diag(DIAG_JS.read_text(encoding="utf-8"),
+                            {"ai_enabled": True, "ai_jobs_today": 3, "ai_daily_budget": 200,
+                             "ai_rate_limit_pending": 0, "ai_paused": True, "ai_pause_reason": self.KEY_REASON})
+        self.assertTrue(outcome.get("ok"), f"渲染抛异常：{outcome.get('error')}")
+        self.assertIn(self.KEY_REASON, outcome["html"], "密钥失效暂停必须原样显示后端原因")
+        self.assertNotIn("（密钥失效）", outcome["html"], "暂停态不得自己拼（密钥失效）后缀")
+
+    def test_remote_off_not_shown_as_paused(self):
+        """远程已关闭（用户自己关的）：整页不得出现"已暂停"，应是不启用表述。"""
         outcome = _run_diag(DIAG_JS.read_text(encoding="utf-8"),
                             {"ai_enabled": False, "ai_jobs_today": 0, "ai_daily_budget": 0, "ai_rate_limit_pending": 0})
-        self.assertNotIn("远程研判：", outcome["html"])
+        self.assertTrue(outcome.get("ok"), f"渲染抛异常：{outcome.get('error')}")
+        self.assertNotIn("已暂停", outcome["html"], "远程已关闭不得显示成已暂停")
+        self.assertIn("未启用", outcome["html"], "远程已关闭应显示未启用")
 
-    def test_mutation_control_removing_paused_branch_must_go_red(self):
-        """让「已暂停（密钥失效）」分支变成死分支（if(false)） → 暂停夹具下状态条消失 → 测试必须变红。"""
+    def test_mutation_control_hardcoded_suffix_must_go_red(self):
+        """变异对照：把「只用后端原因」改回「硬编码（密钥失效）」→ 旧后缀复现 → 正常断言变红，探针有牙。"""
         source = DIAG_JS.read_text(encoding="utf-8")
-        mutated = re.sub(r"if \(aiPaused\)", "if (false)", source)
+        mutated = source.replace(
+            "    remoteCopy = aiPauseReason;",
+            "    remoteCopy = `已暂停（密钥失效）：${aiPauseReason}`;",
+        )
         self.assertNotEqual(mutated, source, "变异替换没生效，对照无效")
 
         outcome = _run_diag(mutated,
                             {"ai_enabled": True, "ai_jobs_today": 0, "ai_daily_budget": 200,
-                             "ai_rate_limit_pending": 0, "ai_paused": True, "ai_pause_reason": "密钥已过期"})
+                             "ai_rate_limit_pending": 0, "ai_paused": True, "ai_pause_reason": self.CIRCUIT_REASON})
         self.assertTrue(outcome.get("ok"), f"变异版渲染抛异常：{outcome.get('error')}")
-        self.assertNotIn(
-            "已暂停（密钥失效）",
-            outcome["html"],
-            "去掉暂停分支后，暂停状态应不再显示 —— 否则本探针没牙",
-        )
+        # 变异版复现旧 bug：硬编码"（密钥失效）"出现 —— 正常断言（期望不含该后缀）必然变红。
+        self.assertIn("（密钥失效）", outcome["html"], "变异对照失效：未复现硬编码后缀，探针没牙")
 
 
 if __name__ == "__main__":

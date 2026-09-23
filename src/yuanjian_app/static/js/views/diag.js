@@ -49,8 +49,16 @@ export async function render(root) {
   // 必须把这个沉默的降级说出来。下列 ai_paused / ai_pause_reason /
   // ai_fallback_local / ai_fallback_reason 由后端补充暴露（本批次后端尚未添加时
   // 恒为 undefined → 这两态不触发，仍按现有字段显示，属预期占位，待后端补字段即生效）。
+  //
+  // 暂停/回退文案纪律（v1.5.2）：后端给的 ai_pause_reason / ai_fallback_reason
+  // 已经是给普通用户看的人话（例如"连续多次调用失败，已暂停远程研判以免继续产生费用"，
+  // 或"密钥无效或已过期"）。前端**只原样显示**：不做二次翻译、不拼任何后缀。
+  // 旧代码在此硬编码"（密钥失效）"——熔断(circuit_open)场景下是错的，会让用户
+  // 去改一个根本没坏的密钥。缺字段时（旧后端）按防御式读法降级，但降级文案也不带
+  // "密钥失效"这种会误导用户的硬结论。
   const aiPaused = Boolean(diag?.ai_paused);
-  const aiPauseReason = String(diag?.ai_pause_reason || '密钥无效，请到设置重新填写');
+  // 暂停原因：缺字段时降级为中性提示，绝不拼"密钥失效"后缀。
+  const aiPauseReason = String(diag?.ai_pause_reason || '远程研判已暂停，请到设置查看原因');
   const aiFallback = Boolean(diag?.ai_fallback_local);
   const aiFallbackReason = String(diag?.ai_fallback_reason || '未知原因');
   const aiUsedNum = Number.isFinite(aiJobs) ? aiJobs : 0;
@@ -60,7 +68,8 @@ export async function render(root) {
   if (aiPaused) {
     remoteState = 'paused';
     remoteTone = 'err';
-    remoteCopy = `已暂停（密钥失效）：${aiPauseReason}`;
+    // 暂停态：只显示后端给的 ai_pause_reason 原文，绝不自己拼「（密钥失效）」后缀。
+    remoteCopy = aiPauseReason;
   } else if (aiFallback) {
     remoteState = 'fallback';
     remoteTone = 'warn';
