@@ -2,7 +2,7 @@
 
 **日期**：2026-09-23
 **版本**：1.5.1（静默失败治理 + 远程付费账目纠错 + 交付环境里真能工作的单表护栏 + 首页条数回承诺 + 前端重复提交 + 图标改版）
-**分支 / 提交**：本地 `main`，顶为 `af4a1f3`（v1.5.1 七个代码提交 `90526c3`…`ba5fa4b` 加本验收文档提交，**领先远端 8 个提交**）
+**分支 / 提交**：本地 `main`，顶为 `02a2a55`（v1.5.1 八个代码提交 `90526c3`…`fcc6471` + 两份文档提交 `af4a1f3`/`02a2a55`，**领先远端 10 个提交**）
 ```
 90526c3  fix(v1.5.1): 图标改版 + 抓取层 gzip/SSL 修复 + 首页上限回归承诺
 8039395  refactor(v1.5.1): 移除 gzip 重构后的死代码
@@ -12,10 +12,12 @@ ea246ee  docs(v1.5.1): 使用说明升版 + README 补变异对照说明
 d467006  fix(v1.5.1): 修前端监听器泄漏导致的重复提交 + 转义 + 诊断页显示远程真实状态
 ba5fa4b  fix(v1.5.1): 远程付费三条 —— 预算漏算重试、默认上限 200、加连续失败熔断
 af4a1f3  docs(v1.5.1): 新增变更记录与验收文档（验收数据留空位）
+fcc6471  fix(v1.5.1): 设置页预算兜底同步后端默认 + cluster 视图补监听器泄漏测试
+02a2a55  docs(v1.5.1): 更正版本日期与分支口径
 ```
 - 与远端的核实口径（2026-09-23 实测）：远端 `main` = `3d8f1ec`（`git ls-remote origin refs/heads/main` 实测），
   即 **v1.5.0 那个提交确实已经推上去了，GitHub Release v1.5.0 也已建成**。
-  本地 `main` 现到 `af4a1f3`，**领先远端 8 个提交**，是一条**干净的快进线**。
+  本地 `main` 现到 `02a2a55`，**领先远端 10 个提交**，是一条**干净的快进线**。
   ⚠️ 本机沙箱会把 `.git/refs/remotes/**` 的写入吞掉 ⇒ 本地看不到 remote-tracking 引用、
   `main` 的配置项显示 `[origin/main: gone]`，**这是沙箱现象，不代表远端为空**
   （早期据此下的「远端根本没有这些提交」判断有误，已纠正）。
@@ -44,7 +46,7 @@ af4a1f3  docs(v1.5.1): 新增变更记录与验收文档（验收数据留空位
 | ④ 首页上限 | `/api/risk-dashboard` 由 `limit=50` 改回 **3**，并补端到端断言 | README 与使用说明都承诺「首页最多 3 条」，代码不是 ⇒ **改代码让文档成立**。此前无人守，才漂到 50 | `http_api.py:_get_risk_dashboard` |
 | ⑤ 时间列护栏统一 | A/F 两层的「仅接受 `YYYY-MM-DD T…` 形状」护栏照搬到 B/C/D/E 四层；**非标准形状一律不删** | 清理判据按**字符串字典序**比时间，而写入端有多套形状（`Z`/`+00:00`/空格/空串）；位置 10 处 `' ' < 'T'` ⇒ 该留的被删、该删的删不掉。**纯防御** | `retention.py:_iso_shaped` |
 | ⑥ 静默失败治理（主线） | purge 孤儿引用改为**写时清除**+异常入审计；关机清队列失败冻结为 `paused_shutdown`；调度器失败记**完整堆栈**；另四处静默失败可观测；修掉"两条关机用例从未被收集"的测试盲区 | 关机清队列失败会让**排队付费作业活过关机**继续花钱，而该函数的文档承诺"确保不会有新请求发出"；孤儿引用是**落库事实**，渲染时过滤会让同一行在不同页面解释不同。**均不改变业务判定** | `impacts.py` / `remote_ai.py` / `radar_scheduler.py` / `cognition.py` / `database.py` |
-| ⑦ 单表 500MB 护栏 | `dbstat` 精确优先 → 缺失则**估算** → 都失败标 `unavailable`；新增 `largest_table_source`；退化/不可用各记 warning；诊断面板新增 `table_size_source` | 交付件 `sqlite3.dll` **未编译 `dbstat`** ⇒ 该护栏在用户手上**静默失效**（既有问题，非本版引入）。见 2.7 实测表 | `retention.py:_largest_table_bytes` |
+| ⑦ 单表 500MB 护栏 | `dbstat` 精确优先 → 缺失则**估算** → 都失败标 `unavailable`；新增 `largest_table_source`；退化/不可用各记 warning；诊断面板新增 `table_size_source` | 交付件 `sqlite3.dll` **未编译 `dbstat`** ⇒ 该护栏在用户手上**静默失效**（既有问题，非本版引入）。估算误差实测见「三、已知局限」第 1 条 | `retention.py:_largest_table_bytes` |
 | ⑧ 前端重复提交 | 卡片动作绑定改为「先按引用 `removeEventListener` 再 add」；`title` 属性转义；诊断页新增**远程真实状态条** | 今日页每 45 秒自刷 ⇒ 监听器**叠加**，点一次确认会重复渲染 + 重复 POST。状态条：此前鉴权失效后程序全程本机跑，界面却看着一切正常 | `ui_core.js` / `views/today.js` / `views/cluster.js` / `views/diag.js` |
 | ⑨ 远程付费三条 | 预算改**按次记账**（5 个出口各计一次）；默认上限 **2000→200**；新增**连续失败熔断**（阈值 5）+ **半开探测**（每 15 分钟放行一条） | 预算只统计 `finished_at IS NOT NULL`，而重试分支不写该字段 ⇒ **重试完全不计入预算**，一天可发约 **2400 次**付费调用（预算写 2000）。2000 是照**免费**端点定的，对付费端点太宽松 | `remote_ai.py` |
 | ⑩ 文档 | 使用说明升版 + 「主功能导航」「通知节流」；README 钉死回归解释器并澄清变异对照不在 `tests/` 下 | 见 2.4 | `使用说明.md` / `README.md` |
@@ -56,48 +58,134 @@ af4a1f3  docs(v1.5.1): 新增变更记录与验收文档（验收数据留空位
 
 ## 二、验收数据
 
-> ⏳ **本节待第二段（代码冻结后）填入实测值。** 计划见「四、复现方式」。
+> ✅ **本节为第二段（代码冻结后）实测值**，采集于 2026-09-23，冻结基线 `02a2a55`。复现见「四、复现方式」。
 
 ### 2.1 测试
 
 ```
-（待填：`.venv-build`（打包基线，3.14.5 / SQLite 3.50.4 / 无 dbstat）全量三轮，逐轮原始输出）
-（待填：第二个解释器 `c:\python314` 的一轮原始输出）
+# 打包基线解释器（.venv-build = 3.14.5 / SQLite 3.50.4 / 无 dbstat），全量三轮：
+.\.venv-build\Scripts\python.exe -m unittest discover -s tests
+  run1   Ran 790 tests in 194.109s   OK (skipped=3)   exit=0
+  run2   Ran 790 tests in 193.042s   OK (skipped=3)   exit=0
+  run3   Ran 790 tests in 190.004s   OK (skipped=3)   exit=0
+
+# 第二个解释器（对照），各跑一次：
+c:\python314\python.exe -m unittest discover -s tests
+  run4   Ran 790 tests in 191.167s   OK (skipped=3)   exit=0
+
+（原始输出：build-artifacts/qa-logs/_sg2_run1.txt / _sg2_run2.txt / _sg2_run3.txt / _sg2_run314.txt）
 ```
 
-- 计数沿革（供第二段核对）：`734`（`90526c3`）→ `761`（`50ceb37`）→ `767`（`6922136`）→ `785`（`ba5fa4b`）
-  → **待实测**（`d467006` 新增 3 个真跑 JS 模块）。
+- 四轮一致：**790 项，skipped=3，exit=0**（skipped 三条均为既有 `BLOCKED · 架构师未落地` 留白，非本版引入）。
+- 提示：以 `PYTHONWARNINGS=error::ResourceWarning` 运行时，解释器退出阶段会打印
+  `Exception ignored ... ResourceWarning: Implicitly cleaning up <HTTPError 404: 'Not Found'>`
+  —— 它来自某个调试用 404 回显用例的**析构器**，**不影响用例结果、不改变 exit code（仍为 0）**，如实记录。
+
+- 计数沿革（实测收口）：`734`（`90526c3`）→ `761`（`50ceb37`）→ `767`（`6922136`）→ `785`（`ba5fa4b`）
+  → **`790`**（`d467006` 新增真跑 JS 模块 + `fcc6471` 补监听器泄漏测试，实测四轮一致）。
 
 ### 2.2 变异对照（证明断言有牙）
 
 ```
-（待填：逐条列出本版新增/沿用的变异对照，每条写明"改坏什么 → 哪条用例变红 → 还原后 SHA256 逐字节一致"）
+本版**实测能跑**的变异对照 = 3 个脚本、共 21 条，全部「基线绿 → 改坏变红 → 逐字节还原」：
+  · qa_mutation_dbstat.py                              1 条（删掉单表护栏的估算兜底 → 3 条用例变红）
+  · scratch-yj-20260921/mutation_retention_guard.py    4 条（B/C/D/E 四层各去掉护栏 → 只有该层变红）
+  · scratch-yj-20260921/mutation_batch2.py            16 条（#23–#26 + B1/B2a/B2b/B3a/B3b/B3c）
+全部 restored_byte_identical=True，相关源码 SHA256 与改前一致。
+原始输出：build-artifacts/qa-logs/mutation_dbstat.txt、
+build-artifacts/scratch-yj-20260921/mutation_retention_guard.txt、mutation_batch2.txt。
 ```
 
-- 已知：`50ceb37` 记录为 10/10；`ba5fa4b` 记录为 **17 条（原 11 + 新 6）**；`6922136` 新增 1 条（删掉估算兜底 → 3 条变红）。
+- **口径不调和历史数字**：历史记录里 `50ceb37` 记 10/10、`ba5fa4b` 记 17（原 11 + 新 6）、README 曾写「15 + 1」——
+  口径不一，本版一律以**实测能跑的条数**为准：**21**。另有 gzip 一项当时是**内联跑过**（无独立脚本）、
+  `qa_app_double_mutation.py` 写死了已不存在的旧解释器路径 ⇒ **不可复跑**，均不计入。
+- **不入库**：这些脚本在 `build-artifacts/` 下、不进版本库；**克隆仓库后随 `tests/` 自动可跑到的变异对照为 0**。
 
 ### 2.3 三层验证（全部在**已安装的产物**上跑）
 
 ```
-（待填：内容级 / 启动烟测 / 行为级，脚本与结果）
+【内容级】build-artifacts/lead_verify_installed_v151.py   →  exit=0
+  扫描 37 个 PYZ 模块，命中 v1.5.1 全部锚点：
+    A   _decompress_gzip / _decode_body / MAX_DECOMPRESSED_BYTES   ← external_sources
+    C   _iso_shaped                                                ← retention
+    D   _estimate_largest_table / largest_table_source              ← retention / radar_scheduler
+    E   circuit_open / REMOTE_CIRCUIT_PROBE_MINUTES / CIRCUIT_OPEN_REASON   ← remote_ai
+    ⑥   paused_shutdown                                             ← remote_ai
+    沿用 v1.5.0：parse_geojson / SituationPoint / _failure_backoff_minutes / SITUATION_KEEP_DAYS / structure_source
+  静态资源：theme-mystique.css 53519B 逐字节一致=True；ne_110m_land.geojson 138160B 逐字节一致=True；
+    版本号(JS/CSS/视图 JS) 在包内=True；旧 v1.5.0 文案已消失；主题样式表引用=True；导航入口「全球态势」=True
+  结论：安装包确实含 v1.5.1 全部改动 ✓
+
+【启动烟测·无头】YUANJIAN_HEADLESS=1 + YUANJIAN_BACKGROUND=1 + --background
+  build-artifacts/lead_smoke_v151.py   →  20/20，exit=0
+    [1] 版本号=1.5.1（进程拉起 → /api/app/version 可用：3.60s）
+    [2] /api/risk-dashboard 200，条目 3 条（≤3 为承诺）
+    [3] /api/situation/layers 200（6 图层：quake593/wildfire324/flood24/storm22/drought12/volcano6；3 源 S-GDACS/S-NASA-EONET/S-USGS-QUAKE）；
+        /api/situation/points 200 且约束完整；越界参数一律 400（hours=0 / hours=999 / limit=0 / layer=nope / bbox 反转）；
+        同源底图 /geo/ne_110m_land.geojson 200（无令牌可取），FeatureCollection，127 个面要素，138,160B
+    [4] schema_migrations=[1..8]；v8 已落库（situation_events 存在）；v7 **未被重跑**（版本行只有一条）
+    [5] 诊断面板 table_size_source='estimate'
+    [6] POST /api/shutdown → 200 {'status':'shutting_down'}；进程退出（exit code 0），无残留
+
+【行为级·临时库 + 本机回环】build-artifacts/lead_verify_v151_e2e.py   →  22/22，exit=0
+    （所有断言都从库里读回，不靠接口自述；临时库 = 不碰真库）
+    S1 结算：创建 → 单条 resolve → 批量 batch-resolve → 从库读回
+        （状态非 open、出现结案记录、resolved_by 可溯源、批量结案同样落不可撤销记录）
+    S2 开关：PUT settings/learning（关）→ runtime_state 已落为关；
+             PUT settings/backup hour=5 → 重读仍 hour=5（已持久化）
+    S3 清理：F 层按 SITUATION_KEEP_DAYS=30 清 situation_events（窗口外被删、窗口内留下、计数如实）
+    S4 时间列护栏：_iso_shaped → 非 ISO 形状一律不删（仅 ISO 形状那条进入删除候选）
+    S5 单表 500MB 护栏：无 dbstat 环境走估算，largest_table_source='estimate'
+    S6 远程付费三条常量：DAILY_REMOTE_BUDGET=200 / CIRCUIT_THRESHOLD=5 / PROBE_MIN=15 / REASON='circuit_open'
+
+（原始输出：build-artifacts/qa-logs/_sg2_verify_content.txt / _sg2_smoke.txt / _sg2_e2e_src.txt）
 ```
+
+> 说明：S1 的「结算」三接口在**临时库**上跑（自建回环服务），**未**对正在运行的真库实例发任何写请求；
+> 真库的账目/判定表在全程保持逐表未变（见 2.6）。
 
 ### 2.4 发布闸门
 
 ```
-（待填：tools/privacy_scan.py --committed 的 committed_files / safe / blocked / findings / exit）
+PYTHONPATH=src python tools/privacy_scan.py --committed
+  committed_files=155   safe=True   blocked=0   findings=0   exit=0
+（原始输出：build-artifacts/qa-logs/_sg2_privacy.txt）
 ```
+
+- 口径：`safe=True` 且 `blocked=0`、`findings=0` —— 已提交内容不含隐私/密钥命中，闸门放行。
 
 ### 2.5 构建与安装
 
 ```
-（待填：exe 路径与字节数 / exe sha256 / theme-mystique.css sha256（须与 v1.5.0 逐字节一致）/ 安装位置 / 回滚点 / 首次启动耗时）
+exe：D:\远见\程序\YuanJian.exe   6,957,232 B
+     sha256=F004DD63161DE7D3C3727B7B31036A8B3E19BEA947B2D5EDE8BB928D8EB20053
+theme-mystique.css：53519 B  sha256=17DA4778A53733206D36A024DEEBFF98D72002DECD240938BB452B1B93A44943
+     （与 v1.5.0 逐字节一致 —— 升版刻意跳过它的文件头）
+ne_110m_land.geojson：138160 B  sha256=9E0729EE253CA7D7A5C4AE9395FB1902264C5377C52E224D13DD85010E2835D9
+安装位置：D:\远见\程序（旧版改名保留为回滚点 D:\远见\程序-旧-20260923-085256）
+data-dir.txt：已恢复为 D:/远见/数据
+首次启动耗时：3.60s（进程拉起 → /api/app/version 可用）
+构建：.venv-build + PyInstaller（build/build_windows.ps1 的 spec），旧 dist 挪走不删（dist-旧-20260923-084205）
 ```
 
 ### 2.6 真实数据未被写入
 
 ```
-（待填：与升级前备份逐表比对；本版无 schema 迁移，预期"除常规采集增长外无写入"）
+与升级前逐表比对（真库 D:\远见\数据，库文件约 1.05 GB；烟测前后各取一次）
+
+· 账目 / 判定类表 —— 逐表**完全未变**（升级与烟测都没往里写，也没有触发认知）：
+    forecasts=8737   resolutions=0   forecast_versions=19400   personal_impacts=119339
+    judgments=79116  notification_log=81352   audit_log=19526
+· 仅**采集类**表增长（烟测时后台单线程正常补抓所致，非升级写入）：
+    external_items     110588 → 110673   (+85)
+    situation_events        687 →    981   (+294)
+    event_clusters        81605 →  81624   (+19)
+· schema_migrations 前后均为 [1,2,3,4,5,6,7,8]：本版无迁移、v7 **未被重跑**、v8 已在位。
+· 库文件 1,055,211,520 → 1,055,752,192 B（+540,672 B，WAL 落盘 + 采集增长）。
+
+结论：与预期一致 —— **除常规采集增长外，账目与判定表未被写入**；v1.5.1 不在真库上做任何写迁移。
+
+（原始输出：build-artifacts/qa-logs/_sg2_db_pre.txt / _sg2_db_post.txt）
 ```
 
 ---
@@ -135,11 +223,20 @@ af4a1f3  docs(v1.5.1): 新增变更记录与验收文档（验收数据留空位
 11. **诊断页「暂停 / 已回退本机」两态尚未生效**：前端逻辑已就绪，但后端尚未暴露
     `ai_paused` / `ai_pause_reason` / `ai_fallback_local` / `ai_fallback_reason` 四个字段，
     故这两态要等后端补字段后才会自动出现（当前只会显示正常 / 限流退避两态）。
-12. **`settings.js` 的输入框兜底仍写死 `?? 2000`**：与新默认 200 不一致（前端，另派）。
+12. **~~`settings.js` 的输入框兜底仍写死 `?? 2000`~~ 已修复**：在 `fcc6471` 里，
+    三处（AI 表单输入框默认值 `ai-daily-budget` 的 value、同处「默认 X」提示文案、提交时
+    `budgetRaw` 为空的兜底）全部改为「**优先读后端返回值、读不到才用 200**」
+    （`ai?.daily_budget ?? 200`），并在函数头以注释钉住「改后端默认必须同步此三处」。
+    现文件中唯一出现 `2000` 的地方是一条**说明性注释**（注明该数以前照免费端点定过）。
 13. **真库那台 `daily_budget` 仍是 2000**：它显式存过该值且端点是免费的 Agnes，**按设计不覆盖用户值**。
     要连"已存过"的一起收紧需要一次写库迁移，属产品决策，本轮不做。
 14. **首页上限改动是"回文档"而非"改文档"**：把代码从 50 改回 3。若将来产品上确实想要更多条，
     应改文档 + 改断言，而不是再让代码漂走。
+15. **`settings.js:462` 的 `const` 重赋值（记 v1.5.2）**：`interests` 在第 81 行由
+    `const [backup, retention, learning, archive, ai, interests] = await Promise.all([...])` 声明，
+    而 `paintInterests` 里写着 `if (!interests) interests = {objects: [], links: []}` ——
+    对一个 `const` 赋值，**当 `/api/interests` 读取失败（该行 `catch(() => null)` 返回 `null`）时会抛
+    `TypeError`**，可能导致整张设置页渲染中断。ES 模块为严格模式，故必抛。修法：改为局部变量或 `let`。
 
 ---
 
@@ -150,7 +247,7 @@ cd "D:\远见\源码"
 $env:PYTHONPATH='src'; $env:PYTHONWARNINGS='error::ResourceWarning'
 
 # 回归必须用打包基线解释器（原因见 README「单元测试」）：它才是交付件真正带的 SQLite
-.\.venv-build\Scripts\python.exe -m unittest discover -s tests -v     # 第一段留空，第二段填实测
+.\.venv-build\Scripts\python.exe -m unittest discover -s tests        # 全量三轮：本版四轮一致 790 OK（skipped=3）
 c:\python314\python.exe       -m unittest discover -s tests -v        # 第二个解释器，各跑一次留原始输出
 
 # 发布闸门
@@ -161,10 +258,10 @@ python build-artifacts\qa_scheme2_probe.py      # 估算误差 / 耗时 / 边界
 python build-artifacts\qa_mutation_dbstat.py    # 变异对照：删掉估算兜底 → 必须变红
 
 # 三层验证（需已安装产物 D:\远见\程序）
-python build-artifacts\lead_verify_installed_v15.py     # 内容级（需 PyInstaller 的 archive readers）
-python build-artifacts\lead_smoke_v15.py                # 启动烟测
-python build-artifacts\lead_verify_v15_e2e.py           # 行为级（须带 PYTHONPATH=src）
-python build-artifacts\qa_postinstall_150.py            # 装后与备份逐表比对
+python build-artifacts\lead_verify_installed_v151.py    # 内容级（需 PyInstaller 的 archive readers）
+python build-artifacts\lead_smoke_v151.py               # 启动烟测（无头：YUANJIAN_HEADLESS=1 + YUANJIAN_BACKGROUND=1 + --background）
+python build-artifacts\lead_verify_v151_e2e.py          # 行为级（临时库 + 回环，须带 PYTHONPATH=src）
+python build-artifacts\lead_install_round10.py          # 安装/回滚 + 装后与构建产物逐字节校验
 ```
 
 > 构建期脚本（`build-artifacts/`、`build/` 下的临时文件）未入库，与仓库既有惯例一致。
