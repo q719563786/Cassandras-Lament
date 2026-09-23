@@ -5,7 +5,7 @@
 ⇒ 「已暂停」「已回退本机」两态**永远不会显示**。而远程失效时应用会静默降级到
 本机研判、界面看起来一切正常 —— 这正是"安静地坏掉"。
 
-这里按四种情形分别断言取值：正常 / 鉴权暂停 / 熔断 / 本轮有回退。
+这里按情形分别断言取值：正常 / 鉴权暂停 / 熔断 / 本轮有回退 / **已关闭（不许报故障）**。
 """
 
 import json
@@ -29,6 +29,22 @@ class RemoteStateFieldsTests(unittest.TestCase):
         self.database.initialize()
         self.service = DiagnosticsService(self.database)
         self.now = datetime.now(timezone.utc)
+        # 默认场景：远程**开着**。暂停/回退只在这时候才该上报（关闭态单独测）。
+        self._set_remote_enabled(True)
+
+    def _set_remote_enabled(self, enabled):
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO runtime_state(state_key,value_json,updated_at)
+                VALUES ('ai_settings',?,?)
+                ON CONFLICT(state_key) DO UPDATE SET value_json=excluded.value_json
+                """,
+                (
+                    json.dumps({"enabled": bool(enabled), "daily_budget": 200}, sort_keys=True),
+                    _iso(self.now),
+                ),
+            )
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -82,8 +98,31 @@ class RemoteStateFieldsTests(unittest.TestCase):
     def test_healthy_queue_reports_neither_paused_nor_fallback(self):
         payload = self.service.snapshot()
 
+        self.assertTrue(payload["ai_enabled"])
         self.assertFalse(payload["ai_paused"])
         self.assertFalse(payload["ai_fallback_local"])
+        self._assert_reason_present(payload, "ai_paused", "ai_pause_reason")
+        self._assert_reason_present(payload, "ai_fallback_local", "ai_fallback_reason")
+
+    def test_a_disabled_remote_is_not_reported_as_paused(self):
+        """**用户自己关掉**的远程不许显示成"已暂停（密钥失效）"。
+
+        真实的坑：关闭之前留下的 `paused_auth` 残留行还在库里，不做门控的话诊断会
+        一直报故障，把用户推去修一个他故意关掉的东西。关闭态的真相是"未启用"。
+        """
+        self._job("J-auth", "paused_auth", last_error="auth")
+        self._job("J-circuit", "paused_auth", last_error="circuit_open")
+        self._cognition_round(age_minutes=1)
+        self._job("J-fallback", "remote_error_fallback_local", last_error="timeout")
+
+        self._set_remote_enabled(False)
+        payload = self.service.snapshot()
+
+        self.assertFalse(payload["ai_enabled"])
+        self.assertFalse(payload["ai_paused"], "关掉的远程被报成了故障暂停")
+        self.assertEqual(payload["ai_pause_reason"], "", "关掉的远程不该给故障原因")
+        self.assertFalse(payload["ai_fallback_local"])
+        self.assertEqual(payload["ai_fallback_reason"], "")
         self._assert_reason_present(payload, "ai_paused", "ai_pause_reason")
         self._assert_reason_present(payload, "ai_fallback_local", "ai_fallback_reason")
 
@@ -180,10 +219,12 @@ class RemoteStateFieldsTests(unittest.TestCase):
         self.assertTrue(payload["ai_fallback_reason"].strip())
 
     # ---- 契约：四个键必须始终在场 ----------------------------------------
-    def test_all_four_keys_are_always_present(self):
+    def test_all_five_keys_are_always_present(self):
         payload = self.service.snapshot()
 
         for key in (
+            # `ai_enabled` 是前端区分"用户关的"与"出故障了"的那把尺子。
+            "ai_enabled",
             "ai_paused",
             "ai_pause_reason",
             "ai_fallback_local",

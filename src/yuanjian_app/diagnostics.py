@@ -32,7 +32,7 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-from .remote_ai import REMOTE_MIN_INTERVAL_SECONDS
+from .remote_ai import REMOTE_MIN_INTERVAL_SECONDS, read_ai_setting
 
 _logger = logging.getLogger(__name__)
 
@@ -130,6 +130,14 @@ class DiagnosticsService:
             except Exception:
                 payload["ai_enabled"] = False
                 payload["ai_daily_budget"] = 0
+        else:
+            # 没注入设置服务（嵌入式/测试）时直接读**同一个落点**（`read_ai_setting`
+            # 就是设置页与队列共用的那一处）。留着它，才不会出现"诊断说没开、
+            # 队列却在发请求"这种两个真相。
+            try:
+                payload["ai_enabled"] = bool(read_ai_setting(self.database)["enabled"])
+            except Exception:
+                payload["ai_enabled"] = False
         if self.judgment_queue is not None:
             try:
                 payload["ai_jobs_today"] = int(self.judgment_queue.remote_used_today())
@@ -141,8 +149,10 @@ class DiagnosticsService:
             payload["ai_rate_limit_pending"] = 0
         # v1.5.2：远程研判是不是已经"安静地坏掉了"。读失败时保持默认
         # （False / ""），不猜 —— 猜成"已暂停"比不说更糟。
+        # 门控：这两个状态都只在**远程开着**时才有意义（`ai_enabled` 是同一份快照
+        # 里的值，不是另读一次——两个真相就会自相矛盾）。
         try:
-            payload.update(self._read_remote_health())
+            payload.update(self._read_remote_health(payload["ai_enabled"]))
         except Exception:
             _logger.warning("诊断面板：读取远程研判暂停/回退状态失败", exc_info=True)
         try:
@@ -270,8 +280,14 @@ class DiagnosticsService:
                 ).fetchone()[0]
             )
 
-    def _read_remote_health(self) -> dict:
+    def _read_remote_health(self, enabled: bool) -> dict:
         """远程研判的两态：**暂停**（熔断中或鉴权暂停）与**本轮已回退本机**。
+
+        `enabled` = 远程 AI 是否开着（同一份诊断快照里的 `ai_enabled`）。**关掉时
+        一律不报故障**：用户是自己关的，报"已暂停（密钥失效）"会把他推去修一个
+        他故意关掉的东西 —— 那是误导，不是提示。库里通常还留着关闭之前那批
+        `paused_auth` 残留行，所以这个门控不是理论问题（见
+        `tests/test_diagnostics.py` 里"已关闭且历史残留"那条）。
 
         只用既有状态，**不新增状态机**：
 
@@ -285,6 +301,15 @@ class DiagnosticsService:
         为什么回退要绑在"轮"上：不绑窗口的话，几天前那次一次性的连接超时会永远
         挂在界面上，用户以为现在还是坏的 —— 一个不会自愈的告警等于噪声。
         """
+        if not enabled:
+            # 关闭态：不说暂停、不说原因、也不说回退。前端的"未启用（默认关闭）"
+            # 那一态才是此刻的真相。
+            return {
+                "ai_paused": False,
+                "ai_pause_reason": "",
+                "ai_fallback_local": False,
+                "ai_fallback_reason": "",
+            }
         now = datetime.now(timezone.utc)
         with self.database.connect() as connection:
             pauses = connection.execute(
