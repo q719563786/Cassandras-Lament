@@ -114,7 +114,18 @@ def tearDownModule():
             handle.write("=== %s 传输层瞬时异常重试 %d 次 ===\n" % (stamp, count))
             for line in TRANSIENT_RETRIES["details"]:
                 handle.write("  %s\n" % line)
-    print("[test_http_api] 传输层瞬时异常重试次数=%d" % count)
+    try:
+        print("[test_http_api] 传输层瞬时异常重试次数=%d" % count)
+    except UnicodeEncodeError:
+        # GitHub 的 windows 运行器 stdout 是 **cp1252**，中文裸 print 会抛
+        # `UnicodeEncodeError: 'charmap' codec can't encode characters`。它发生在
+        # `tearDownModule` 里，于是**全部用例都过、却以 error 计**：
+        #     ERROR: tearDownModule (test_http_api)
+        #     Ran 823 tests ... FAILED (errors=1, skipped=4)
+        # 这条闸门从 v1.5.0 起一直红着（触发它的每一行都是同一句），而一直红着的
+        # 闸门等于没有闸门。**一行诊断不该有能力弄红发布闸门**，所以编码落不下时退化成 ASCII。
+        # 中文详情本来就写在 UTF-8 的 TRANSIENT_RETRY_REPORT 里，控制台这行只是给 CI 日志看的计数。
+        print("[test_http_api] transient-transport-retry-count=%d" % count)
 
 
 class RecordingDesktop:
