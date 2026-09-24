@@ -1,4 +1,4 @@
-// 远见 v1.5.2 · hash 路由 —— #/today #/atlas #/tell #/calib #/sources #/diag #/settings #/cluster/:id
+// 远见 v1.5.3 · hash 路由 —— #/today #/atlas #/tell #/calib #/sources #/diag #/settings #/cluster/:id
 import { showLoading, showPageError } from './api.js';
 import * as today from './views/today.js';
 import * as atlas from './views/atlas.js';

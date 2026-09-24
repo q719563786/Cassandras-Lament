@@ -1,4 +1,4 @@
-// 远见 v1.5.2 · 启动装配 —— 图标注入 → 路由 → 顶栏动作 → 智能轮询 → 安全退出
+// 远见 v1.5.3 · 启动装配 —— 图标注入 → 路由 → 顶栏动作 → 智能轮询 → 安全退出
 import { yjMountIcons } from './icons.js';
 import { api, showToast, withBusy, updateChrome } from './api.js';
 import { initRouter, renderView, currentView } from './router.js';

@@ -1,4 +1,4 @@
-// 远见 v1.5.2 · 源管理 —— 源列表 + 健康态 + 区域筛选 + CRUD + OPML 导入（AC-03/AC-04）
+// 远见 v1.5.3 · 源管理 —— 源列表 + 健康态 + 区域筛选 + CRUD + OPML 导入（AC-03/AC-04）
 import { api, escapeHtml, showToast, withBusy } from '../api.js';
 import { yjIcon } from '../icons.js';
 import { sourceKindLabel, regionLabel, categoryLabel, sourceHealthLabel, tierLabel } from '../ui_core.js';
