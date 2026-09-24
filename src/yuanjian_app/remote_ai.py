@@ -86,7 +86,52 @@ REMOTE_CIRCUIT_PROBE_MINUTES = 15
 
 #: 熔断冻结时写进 `last_error` 的原因串 —— 与 `auth_paused` 区分开：
 #: 解除时只解冻这一批，绝不误放行"认证失败"冻结的那批。
+#:
+#: 2026-09-23 起可能带后缀（`circuit_open:upstream_free_tier`），用来把
+#: "对端限流"与"网络不通"在诊断页分开说。**匹配一律用前缀**
+#: （`last_error LIKE 'circuit_open%'`），不要写等号 —— 写等号会让带后缀的
+#: 那批作业永远解不了冻，把一次限流升级成永久封死。
 CIRCUIT_OPEN_REASON = "circuit_open"
+
+REMOTE_CIRCUIT_RESUME_SPACING_SECONDS = 30.0
+"""熔断解除时，把解冻的作业按这个间隔**错峰**排回队列（秒）。
+
+没有这一条，解冻就是一次惊群：`_close_circuit` 只把状态改回 `queued`，而
+`next_attempt_at` 还停在冻结之前 —— 于是几百条作业**同时**变成"已到期"，下一轮
+`run_due` 立刻按 `remote_limit` 成批打出去。
+
+真库证据（2026-09-23）：10:41:26Z 有一次调用侥幸成功 ⇒ 熔断解除 ⇒ 256 条同时
+到期 ⇒ 35 秒内 5 条被 429 打回 ⇒ 10:42:05 熔断**再次**打开。冻结的 4 条作业
+`next_attempt_at` 恰为成功时刻 +1 分钟（429 专用退避），把这条路径钉死了。
+"偶发一次成功 → 惊群 → 立刻再熔断"就是用户看到的"频繁出问题"。
+
+30 秒是按"一轮最多消化多少条"定的：`REMOTE_SLOTS_PER_ROUND`（6）条 × 30 秒
+= 180 秒，落在认知轮周期（300 秒）以内，不会一轮压一轮。
+"""
+
+REMOTE_ROUND_TIME_BUDGET_SECONDS = 240.0
+"""单轮认知扫描里，远程请求**总时长**的预算（秒）。
+
+自适应降速之后，"本轮发几条"必须跟着间隔一起缩，否则间隔涨到 300 秒时一轮
+6 条要跑满 30 分钟 —— 调度器是**单线程**、任务串行，认知轮会把采集、态势、
+趋势一起饿死（这条在 `radar_scheduler` 里已经有前科：冷启动补抓把态势块饿到
+`last_status='never'`）。
+
+实际条数由 `run_due` 现算 `max(1, 预算 / 当前间隔)` 并**与调用方给的配额取小**：
+
+    · 基线 5 秒 → 48 条，**高于任何调用方会传的值**（`cognition` 传 6、
+      `run_due` 默认 3），所以顺境下这道闸完全不咬合 —— 它只在自适应降速
+      **之后**才起作用，不改变既有的配额语义；
+    · 40 秒     → 6 条（`cognition` 的配额，等于刚好不削）；
+    · 60 秒     → 4 条；
+    · 300 秒    → 1 条。
+
+取 240 而不是更小的值：轮周期 300 秒，留 60 秒给 bundle 构造、本地研判与其它
+调度任务。这个数**只在降速后才真的生效**，所以宁可给宽一点、别误伤顺境。
+
+**下限永远是 1**：再慢也得让一条出去，否则熔断的半开探测就永远等不到那"一次
+成功"，provider 被永久封死。
+"""
 
 
 def _usage_day(now) -> str:
@@ -125,6 +170,55 @@ REMOTE_MIN_INTERVAL_SECONDS = 5.0
 **它与 `daily_budget` 是两个正交的闸，不能互相替代**：这一道管**多快**（每分钟
 最多发几次），`daily_budget` 管**多少**（一天最多发几次）。
 """
+
+
+# ── 自适应降速（2026-09-23）───────────────────────────────────────────────
+#
+# 上面那个 5 秒是**基线**，不是"对端真正允许的速率"。2026-09-23 对 Agnes AI
+# 免费档实测（探针脚本，非推算）：
+#
+#   · 单发一次，静置两分钟后 → 200，但**耗时 11~23 秒**（对端在排队）；
+#   · 紧接着的第二、第三次 → 429，响应体明写
+#     "You've reached the API rate limit for free users. Upgrade to a Token Plan"；
+#   · 间隔 20 秒单发 6 次（= 3 RPM，只有文档标称 20 RPM 的 1/7）→ 仅 2 次 200；
+#   · 并发 4 同时发出 → 1 个 200 + 3 个 429。
+#
+# 结论：**免费档的实际放行速率约 1 次/分钟，远低于文档标称的 20 RPM**，而且
+# 拒绝是"入门即拒"（0.8~1.3 秒返回 429，不是等超时）。固定 5 秒的基线在这种
+# 对端上等于**每轮都在打 429**，于是：5 条失败 → 熔断 → 15 分钟后探一条 → 又
+# 失败 → …… 真库一天下来 12 次尝试只有 2 次成功，而每次**侥幸成功**又会触发
+# 一次惊群重放（见 `_close_circuit`）。这就是"频繁出问题"的机制本身。
+#
+# 硬编码一个更慢的基线是错的方向：对端空闲时白白牺牲吞吐，对端更严时又不够。
+# 所以改成**自适应**：429 就成倍放慢并立刻停发本轮，成功就慢慢收回来。参数在
+# 下面四条常量里，由 `MinIntervalPacer.penalize()` / `.relax()` 消费。
+REMOTE_RATE_LIMIT_MIN_INTERVAL_SECONDS = 60.0
+"""收到 429 后，相邻两次请求的间隔**至少**退到这个值（秒）。
+
+60 秒来自实测：20 秒间隔仍有 2/3 被拒，而单发一次（静置两分钟）能过。取"能过
+的那个量级"做下限，比从 5 秒开始一分一分地试要少烧十几个 429。"""
+
+REMOTE_MAX_INTERVAL_SECONDS = 300.0
+"""自适应退化的间隔**上限**（秒）= 认知轮周期。
+
+退化到这一步意味着"对端基本不可用"，此时熔断会接手（连扫 5 轮才够阈值，
+5 × 300 秒 = 25 分钟），中间不再有任何流量。上限与轮周期取同一个数，是为了让
+"一轮最多发 1 条"成为明确的兜底语义，而不是一个没人算过的中间值。"""
+
+REMOTE_INTERVAL_ESCALATION = 4.0
+"""每次 429 把间隔放大的倍数。
+
+取 4 而不是 2：从基线 5 秒出发，2 倍要 5 轮（约 25 分钟）才爬到能过的量级，
+期间每轮都烧掉一个 429；4 倍只需 3 轮（5 → 60 → 240 → 300），约 15 分钟。
+收敛快比收敛平滑更重要——每多一轮就是一次真实被拒的请求。"""
+
+REMOTE_INTERVAL_RECOVERY = 0.5
+"""每成功一次，把间隔往回收一半（下限是基线）。
+
+与放大的不对称（×4 放慢 / ×0.5 收回）是刻意的：被拒的代价是一次白烧的请求
++ 一次熔断计数，成功的代价只是慢一点，所以"惩罚要快、奖励要慢"——否则一次
+侥幸成功就把间隔打回 5 秒，下一轮又是 429，形成来回振荡。"""
+
 
 REMOTE_RATE_LIMIT_BACKOFF_MINUTES = (1, 2, 4)
 """HTTP 429（限流）专用的退避序列，按第几次尝试取值（分钟）。
@@ -183,10 +277,31 @@ class MinIntervalPacer:
 
     时钟与 sleep 都取模块级 `time`，因此测试可以用替身时钟整体替换
     （`mock.patch.object(remote_ai, "time", fake)`），不会真睡。
+
+    **自适应部分（2026-09-23 新增）**：`interval` 不再恒等于构造时给的基线，
+    而是介乎 `base` 与 `ceiling` 之间的一个可变量。对端回 429 时调
+    `penalize()` 成倍放慢，调用成功时调 `relax()` 慢慢收回。理由与实测见
+    `REMOTE_RATE_LIMIT_MIN_INTERVAL_SECONDS` 那一段。
     """
 
-    def __init__(self, interval: float = 0.0):
-        self.interval = max(0.0, float(interval))
+    def __init__(
+        self,
+        interval: float = 0.0,
+        *,
+        ceiling: float = 0.0,
+        escalation: float = 1.0,
+        recovery: float = 1.0,
+        limit_floor: float = 0.0,
+    ):
+        self.base = max(0.0, float(interval))
+        self.interval = self.base
+        #: 退化上限。不传（0）时等于基线 ⇒ 自适应整体关闭，行为与旧版一致
+        #: （这正是既有 `MinIntervalPacer(5)` 类测试仍然有效的保证）。
+        self.ceiling = max(self.base, float(ceiling))
+        self.escalation = max(1.0, float(escalation))
+        self.recovery = min(1.0, max(0.0, float(recovery)))
+        #: 429 后的间隔**下限**：一次限流就至少退到这里，不从基线一分一分地试。
+        self.limit_floor = min(self.ceiling, max(self.base, float(limit_floor)))
         self._last_at = None
         self._lock = threading.Lock()
 
@@ -203,6 +318,24 @@ class MinIntervalPacer:
                     now = time.monotonic()
             self._last_at = now
 
+    def penalize(self) -> float:
+        """对端回 429：把间隔成倍放大（并至少退到 `limit_floor`），返回新间隔。
+
+        只放大不重置 `_last_at`：刚被拒的那一次本身就是"最后一次请求"，下次
+        该等多久要从它算起，否则等于把惩罚白抹掉。
+        """
+        with self._lock:
+            target = max(self.interval * self.escalation, self.limit_floor)
+            self.interval = min(self.ceiling, target)
+            return self.interval
+
+    def relax(self) -> float:
+        """有一次调用成功：把间隔往回收（下限是基线），返回新间隔。"""
+        with self._lock:
+            if self.interval > self.base:
+                self.interval = max(self.base, self.interval * self.recovery)
+            return self.interval
+
 
 # 模块级共享节流器：**所有**远程 HTTP 请求共用一个节奏（不限 agnes 主机）。
 #
@@ -214,7 +347,43 @@ class MinIntervalPacer:
 #      测试为了跑得快只能把节流关掉——那等于把这道闸的验证一起关掉了。
 #
 # 本地研判（`LocalHeuristicProvider`）不发 HTTP，天然不受影响。
-_remote_pacer = MinIntervalPacer(REMOTE_MIN_INTERVAL_SECONDS)
+#
+# 自适应参数（2026-09-23）：基线 5 秒只是起点，真区间由对端反馈决定 —— 429 就
+# 成倍放慢到最多 `REMOTE_MAX_INTERVAL_SECONDS`，成功就慢慢收回基线。见
+# `REMOTE_RATE_LIMIT_MIN_INTERVAL_SECONDS` 的实测依据。
+#
+# **全局单例，不按 host 分桶**：本机同一时刻只会有一个远程 provider 在用
+# （`AiSettingsService.create_remote_provider` 只返回一个），所以不存在
+# "把慢档的惩罚误加到快档上"的场景。将来真要多 provider 并行，这里必须改成
+# 按 host 分桶，否则一个被限流的会被另一个的健康流量拖慢。
+_remote_pacer = MinIntervalPacer(
+    REMOTE_MIN_INTERVAL_SECONDS,
+    ceiling=REMOTE_MAX_INTERVAL_SECONDS,
+    escalation=REMOTE_INTERVAL_ESCALATION,
+    recovery=REMOTE_INTERVAL_RECOVERY,
+    limit_floor=REMOTE_RATE_LIMIT_MIN_INTERVAL_SECONDS,
+)
+
+
+def _affordable_remote_slots(remote_limit, interval=None) -> int:
+    """本轮实际能发的远程条数 = min(配额, 时间预算 / 当前间隔)，**下限恒为 1**。
+
+    见 `REMOTE_ROUND_TIME_BUDGET_SECONDS`：自适应降速把间隔拉到 300 秒之后，
+    "一轮 25 条"会变成 125 分钟的轮次，把单线程调度器里排在后面的采集与态势
+    任务饿死。下限取 1 而不是 0 —— 归零会让熔断的半开探测一起失效，对端恢复
+    了也永远试不出来。`interval` 可显式传入，测试不依赖模块级状态。
+    """
+    slots = max(1, int(remote_limit))
+    if interval is None:
+        interval = _remote_pacer.interval
+    try:
+        interval = float(interval)
+    except (TypeError, ValueError):
+        return slots
+    if interval > 0:
+        affordable = int(REMOTE_ROUND_TIME_BUDGET_SECONDS / interval)
+        slots = min(slots, max(1, affordable))
+    return slots
 
 
 def _iso(value):
@@ -284,19 +453,81 @@ def _validate_endpoint(endpoint):
     return str(endpoint)
 
 
+def _http_detail(status, body_text) -> str:
+    """从错误响应体里抽出一条**可诊断**的原因（短串，绝不含密钥）。
+
+    2026-09-23 之前这里根本没有：`_default_transport` 只取 `error.code`，把
+    **对端到底说了什么整个丢掉**。后果是 401 与 429 在库里都只剩一个词
+    （`auth` / `rate_limit`），用户只能看到"连续多次调用失败"这种话——而真正
+    的答案（"You've reached the API rate limit for free users"）就在被丢掉的那
+    段字节里。**这才是这个问题拖了这么久没被定位的原因。**
+
+    只取 `error.message`（没有就取 `message`，再没有就取原文），压成单行、
+    截断到 160 字。不做任何"猜"——对端怎么说就怎么记。
+    """
+    text = str(body_text or "").strip()
+    if not text:
+        return ""
+    message = ""
+    try:
+        payload = json.loads(text)
+    except (ValueError, TypeError):
+        payload = None
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message") or "")
+        elif isinstance(error, str):
+            message = error
+        if not message:
+            message = str(payload.get("message") or "")
+    if not message:
+        message = text
+    return " ".join(message.split())[:160]
+
+
+#: 429 里专指"免费档被限"的措辞（Agnes AI 实测响应体）。
+#: 命中的话熔断原因会带上这一层，把"对端限流"与"网络不通"在诊断页分开说 ——
+#: 前者不需要用户改任何配置，后者才需要。
+_UPSTREAM_FREE_TIER_HINTS = ("rate limit for free users", "token plan")
+
+
+def _rate_limit_scope(message) -> str:
+    """429 的细化归因：免费档被限 → 一个短标识；认不出来 → 空串。"""
+    text = str(message or "").casefold()
+    if any(hint in text for hint in _UPSTREAM_FREE_TIER_HINTS):
+        return "upstream_free_tier"
+    return ""
+
+
 class RemoteProviderError(RuntimeError):
-    def __init__(self, kind, status=None):
+    """远程调用失败。三个字段各管一件事，**不要合并**：
+
+    · `kind` —— 分派用（既有契约）：库里的 `last_error`、退避分支、诊断映射表
+      全都按它走。**细化的归因不得改动它。**
+    · `detail` —— 对端原话（`_http_detail` 抽出来的，已压成单行、截断 160 字）。
+      只进日志与界面，**不进任何被等值匹配的列**。默认空串（网络类失败没有对端
+      响应体可说）。绝不包含密钥：只取响应体，不碰请求头。
+    · `scope` —— 机器可判的**短标识**（目前只有 `upstream_free_tier`）。它是唯一
+      允许写进 `judgment_jobs.last_error` 后缀的东西：那里要的是稳定、可前缀
+      匹配的字符串，把对端原话塞进去会让匹配规则变成"看情况"。
+    """
+
+    def __init__(self, kind, status=None, detail="", scope=""):
         self.kind = str(kind)
         self.status = status
-        super().__init__(self.kind)
+        self.detail = str(detail or "")
+        self.scope = str(scope or "")
+        super().__init__(f"{self.kind}:{self.scope}" if self.scope else self.kind)
 
     @classmethod
-    def from_http(cls, status):
+    def from_http(cls, status, body_text=""):
+        message = _http_detail(status, body_text)
         if status in {401, 403}:
-            return cls("auth", status)
+            return cls("auth", status, message)
         if status == 429:
-            return cls("rate_limit", status)
-        return cls("http_error", status)
+            return cls("rate_limit", status, message, _rate_limit_scope(message))
+        return cls("http_error", status, message)
 
 
 def _result_schema():
@@ -412,7 +643,22 @@ def _default_transport(url, headers, body, timeout):
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = response.read(2_000_000)
     except urllib.error.HTTPError as error:
-        raise RemoteProviderError.from_http(error.code) from error
+        # 读错误响应体：这是**唯一**能说明"对端为什么拒"的地方，之前整段丢掉，
+        # 导致库里只剩 `rate_limit` 这种没有信息量的词（见 `_http_detail`）。
+        # 读失败也不能让原始错误被顶掉，所以整段包在 try 里。
+        try:
+            body_text = error.read(2048).decode("utf-8", "replace")
+        except Exception:
+            body_text = ""
+        failure = RemoteProviderError.from_http(error.code, body_text)
+        _logger.warning(
+            "远程请求被拒：HTTP %s kind=%s host=%s 对端说明=%s",
+            error.code,
+            failure.kind,
+            host,
+            failure.detail or "(未提供)",
+        )
+        raise failure from error
     except (urllib.error.URLError, TimeoutError, socket.timeout) as error:
         kind = "timeout" if isinstance(error, (TimeoutError, socket.timeout)) else "network"
         raise RemoteProviderError(kind) from error
@@ -519,9 +765,27 @@ class DeepSeekChatProvider:
 
     DeepSeek 不兼容 OpenAI Responses API（/v1/responses），只支持 Chat Completions。
     JSON Output 通过 response_format={"type":"json_object"} + prompt 内字段说明实现。
+
+    **名字是历史包袱**：它同时承担所有 OpenAI 兼容的 Chat 端点（DeepSeek、
+    Agnes AI、SiliconFlow……），`AiSettingsService.create_remote_provider` 按
+    端点是不是以 `/chat/completions` 结尾来选它。
     """
 
     name = "deepseek_chat"
+
+    #: 单次回复的 token 上限。**不要退回 4000**：2026-09-23 实测
+    #: `agnes-2.0-flash` 是**推理模型** —— 给它 `max_tokens=8` 时返回
+    #: `finish_reason="length"`、`content` 为空串、8 个 token 全部落在
+    #: `reasoning_content` 里。也就是说**思维链和正式输出共用这一份预算**：
+    #: 4000 被思维链吃掉一截之后，判读 JSON 就在中途断掉，
+    #: 表现成 `invalid_output`（真库 21 条：18 条"输出不是有效的研判JSON"
+    #: + 3 条"响应缺少文本内容"）。
+    #:
+    #: 取 8192 而不是更大，是为了**跨 provider 安全**：`deepseek-chat` 的
+    #: `max_tokens` 上限就是 8192，写 16000 会在换成 DeepSeek 官方端点时直接
+    #: 400。判读 JSON 本身约 1.5~2k token，8192 留了 4 倍余量，够思维链用；
+    #: 真在某家端点上还截断，改这一个数即可（错误信息会明说"输出被截断"）。
+    MAX_OUTPUT_TOKENS = 8192
 
     def __init__(
         self,
@@ -578,7 +842,7 @@ class DeepSeekChatProvider:
                 {"role": "user", "content": json.dumps(public, ensure_ascii=False)},
             ],
             "response_format": {"type": "json_object"},
-            "max_tokens": 4000,
+            "max_tokens": self.MAX_OUTPUT_TOKENS,
             "stream": False,
         }
 
@@ -591,6 +855,18 @@ class DeepSeekChatProvider:
                 content = msg.get("content")
                 if isinstance(content, str) and content.strip():
                     return content.strip()
+                # 空 content 不能笼统报"缺少文本内容" —— 那会把人引向"模型不听话"，
+                # 而真实原因几乎总是**预算被思维链吃光**（见 MAX_OUTPUT_TOKENS）。
+                # 把 finish_reason 与推理长度原样带出去，下次看一眼就懂。
+                finish = str(choices[0].get("finish_reason") or "")
+                reasoning = msg.get("reasoning_content")
+                if finish == "length" or (isinstance(reasoning, str) and reasoning.strip()):
+                    raise InvalidJudgmentError(
+                        "远程输出被截断：token 预算被推理过程占满"
+                        f"（finish_reason={finish or '未知'}，"
+                        f"推理内容 {len(reasoning or '')} 字，"
+                        f"max_tokens={DeepSeekChatProvider.MAX_OUTPUT_TOKENS}）"
+                    )
         raise InvalidJudgmentError("DeepSeek响应缺少文本内容")
 
     @staticmethod
@@ -1056,7 +1332,7 @@ class JudgmentQueue:
             },
         }
 
-    def _open_circuit(self, connection, provider_name, now) -> int:
+    def _open_circuit(self, connection, provider_name, now, *, limit_scope="") -> int:
         """连续失败达阈值：冻结该 provider 的**全部**排队作业并标注原因。
 
         复用既有 `paused_auth` 状态，**不新增状态** —— 新增一个状态就要同时改
@@ -1064,9 +1340,17 @@ class JudgmentQueue:
         那是实打实的第二套机制。区分两种冻结靠 `last_error`：
         `circuit_open`（连续失败）与 `auth_paused`（认证失败）互不相干。
 
+        `limit_scope` 非空时（目前只有 `upstream_free_tier`）把原因写成
+        `circuit_open:upstream_free_tier`：**用户什么都不用改**，等对端恢复即可；
+        不带后缀的那种更可能是网络侧问题。诊断页靠这个后缀把两种话说清楚
+        （见 `diagnostics._read_remote_health`）。匹配一律用前缀。
+
         打开时一并记下**下次探测时刻**（`REMOTE_CIRCUIT_PROBE_MINUTES`）：不留这条
         缝，"成功一次即解除"就永远等不到那一次成功。
         """
+        reason = (
+            f"{CIRCUIT_OPEN_REASON}:{limit_scope}" if limit_scope else CIRCUIT_OPEN_REASON
+        )
         self._circuit_open.add(provider_name)
         self._circuit_probe_at[provider_name] = now + timedelta(
             minutes=REMOTE_CIRCUIT_PROBE_MINUTES
@@ -1076,7 +1360,7 @@ class JudgmentQueue:
             UPDATE judgment_jobs SET status='paused_auth',last_error=?
             WHERE provider=? AND status IN ('queued','retry','queued_budget')
             """,
-            (CIRCUIT_OPEN_REASON, provider_name),
+            (reason, provider_name),
         ).rowcount
         _logger.warning(
             "远程 provider %s 连续失败 %d 次，触发熔断：冻结 %d 条排队作业"
@@ -1084,15 +1368,22 @@ class JudgmentQueue:
             provider_name,
             self._failure_streak.get(provider_name, 0),
             paused,
-            CIRCUIT_OPEN_REASON,
+            reason,
         )
         return paused
 
-    def _close_circuit(self, connection, provider_name) -> int:
-        """一次成功即解除该 provider 的熔断：计数清零 + 解冻这批作业。
+    def _close_circuit(self, connection, provider_name, now=None) -> int:
+        """一次成功即解除该 provider 的熔断：计数清零 + **错峰**解冻这批作业。
 
-        **只**解冻 `last_error=CIRCUIT_OPEN_REASON` 的那批 —— 认证失败冻结的
-        （`auth_paused`）绝不放行：那是用户没配好凭据，放行就是白花钱重试。
+        **只**解冻 `last_error` 以 `CIRCUIT_OPEN_REASON` 开头的那批 —— 认证失败
+        冻结的（`auth_paused`）绝不放行：那是用户没配好凭据，放行就是白花钱重试。
+        用前缀匹配是因为原因可能带 `:upstream_free_tier` 后缀，写等号会让那批
+        永远解不了冻（一次限流升级成永久封死）。
+
+        **错峰**（`REMOTE_CIRCUIT_RESUME_SPACING_SECONDS`）：解冻**不是**把几百条
+        一起设回"现在到期"。那样下一轮会成批打出去，几乎必然再次被 429 打回、
+        再次熔断，形成"偶发成功 → 惊群 → 立刻再熔断"的空转（真库证据见该常量）。
+        按序号往后排，一轮只消化得掉 `REMOTE_SLOTS_PER_ROUND` 条。
         """
         was_open = provider_name in self._circuit_open
         self._failure_streak[provider_name] = 0
@@ -1100,17 +1391,33 @@ class JudgmentQueue:
         self._circuit_probe_at.pop(provider_name, None)
         if not was_open:
             return 0
-        resumed = connection.execute(
+        frozen = connection.execute(
             """
-            UPDATE judgment_jobs SET status='queued',last_error=''
-            WHERE provider=? AND status='paused_auth' AND last_error=?
+            SELECT job_id FROM judgment_jobs
+            WHERE provider=? AND status='paused_auth' AND last_error LIKE ?
+            ORDER BY created_at, job_id
             """,
-            (provider_name, CIRCUIT_OPEN_REASON),
-        ).rowcount
+            (provider_name, f"{CIRCUIT_OPEN_REASON}%"),
+        ).fetchall()
+        resume_at = now or self.now()
+        for index, row in enumerate(frozen):
+            due = resume_at + timedelta(
+                seconds=index * REMOTE_CIRCUIT_RESUME_SPACING_SECONDS
+            )
+            connection.execute(
+                """
+                UPDATE judgment_jobs SET status='queued',last_error='',next_attempt_at=?
+                WHERE job_id=?
+                """,
+                (_iso(due), row["job_id"]),
+            )
+        resumed = len(frozen)
         _logger.warning(
-            "远程 provider %s 熔断解除：本轮有一次调用成功，解冻 %d 条排队作业",
+            "远程 provider %s 熔断解除：本轮有一次调用成功，解冻 %d 条排队作业"
+            "（按 %g 秒错峰排回队列，不再一次性全部到期）",
             provider_name,
             resumed,
+            REMOTE_CIRCUIT_RESUME_SPACING_SECONDS,
         )
         return resumed
 
@@ -1119,6 +1426,93 @@ class JudgmentQueue:
         now = self.now().astimezone(timezone.utc)
         with self.database.connect() as connection:
             return int(self._remote_used_today(connection, now))
+
+    def rehydrate_circuit_state(self, now=None) -> dict:
+        """启动时把"熔断曾经打开过"这件事从库里捡回来。
+
+        **不捡的后果是永久冻结。** `_circuit_open` 是**进程内**状态，重启就空；
+        而 `_close_circuit` 一进门就是 `if not was_open: return 0` —— 于是上一轮
+        熔断冻结的那批 `paused_auth`（`last_error=circuit_open%`）**永远等不到
+        解冻**，除非某个簇恰好被 `requeue_for_upgrade` 扫到。真库 2026-09-23
+        就是这样一路堆到 256 条的：重启 → 熔断状态归零 → 冻结作业无人认领 →
+        下次熔断再冻一批，只增不减。
+
+        捡回来 = 重新打开熔断：作业**继续冻结**（不白花钱），但探测窗口一过就会
+        放一条进去试，成功一次即整批错峰解冻（见 `_close_circuit`）。
+
+        **这里只恢复状态，不动作业。** 启动时把一条冻结作业放回 `queued` 看似更
+        主动，实则有坑：`shutdown()` 的"退出即取消"会 `DELETE` 所有 `queued` 的
+        远程作业（那是**有意设计**，防止退出后仍在计费），于是每重启一次就白丢
+        一条积压。放回作业的时机交给 `_promote_circuit_probe`，它只在真正要探测
+        的那一刻做，没有这个窗口。
+
+        返回 `{provider: 冻结条数}`，便于启动日志说清楚。
+        """
+        moment = (now or self.now()).astimezone(timezone.utc)
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT provider, COUNT(*) AS n FROM judgment_jobs
+                WHERE provider!='local' AND status='paused_auth' AND last_error LIKE ?
+                GROUP BY provider
+                """,
+                (f"{CIRCUIT_OPEN_REASON}%",),
+            ).fetchall()
+            resumed = {}
+            for row in rows:
+                name = row["provider"]
+                self._circuit_open.add(name)
+                self._circuit_probe_at[name] = moment + timedelta(
+                    minutes=REMOTE_CIRCUIT_PROBE_MINUTES
+                )
+                resumed[name] = int(row["n"])
+        if resumed:
+            _logger.warning(
+                "启动时发现熔断遗留的冻结作业 %s，已恢复熔断状态（每 %d 分钟放一条探测；"
+                "探测成功即整批错峰解冻）",
+                resumed,
+                REMOTE_CIRCUIT_PROBE_MINUTES,
+            )
+        return resumed
+
+    def _promote_circuit_probe(self, connection, now) -> int:
+        """给"熔断已打开、探测窗口已过、且一条到期作业都没有"的 provider 放回一条探测作业。
+
+        为什么必须显式放一条：半开探测挂在对 `run_due` **选出来的到期行**上，而冻结
+        作业全在 `paused_auth`、不在到期集合里。若某 provider 的到期集合为空
+        （整批都被冻住），探测**没有对象**，"冷却期后放一条进去试"这条自愈的缝
+        就形同不存在 —— 真库重启后正是这个状态。
+
+        只在该 provider **完全没有** `queued/retry/queued_budget` 作业时才放一条：
+        雷达随时会采到新条目、新簇入队，那些新作业本身就是天然探测对象，不需要
+        再从积压里搬一条出来（否则每次 `run_due` 都会搬，把积压一条条搬到队首）。
+        """
+        promoted = 0
+        for name in sorted(self._circuit_open):
+            due_at = self._circuit_probe_at.get(name)
+            if due_at is not None and now < due_at:
+                continue
+            probe = connection.execute(
+                """
+                SELECT job_id FROM judgment_jobs
+                WHERE provider=? AND status='paused_auth' AND last_error LIKE ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM judgment_jobs q
+                      WHERE q.provider=?
+                        AND q.status IN ('queued','retry','queued_budget')
+                  )
+                ORDER BY created_at, job_id LIMIT 1
+                """,
+                (name, f"{CIRCUIT_OPEN_REASON}%", name),
+            ).fetchone()
+            if probe is None:
+                continue
+            connection.execute(
+                "UPDATE judgment_jobs SET status='queued',next_attempt_at=? WHERE job_id=?",
+                (_iso(now), probe["job_id"]),
+            )
+            promoted += 1
+        return promoted
 
     def _current_daily_budget(self) -> int:
         """本轮生效的每日上限。构造时没给固定值就从设置现读（用户改完即时生效）。"""
@@ -1237,8 +1631,17 @@ class JudgmentQueue:
         # 远程任务最多重试3次（普通失败退避15/30/60分钟；429 走 1/2/4 分钟，
         # 见 REMOTE_RATE_LIMIT_BACKOFF_MINUTES），超过降级本地
         MAX_REMOTE_RETRIES = 4
+        # 自适应降速后，"本轮能发几条"必须跟着当前间隔一起缩 —— 否则间隔涨到
+        # 300 秒时一轮 6 条要跑满 30 分钟，把单线程调度器里的采集/态势一起饿死
+        # （理由与预算见 REMOTE_ROUND_TIME_BUDGET_SECONDS）。下限 1：再慢也得放
+        # 一条出去，否则熔断的半开探测永远等不到那"一次成功"。
+        remote_limit = _affordable_remote_slots(remote_limit)
         now = self.now().astimezone(timezone.utc)
         with self.database.connect() as connection:
+            # 半开探测要有对象：熔断打开的 provider 若一条到期作业都没有
+            # （整批都被冻在 paused_auth 里），探测就无从发生 —— 详见
+            # `_promote_circuit_probe`。必须在取 remote_rows **之前**做。
+            self._promote_circuit_probe(connection, now)
             due_sql = (
                 "status IN ('queued','retry','queued_budget')"
                 " AND (next_attempt_at IS NULL OR next_attempt_at<=?)"
@@ -1274,6 +1677,11 @@ class JudgmentQueue:
         daily_budget = self._current_daily_budget()
         summary = {"succeeded": 0, "deferred": 0, "failed": 0}
         remote_done = 0
+        # 本轮是否已"因限流停发"。429 的语义是"你发太快了"——继续把这一轮剩下的
+        # 作业发出去，只会把同一个拒绝重复 N 遍，每一次都真实计入日预算与熔断计数。
+        # 真库 2026-09-23 的现场就是这样：一次侥幸成功后连发，35 秒里吃 5 个 429。
+        # 所以**第一次 429 就停掉本轮剩下的远程作业**，本地作业照跑（不花钱）。
+        remote_halted = False
         for row in rows:
             # 每个任务处理前检查关闭标志
             if self._shutdown.is_set():
@@ -1283,6 +1691,9 @@ class JudgmentQueue:
             if provider is None:
                 continue
             is_remote = job["provider"] != "local"
+            # 本轮已被限流 ⇒ 剩下的远程作业一条都不再发（本地作业不受影响）。
+            if is_remote and remote_halted:
+                continue
             # 熔断已打开 ⇒ 该 provider 本轮**剩下**的作业一律不发。
             # `rows` 是开轮时一次性取出的快照，状态还是旧的 'queued'；不显式跳过的话，
             # 刚被 `_open_circuit` 冻结的作业会在同一轮里被继续调用 —— 熔断就白开了。
@@ -1352,7 +1763,10 @@ class JudgmentQueue:
                     if is_remote:
                         # 按次记账：这次调用已经真实发生并计费
                         self._bump_remote_usage(connection, now)
-                        self._close_circuit(connection, job["provider"])
+                        self._close_circuit(connection, job["provider"], now)
+                        # 对端这次收了 ⇒ 把自适应间隔往回收一点（`relax` 有下限，
+                        # 不会因为一次侥幸成功就一路打回基线）。
+                        _remote_pacer.relax()
                 summary["succeeded"] += 1
             except InvalidJudgmentError as exc:
                 # 格式错误不是瞬态错误，重试无意义——立即降级本地处理，不重试
@@ -1415,10 +1829,36 @@ class JudgmentQueue:
                     self._failure_streak[provider_name] = (
                         self._failure_streak.get(provider_name, 0) + 1
                     )
+                    if error.kind == "rate_limit":
+                        # 对端明确说"你发太快了"：立刻把自适应间隔成倍放慢，并**停掉
+                        # 本轮剩下的远程作业**。继续发只是把同一个拒绝重复 N 遍，
+                        # 每一次都照样计入日预算与熔断计数。
+                        _remote_pacer.penalize()
+                        remote_halted = True
+                        _logger.warning(
+                            "远程 provider %s 被限流（HTTP %s%s）：%s；已停发本轮剩余作业，"
+                            "相邻请求间隔自适应放慢到 %.0f 秒",
+                            provider_name,
+                            error.status or 429,
+                            f" {error.scope}" if error.scope else "",
+                            error.detail or "对端未说明原因",
+                            _remote_pacer.interval,
+                        )
                     if self._failure_streak[provider_name] >= REMOTE_CIRCUIT_THRESHOLD:
                         with self.database.connect() as connection:
                             self._bump_remote_usage(connection, now)
-                            self._open_circuit(connection, provider_name, now)
+                            self._open_circuit(
+                                connection,
+                                provider_name,
+                                now,
+                                # 限流引起的熔断带后缀：诊断页据此告诉用户
+                                # "对端在限流，不用改任何配置"，而不是笼统的"连续失败"。
+                                # 用 `scope`（短标识）而不是 `detail`（对端原话）——
+                                # 这一列要被前缀匹配，必须是稳定字符串。
+                                limit_scope=(
+                                    error.scope if error.kind == "rate_limit" else ""
+                                ),
+                            )
                         summary["failed"] += 1
                         continue
                     # 远程任务还有重试机会：指数退避后重试。

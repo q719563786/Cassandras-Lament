@@ -1,4 +1,5 @@
 import contextlib
+import io
 import json
 import socket
 import sqlite3
@@ -19,6 +20,7 @@ from yuanjian_app.judgments import (
 from yuanjian_app.remote_ai import (
     REMOTE_MIN_INTERVAL_SECONDS,
     REMOTE_RATE_LIMIT_BACKOFF_MINUTES,
+    DeepSeekChatProvider,
     JudgmentQueue,
     MinIntervalPacer,
     OpenAIResponsesProvider,
@@ -86,6 +88,19 @@ class MutableClock:
 
     def __call__(self):
         return self.value
+
+
+def reset_remote_pacer():
+    """把模块级自适应节流器恢复成基线状态。
+
+    `_remote_pacer` 是**模块级单例**（生产上也只有一个远程 provider 在用），
+    而"被 429 惩罚过"这件事会留在它的 `interval` 里。不重置的话，一个跑过 429
+    用例的测试会把间隔留到 60~300 秒，让**后面**的用例被
+    `_affordable_remote_slots` 削到一轮只发 1 条 —— 症状是"单跑全绿、全量跑红"，
+    这种测试顺序耦合比被测代码本身更难查。
+    """
+    remote_ai._remote_pacer.interval = remote_ai._remote_pacer.base
+    return remote_ai._remote_pacer
 
 
 class RemoteProviderTests(unittest.TestCase):
@@ -161,6 +176,138 @@ class RemoteProviderTests(unittest.TestCase):
                     provider.analyze(bundle())
                 self.assertNotIn("secret", str(context.exception))
 
+    def test_http_error_body_is_kept_and_free_tier_429_is_recognised(self):
+        """对端说的那句话必须留下来 —— 之前整段被丢掉，库里只剩 `rate_limit`。
+
+        2026-09-23 真库现场：`_default_transport` 只取 `error.code`，把
+        `{"error":{"message":"You've reached the API rate limit for free users.
+        Upgrade to a Token Plan…"}}` 整段扔了。于是诊断页只能说"连续多次调用
+        失败"，用户只能去怀疑自己的配置 —— 而答案就在被丢掉的那段字节里。
+        """
+        body = json.dumps(
+            {
+                "error": {
+                    "code": "",
+                    "message": (
+                        "You\u2019ve reached the API rate limit for free users. "
+                        "Upgrade to a Token Plan to unlock higher limits "
+                        "and continue using the API without interruption."
+                    ),
+                    "type": "AgnesAI_error",
+                }
+            }
+        )
+        failure = RemoteProviderError.from_http(429, body)
+        self.assertEqual(failure.kind, "rate_limit", "kind 是既有契约，不能被细化改掉")
+        self.assertEqual(failure.scope, "upstream_free_tier")
+        self.assertIn(
+            "rate limit for free users",
+            failure.detail,
+            "对端原话被丢掉了 —— 那样库里又只剩一个没有信息量的词",
+        )
+        self.assertNotIn("secret", str(failure))
+
+        # 普通 429（对端没提免费档）不硬安一个归因，但原话要留着
+        plain = RemoteProviderError.from_http(429, '{"error":{"message":"slow down"}}')
+        self.assertEqual(plain.scope, "")
+        self.assertIn("slow down", plain.detail)
+
+        # 无响应体时也不能炸
+        self.assertEqual(
+            RemoteProviderError.from_http(429, "").scope, ""
+        )
+        self.assertEqual(
+            RemoteProviderError.from_http(500, "<html>bad gateway</html>").kind,
+            "http_error",
+        )
+
+    def test_the_transport_keeps_the_upstream_reason_from_the_error_body(self):
+        """传输层必须把错误响应体读出来 —— 那是"对端为什么拒"的唯一来源。
+
+        这一条补的是一个**真实存在过的空缺**：`from_http` 单测得再细，也测不到
+        "传输层到底有没有把 body 交给它"。2026-09-23 之前 `_default_transport` 只取
+        `error.code`，把 `{"error":{"message":"You've reached the API rate limit for
+        free users…"}}` 整段扔掉 —— 库里于是只剩 `rate_limit` 这种没有信息量的词，
+        诊断页只能写"连续多次调用失败"，用户只能去怀疑自己的配置。
+
+        **变异对照**：把 `RemoteProviderError.from_http(error.code, body_text)`
+        改回 `from_http(error.code)`，下面的 `detail` 断言必红。
+        """
+        body = json.dumps(
+            {
+                "error": {
+                    "message": "You've reached the API rate limit for free users. "
+                    "Upgrade to a Token Plan to unlock higher limits."
+                }
+            }
+        ).encode("utf-8")
+        error = urllib.error.HTTPError(
+            "https://api.example/v1/chat/completions",
+            429,
+            "Too Many Requests",
+            {},
+            io.BytesIO(body),
+        )
+        public = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+        with mock.patch.object(remote_ai._remote_pacer, "wait", lambda *a, **k: None), (
+            mock.patch.object(remote_ai.socket, "getaddrinfo", lambda *a, **k: public)
+        ), mock.patch.object(
+            remote_ai.urllib.request, "urlopen", side_effect=error
+        ):
+            with self.assertRaises(RemoteProviderError) as caught:
+                remote_ai._default_transport("https://api.example/v1", {}, {}, 5)
+
+        self.assertEqual(caught.exception.kind, "rate_limit")
+        self.assertEqual(caught.exception.scope, "upstream_free_tier")
+        self.assertIn(
+            "rate limit for free users",
+            caught.exception.detail,
+            "传输层没有把错误响应体读出来 —— 对端原话又丢了",
+        )
+
+    def test_reasoning_budget_exhausted_is_reported_as_truncation(self):
+        """推理模型把预算烧在思维链上时，报错必须说"被截断"，不能说"缺少文本内容"。
+
+        真库 21 条 `invalid_output` 里那 3 条"响应缺少文本内容"就是这个形态：
+        实测 `agnes-2.0-flash` 给 `max_tokens=8` 时返回 `finish_reason="length"`、
+        `content` 是空串、token 全在 `reasoning_content` 里。旧提示把原因说成
+        "模型没给文本"，读的人会去怀疑模型不听话，方向完全错。
+        """
+        provider = DeepSeekChatProvider(
+            model="agnes-2.0-flash",
+            token_loader=lambda: "secret",
+            transport=lambda *args: {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"content": "", "reasoning_content": "先分析事实…"},
+                    }
+                ]
+            },
+        )
+        with self.assertRaisesRegex(InvalidJudgmentError, "截断"):
+            provider.analyze(bundle())
+
+    def test_chat_provider_asks_for_enough_output_tokens_for_a_reasoning_model(self):
+        """判读 JSON + 思维链共用一份预算，4000 在推理模型上会被截断。"""
+        captured = {}
+        provider = DeepSeekChatProvider(
+            model="m",
+            token_loader=lambda: "secret",
+            transport=lambda url, headers, body, timeout: captured.update(body=body)
+            or {"choices": [{"message": {"content": "{}"}}]},
+        )
+        with contextlib.suppress(InvalidJudgmentError):
+            provider.analyze(bundle())
+        self.assertEqual(
+            captured["body"]["max_tokens"], DeepSeekChatProvider.MAX_OUTPUT_TOKENS
+        )
+        self.assertGreaterEqual(
+            DeepSeekChatProvider.MAX_OUTPUT_TOKENS,
+            8192,
+            "预算退回 4000 量级会让推理模型的判读 JSON 中途断掉",
+        )
+
 
 class FakeProvider:
     def __init__(self, action=None, model="fake-model"):
@@ -181,6 +328,7 @@ class JudgmentQueueTests(unittest.TestCase):
         self.database = Database(Path(self.temporary.name) / "yuanjian.db")
         self.database.initialize()
         self.clock = MutableClock()
+        reset_remote_pacer()
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -213,6 +361,11 @@ class JudgmentQueueTests(unittest.TestCase):
         了"：把它推到 +15 分钟只会和积压的作业一起到期，下一轮重新形成突发（真库
         15 小时里 152 成功 / 23 个 429 正是这么来的）。反向保护见
         `test_plain_failures_keep_the_long_backoff_sequence`。
+
+        **两条 429 分成两轮**：429 的处置是"停发本轮剩余远程作业"（见
+        `test_a_rate_limit_halts_the_rest_of_the_round`），所以限流作业和别的作业
+        放同一轮里，后面的根本不会被处理。这里先让凭证与格式两条各走各的，再单独
+        放限流作业 —— 三条处置互不遮挡，也顺带把"一轮里限流确实会挡住后面"钉住。
         """
         providers = {
             "auth": FakeProvider(lambda: RemoteProviderError("auth")),
@@ -221,7 +374,6 @@ class JudgmentQueueTests(unittest.TestCase):
         }
         queue = self.queue(providers)
         queue.enqueue("C-auth", "h-auth", "auth")
-        rate_id = queue.enqueue("C-rate", "h-rate", "rate")
         queue.enqueue("C-invalid", "h-invalid", "invalid")
 
         queue.run_due(limit=10)
@@ -234,11 +386,16 @@ class JudgmentQueueTests(unittest.TestCase):
             local_count = connection.execute(
                 "SELECT COUNT(*) FROM judgments WHERE provider='local'"
             ).fetchone()[0]
+        self.assertEqual(states, {"auth": "paused_auth", "invalid": "invalid_output"})
+        self.assertEqual(local_count, 1)
+
+        rate_id = queue.enqueue("C-rate", "h-rate", "rate")
+        queue.run_due(limit=10)
+
+        with self.database.connect() as connection:
             first_next = connection.execute(
                 "SELECT next_attempt_at FROM judgment_jobs WHERE job_id=?", (rate_id,)
             ).fetchone()[0]
-        self.assertEqual(states, {"auth": "paused_auth", "rate": "retry", "invalid": "invalid_output"})
-        self.assertEqual(local_count, 1)
         # 第 1 次 429：clock 08:00 + 1 分钟
         self.assertEqual(first_next, "2026-08-11T08:01:00Z")
 
@@ -476,6 +633,7 @@ class RemotePaidGovernanceTests(unittest.TestCase):
         self.database = Database(Path(self.temporary.name) / "yuanjian.db")
         self.database.initialize()
         self.clock = MutableClock()
+        reset_remote_pacer()
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -627,14 +785,27 @@ class RemotePaidGovernanceTests(unittest.TestCase):
         )
         self.assertEqual(queue.remote_budget_snapshot()["circuit_open"], ["remote"])
 
-        # 停工是**持续**的：后续几轮（paused_auth 不在到期集合里）一条都不发
+        # 停工的第一层：**冷却期内一条都不发**。
+        self.clock.value += timedelta(minutes=remote_ai.REMOTE_CIRCUIT_PROBE_MINUTES - 1)
+        queue.run_due(limit=20, remote_limit=20)
+        self.assertEqual(
+            provider.calls,
+            remote_ai.REMOTE_CIRCUIT_THRESHOLD,
+            "熔断冷却期内就放了作业出去 —— 停工形同虚设",
+        )
+
+        # 第二层：冷却期过后是**半开**，每个窗口最多一条探测，绝不重新成批发。
+        # 注意这批作业全被冻在 `paused_auth`、不在到期集合里，所以这条探测必须由
+        # `_promote_circuit_probe` 显式放一条回队列 —— 没有它，"冷却期后放一条进去
+        # 试"这条缝在"没有新簇入队"时根本不存在，真库积压只增不减（124 → 256）。
+        baseline = provider.calls
         for _ in range(3):
             self.clock.value += timedelta(minutes=30)
             queue.run_due(limit=20, remote_limit=20)
         self.assertEqual(
             provider.calls,
-            remote_ai.REMOTE_CIRCUIT_THRESHOLD,
-            "熔断后又在发请求 —— 熔断没起作用",
+            baseline + 3,
+            "熔断后每轮最多只该放一条探测，不能重新成批发（否则预算会被烧在必败的调用上）",
         )
 
     def test_one_success_closes_the_circuit_and_resumes_the_frozen_jobs(self):
@@ -723,6 +894,186 @@ class RemotePaidGovernanceTests(unittest.TestCase):
             {"auth_paused"},
         )
 
+    def test_a_rate_limit_halts_the_rest_of_the_round(self):
+        """429 之后，本轮剩下的远程作业**一条都不发**。
+
+        每多发一条就是一次白烧：它会被同一个 429 拒掉，却照样计入日预算与熔断
+        计数。真库 2026-09-23 的现场正是如此 —— 一次侥幸成功之后连发，35 秒里
+        吃下 5 个 429 然后熔断，用户看到的就是"又坏了"。
+        """
+        provider = FakeProvider(lambda: RemoteProviderError("rate_limit"))
+        queue = self.queue({"remote": provider}, daily_budget=1000)
+        for index in range(6):
+            queue.enqueue(f"C-{index}", f"h-{index}", "remote")
+
+        queue.run_due(limit=20, remote_limit=20)
+
+        self.assertEqual(provider.calls, 1, "被限流之后还在继续发请求")
+
+    def test_a_rate_limit_slows_the_pacer_and_a_success_takes_it_back(self):
+        """限流把相邻请求的间隔自适应放慢；成功再慢慢收回，而不是立刻打回基线。"""
+        provider = FakeProvider(lambda: RemoteProviderError("rate_limit"))
+        queue = self.queue({"remote": provider}, daily_budget=1000)
+        queue.enqueue("C-1", "h-1", "remote")
+        baseline = remote_ai._remote_pacer.base
+
+        queue.run_due(limit=10)
+        slowed = remote_ai._remote_pacer.interval
+        self.assertGreater(slowed, baseline, "被 429 之后间隔没有放慢")
+
+        provider.action = None
+        queue.enqueue("C-2", "h-2", "remote")
+        queue.run_due(limit=10)
+        self.assertLess(
+            remote_ai._remote_pacer.interval, slowed, "成功之后没有把间隔收回来"
+        )
+        self.assertGreaterEqual(
+            remote_ai._remote_pacer.interval, baseline, "收回得比基线还快"
+        )
+
+    def test_circuit_resume_spreads_the_backlog_instead_of_a_stampede(self):
+        """解冻**不是**把几百条一起设回"现在到期"。
+
+        真库证据：10:41:26Z 一次侥幸成功 ⇒ 熔断解除 ⇒ 256 条同时到期 ⇒ 35 秒内
+        5 条又被 429 打回 ⇒ 10:42:05 熔断**再次**打开。解冻的作业必须按序号错峰，
+        一轮只消化得掉 `REMOTE_SLOTS_PER_ROUND` 条。
+        """
+        provider = FakeProvider(lambda: RemoteProviderError("network"))
+        queue = self.queue({"remote": provider}, daily_budget=1000)
+        for index in range(8):
+            queue.enqueue(f"C-{index}", f"h-{index}", "remote")
+        queue.run_due(limit=20, remote_limit=20)
+        self.assertEqual(provider.calls, remote_ai.REMOTE_CIRCUIT_THRESHOLD)
+
+        with self.database.connect() as connection:
+            resumed = queue._close_circuit(connection, "remote", self.clock())
+            due = [
+                row["next_attempt_at"]
+                for row in connection.execute(
+                    "SELECT next_attempt_at FROM judgment_jobs ORDER BY next_attempt_at"
+                )
+            ]
+        self.assertEqual(resumed, 8)
+        self.assertEqual(len(set(due)), 8, "解冻后的作业没有错峰，会一次性全部到期")
+        self.assertEqual(due[0], "2026-08-11T08:00:00Z")
+        self.assertEqual(
+            due[-1],
+            "2026-08-11T08:03:30Z",
+            "错峰步长不是 REMOTE_CIRCUIT_RESUME_SPACING_SECONDS",
+        )
+
+    def test_a_rate_limit_circuit_says_so_instead_of_blaming_the_user(self):
+        """限流引起的熔断要带 `upstream_free_tier` 后缀，诊断页才能说对话。"""
+        provider = FakeProvider(
+            lambda: RemoteProviderError(
+                "rate_limit", 429, "free user rate limit", "upstream_free_tier"
+            )
+        )
+        queue = self.queue({"remote": provider}, daily_budget=1000)
+        for index in range(remote_ai.REMOTE_CIRCUIT_THRESHOLD):
+            queue.enqueue(f"C-{index}", f"h-{index}", "remote")
+
+        for _ in range(remote_ai.REMOTE_CIRCUIT_THRESHOLD):
+            queue.run_due(limit=20, remote_limit=20)
+
+        self.assertEqual(
+            {row["last_error"] for row in self._rows("SELECT last_error FROM judgment_jobs")},
+            {f"{remote_ai.CIRCUIT_OPEN_REASON}:upstream_free_tier"},
+        )
+        # 带后缀的那批**必须**能被解除，否则一次限流就升级成永久封死
+        with self.database.connect() as connection:
+            self.assertEqual(queue._close_circuit(connection, "remote", self.clock()), 5)
+
+    def test_a_restart_rehydrates_the_frozen_backlog_instead_of_leaving_it_dead(self):
+        """重启不能把熔断冻结的作业变成永久僵尸。
+
+        `_circuit_open` 是**进程内**状态，重启归零；而 `_close_circuit` 进门第一句
+        就是 `if not was_open: return 0`。两者相加 = 上一轮冻住的那批**永远解不了
+        冻** —— 真库 2026-09-23 就是这样从 124 条堆到 256 条的，只增不减。
+        重放时要恢复熔断状态，并留一条探测作业：冻结作业全在 `paused_auth`、
+        不在 `run_due` 的到期集合里，不专门放一条回去，半开探测就**没有对象**。
+        """
+        with self.database.connect() as connection:
+            for index in range(3):
+                connection.execute(
+                    """
+                    INSERT INTO judgment_jobs(
+                        job_id,cluster_id,evidence_hash,provider,model,status,
+                        attempts,request_chars,created_at,next_attempt_at,last_error
+                    ) VALUES (?,?,?,'remote','m','paused_auth',1,0,?,?,?)
+                    """,
+                    (
+                        f"J-{index}",
+                        f"C-{index}",
+                        f"h-{index}",
+                        "2026-08-11T08:00:00Z",
+                        "2026-08-11T08:00:00Z",
+                        remote_ai.CIRCUIT_OPEN_REASON,
+                    ),
+                )
+        provider = FakeProvider()
+        queue = self.queue({"remote": provider})
+
+        self.assertEqual(queue.rehydrate_circuit_state(), {"remote": 3})
+        self.assertEqual(queue.remote_budget_snapshot()["circuit_open"], ["remote"])
+        # 重放**只恢复状态**，不动作业：启动时把冻结作业放回 queued 会被
+        # `shutdown()` 的"退出即取消"删掉（那是有意设计），每重启一次白丢一条。
+        self.assertEqual(
+            self._count("SELECT COUNT(*) FROM judgment_jobs WHERE status='paused_auth'"),
+            3,
+        )
+        self.assertEqual(
+            self._count("SELECT COUNT(*) FROM judgment_jobs WHERE status='queued'"), 0
+        )
+
+        # 冷却期内一条都不发
+        queue.run_due(limit=10)
+        self.assertEqual(provider.calls, 0)
+
+        # 冷却期过 ⇒ 放回一条探测作业并试一次；成功一次即整批解冻
+        self.clock.value += timedelta(minutes=remote_ai.REMOTE_CIRCUIT_PROBE_MINUTES)
+        queue.run_due(limit=10)
+        self.assertEqual(provider.calls, 1, "冷却期过后没有放探测作业出去")
+        self.assertEqual(
+            self._count("SELECT COUNT(*) FROM judgment_jobs WHERE status='queued'"), 2
+        )
+        self.assertEqual(
+            self._count("SELECT COUNT(*) FROM judgment_jobs WHERE status='paused_auth'"), 0
+        )
+
+    def test_the_probe_is_not_taken_from_the_backlog_while_new_jobs_are_pending(self):
+        """有新的待发作业时，不从积压里搬一条出来当探测。
+
+        雷达随时会采到新条目、新簇入队，那些新作业本身就是天然探测对象。
+        不设这条限制的话，每次 `run_due` 都会从积压里搬一条到队首，
+        等于把冻结的积压一条条搬空 —— 而它们本该等一次成功再整批解冻。
+        """
+        queue = self.queue({"remote": FakeProvider()}, daily_budget=1000)
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO judgment_jobs(
+                    job_id,cluster_id,evidence_hash,provider,model,status,
+                    attempts,request_chars,created_at,next_attempt_at,last_error
+                ) VALUES ('J-old','C-old','h-old','remote','m','paused_auth',1,0,?,?,?)
+                """,
+                (
+                    "2026-08-11T07:00:00Z",
+                    "2026-08-11T07:00:00Z",
+                    remote_ai.CIRCUIT_OPEN_REASON,
+                ),
+            )
+        queue._circuit_open.add("remote")
+        queue._circuit_probe_at["remote"] = self.clock() - timedelta(minutes=1)
+        queue.enqueue("C-new", "h-new", "remote")
+
+        with self.database.connect() as connection:
+            self.assertEqual(queue._promote_circuit_probe(connection, self.clock()), 0)
+
+        self.assertEqual(
+            self._count("SELECT COUNT(*) FROM judgment_jobs WHERE status='paused_auth'"), 1
+        )
+
 
 class RemotePacerTests(unittest.TestCase):
     """瞬时速率闸（`REMOTE_MIN_INTERVAL_SECONDS` / `MinIntervalPacer`）。
@@ -769,6 +1120,73 @@ class RemotePacerTests(unittest.TestCase):
             60.0 / REMOTE_MIN_INTERVAL_SECONDS,
             remote_ai.AGNES_AI_RPM_LIMIT,
             "瞬时速率闸放行的每分钟请求数超过了 Agnes 的 20 RPM",
+        )
+
+    def test_a_rate_limit_penalty_slows_the_interval_and_success_recovers_it(self):
+        """自适应降速：一次 429 直接退到下限，之后成倍放慢；成功只收回一半。
+
+        实测依据（2026-09-23）：对端免费档 20 秒间隔仍有 2/3 被拒，而固定 5 秒
+        的基线在这种对端上等于**每一轮都在打 429**。所以退避必须"快"，恢复
+        必须"慢"—— 否则一次侥幸成功就把间隔打回 5 秒，下一轮又是 429。
+        """
+        pacer = MinIntervalPacer(
+            REMOTE_MIN_INTERVAL_SECONDS,
+            ceiling=remote_ai.REMOTE_MAX_INTERVAL_SECONDS,
+            escalation=remote_ai.REMOTE_INTERVAL_ESCALATION,
+            recovery=remote_ai.REMOTE_INTERVAL_RECOVERY,
+            limit_floor=remote_ai.REMOTE_RATE_LIMIT_MIN_INTERVAL_SECONDS,
+        )
+        self.assertEqual(pacer.interval, REMOTE_MIN_INTERVAL_SECONDS)
+        self.assertEqual(
+            pacer.penalize(),
+            remote_ai.REMOTE_RATE_LIMIT_MIN_INTERVAL_SECONDS,
+            "一次 429 就该退到下限，不该从基线一分一分地试",
+        )
+        self.assertEqual(pacer.penalize(), 240.0)
+        self.assertEqual(pacer.penalize(), remote_ai.REMOTE_MAX_INTERVAL_SECONDS)
+        self.assertEqual(
+            pacer.penalize(),
+            remote_ai.REMOTE_MAX_INTERVAL_SECONDS,
+            "没有上限的话间隔会一直涨到轮周期之外",
+        )
+
+        self.assertEqual(pacer.relax(), remote_ai.REMOTE_MAX_INTERVAL_SECONDS / 2)
+        for _ in range(10):
+            pacer.relax()
+        self.assertEqual(pacer.interval, REMOTE_MIN_INTERVAL_SECONDS)
+
+    def test_the_slowed_interval_is_what_actually_waits(self):
+        """惩罚必须作用到真的 `wait()` 上，不能只是一个没人读的字段。"""
+        fake = FakeTime()
+        with mock.patch.object(remote_ai, "time", fake):
+            pacer = MinIntervalPacer(
+                REMOTE_MIN_INTERVAL_SECONDS,
+                ceiling=remote_ai.REMOTE_MAX_INTERVAL_SECONDS,
+                escalation=remote_ai.REMOTE_INTERVAL_ESCALATION,
+                recovery=remote_ai.REMOTE_INTERVAL_RECOVERY,
+                limit_floor=remote_ai.REMOTE_RATE_LIMIT_MIN_INTERVAL_SECONDS,
+            )
+            pacer.wait()
+            pacer.penalize()
+            pacer.wait()
+        self.assertEqual(
+            fake.sleeps, [remote_ai.REMOTE_RATE_LIMIT_MIN_INTERVAL_SECONDS]
+        )
+
+    def test_the_round_shrinks_when_the_pacer_has_been_slowed_down(self):
+        """降速之后本轮能发几条要跟着缩，否则一轮跑几十分钟，
+        把单线程调度器里排在后面的采集与态势任务一起饿死。"""
+        affordable = remote_ai._affordable_remote_slots
+        self.assertEqual(affordable(6, 5.0), 6, "顺境下不该削调用方给的配额")
+        self.assertEqual(affordable(40, 5.0), 40, "顺境下不该削调用方给的配额")
+        self.assertEqual(
+            affordable(25, 60.0),
+            int(remote_ai.REMOTE_ROUND_TIME_BUDGET_SECONDS / 60.0),
+        )
+        self.assertEqual(
+            affordable(25, remote_ai.REMOTE_MAX_INTERVAL_SECONDS),
+            1,
+            "退到上限时至少要放一条出去，否则熔断的半开探测永远试不出来",
         )
 
     def test_the_real_http_exit_goes_through_the_pacer(self):

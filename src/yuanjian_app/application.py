@@ -233,6 +233,16 @@ class Application:
             local_provider=local_provider,
             personal_context_loader=_make_personal_context_loader(interests, forecasts),
         )
+        # 熔断状态是**进程内**的，重启就归零；不把它从库里捡回来，上一轮冻住的
+        # 那批 `paused_auth` 作业就永远解不了冻（真库 2026-09-23 一路堆到 256 条）。
+        # 捡回来只是恢复"熔断打开"这个事实 + 放一条探测作业，不会立刻重发请求。
+        try:
+            queue.rehydrate_circuit_state()
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "启动时恢复熔断遗留状态失败（冻结作业会继续留在队列里，不影响启动）",
+                exc_info=True,
+            )
         impacts = ImpactService(database, interests, forecasts)
         notifications = NotificationService(database)
         controller = CognitionController(

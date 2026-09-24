@@ -32,7 +32,7 @@ import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-from .remote_ai import REMOTE_MIN_INTERVAL_SECONDS, read_ai_setting
+from .remote_ai import CIRCUIT_OPEN_REASON, REMOTE_MIN_INTERVAL_SECONDS, read_ai_setting
 
 _logger = logging.getLogger(__name__)
 
@@ -44,6 +44,15 @@ REMOTE_FALLBACK_RECENT_MINUTES = 15
 #: 认证失败优先于熔断：前者要用户动作（重填密钥），后者只需要等对端恢复。
 _PAUSE_REASON_AUTH = "API 密钥无效或已过期，请到「设置」重新填写"
 _PAUSE_REASON_CIRCUIT = "连续多次调用失败，已暂停远程研判以免继续产生费用"
+#: 2026-09-23 新增：熔断原因里带了 `upstream_free_tier` 后缀 ⇒ 是**对端在限流**，
+#: 不是本机哪儿配错了。这两种情况用户要做的事完全相反 —— 前者什么都别动（改了
+#: 反而把好配置改坏），后者才要去重填密钥 —— 所以必须分开说。真库现场：Agnes
+#: 免费档的 429 响应体原文是 "You've reached the API rate limit for free users.
+#: Upgrade to a Token Plan..."，而界面只说"连续多次调用失败"，用户自然怀疑自己。
+_PAUSE_REASON_UPSTREAM_LIMIT = (
+    "远程服务在限流（免费额度已用满）。已自动降速，无需修改设置；"
+    "对端恢复后会自动继续"
+)
 _PAUSE_REASON_UNKNOWN = "远程研判已暂停（原因未记录，可查看任务日志）"
 
 #: 回退原因（`judgment_jobs.last_error` 是 `RemoteProviderError.kind`）→ 人话。
@@ -293,8 +302,9 @@ class DiagnosticsService:
 
         - 暂停 = 存在 `status='paused_auth'` 的远程作业（鉴权失败批量冻结与
           连续失败熔断复用同一个状态，见 `remote_ai.JudgmentQueue._open_circuit`）。
-          两种冻结靠 `last_error` 区分：`circuit_open`=熔断，
-          `auth`/`auth_paused`=密钥失效。
+          两种冻结靠 `last_error` 区分：`circuit_open` 开头=熔断，
+          `auth`/`auth_paused`=密钥失效。熔断再细分一层：带
+          `:upstream_free_tier` 后缀的是**对端限流**，其余按普通连续失败处理。
         - 回退 = 最近一次 cognition 轮的窗口内出现过
           `status='remote_error_fallback_local'` 的作业（即重试耗尽后改用本机研判）。
 
@@ -328,8 +338,14 @@ class DiagnosticsService:
         paused = bool(reasons)
         if reasons & {"auth", "auth_paused"}:
             pause_reason = _PAUSE_REASON_AUTH
-        elif "circuit_open" in reasons:
-            pause_reason = _PAUSE_REASON_CIRCUIT
+        elif any(reason.startswith(CIRCUIT_OPEN_REASON) for reason in reasons):
+            # 前缀匹配而不是等号：熔断原因可能带 `:upstream_free_tier` 后缀
+            # （对端限流），既要认出来，也要和"网络不通"区分开说 —— 两者用户
+            # 要做的事完全相反。
+            if any("upstream_free_tier" in reason for reason in reasons):
+                pause_reason = _PAUSE_REASON_UPSTREAM_LIMIT
+            else:
+                pause_reason = _PAUSE_REASON_CIRCUIT
         else:
             pause_reason = _PAUSE_REASON_UNKNOWN
 
